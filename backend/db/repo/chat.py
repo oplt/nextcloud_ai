@@ -14,7 +14,9 @@ class ChatSessionRepository(BaseRepository[ChatSession]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, ChatSession)
 
-    async def list_by_user(self, user_id: UUID | str, *, offset: int = 0, limit: int = 50) -> list[ChatSession]:
+    async def list_by_user(
+        self, user_id: UUID | str, *, offset: int = 0, limit: int = 50
+    ) -> list[ChatSession]:
         result = await self.session.execute(
             select(ChatSession)
             .where(ChatSession.user_id == user_id)
@@ -26,7 +28,9 @@ class ChatSessionRepository(BaseRepository[ChatSession]):
 
     async def get_with_messages(self, session_id: UUID | str) -> ChatSession | None:
         result = await self.session.execute(
-            select(ChatSession).options(selectinload(ChatSession.messages)).where(ChatSession.id == session_id)
+            select(ChatSession)
+            .options(selectinload(ChatSession.messages))
+            .where(ChatSession.id == session_id)
         )
         return result.scalar_one_or_none()
 

@@ -12,15 +12,23 @@ from backend.parsers.document_parser import ParsedDocument
 
 
 class IngestionPipeline:
-    def __init__(self, session: AsyncSession, embedding_client: EmbeddingClientProtocol | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        embedding_client: EmbeddingClientProtocol | None = None,
+    ) -> None:
         self.session = session
         self.embedding_client = embedding_client or EmbeddingClientFactory.create()
         self.chunk_repo = DocumentChunkRepository(session)
 
-    async def ingest_document(self, document: Document, parsed_document: ParsedDocument) -> list[DocumentChunk]:
+    async def ingest_document(
+        self, document: Document, parsed_document: ParsedDocument
+    ) -> list[DocumentChunk]:
         drafts = chunk_parsed_document(parsed_document)
         contents = [draft.content for draft in drafts]
-        embeddings = await self.embedding_client.embed_documents(contents) if contents else []
+        embeddings = (
+            await self.embedding_client.embed_documents(contents) if contents else []
+        )
 
         chunks = [
             DocumentChunk(

@@ -27,7 +27,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     env_file:
-      - ./backend/.env.example
+      - ./backend/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nextcloud_ai
       REDIS_URL: redis://redis:6379/0
@@ -51,7 +51,7 @@ services:
       context: .
       dockerfile: backend/Dockerfile
     env_file:
-      - ./backend/.env.example
+      - ./backend/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/nextcloud_ai
       REDIS_URL: redis://redis:6379/0

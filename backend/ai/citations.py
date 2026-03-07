@@ -12,6 +12,5 @@ def build_snippet(text: str, *, limit: int = 280) -> str:
     return cleaned[: limit - 3].rstrip() + "..."
 
 
-
 def distance_to_score(distance: float) -> float:
     return max(0.0, min(1.0, 1.0 - distance * 0.5))

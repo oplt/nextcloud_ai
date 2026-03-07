@@ -24,7 +24,9 @@ class AuthenticatedUser:
     auth: AuthContext
 
 
-async def get_current_identity(request: Request, session: DbSessionDep) -> AuthenticatedUser:
+async def get_current_identity(
+    request: Request, session: DbSessionDep
+) -> AuthenticatedUser:
     token = extract_access_token(request)
     if not token:
         raise AuthenticationError("Missing access token")

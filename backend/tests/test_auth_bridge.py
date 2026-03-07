@@ -23,9 +23,9 @@ class FakeReplayStore:
 async def test_bridge_token_is_single_use() -> None:
     codec = BridgeTokenCodec(
         settings=NextcloudBridgeSettings(
-            bridge_shared_secret=SecretStr('super-secret-key-for-tests-123456'),
-            bridge_issuer='nextcloud-bridge',
-            bridge_audience='fastapi-nextcloud',
+            bridge_shared_secret=SecretStr("super-secret-key-for-tests-123456"),
+            bridge_issuer="nextcloud-bridge",
+            bridge_audience="fastapi-nextcloud",
             bridge_ttl_seconds=60,
             allowed_clock_skew_seconds=0,
         ),
@@ -33,13 +33,13 @@ async def test_bridge_token_is_single_use() -> None:
     )
 
     token = codec.issue_token(
-        sub='alice',
-        username='alice',
-        nc_base_url='https://nextcloud.local',
-        groups=['staff'],
+        sub="alice",
+        username="alice",
+        nc_base_url="https://nextcloud.local",
+        groups=["staff"],
     )
 
     claims = await codec.verify_and_consume(token)
-    assert claims.sub == 'alice'
+    assert claims.sub == "alice"
     with pytest.raises(BridgeTokenError):
         await codec.verify_and_consume(token)

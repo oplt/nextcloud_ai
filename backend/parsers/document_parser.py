@@ -26,11 +26,20 @@ class UnsupportedDocumentTypeError(ValueError):
 
 
 PDF_MIME_TYPES = {"application/pdf"}
-DOCX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.wordprocessingml.document"}
-TEXT_MIME_TYPES = {"text/plain", "text/markdown", "text/x-markdown", "application/octet-stream"}
+DOCX_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+}
+TEXT_MIME_TYPES = {
+    "text/plain",
+    "text/markdown",
+    "text/x-markdown",
+    "application/octet-stream",
+}
 
 
-async def parse_document_bytes(file_name: str, mime_type: str | None, payload: bytes) -> ParsedDocument:
+async def parse_document_bytes(
+    file_name: str, mime_type: str | None, payload: bytes
+) -> ParsedDocument:
     suffix = Path(file_name).suffix.lower()
     normalized_mime = (mime_type or "").lower()
 
@@ -39,7 +48,10 @@ async def parse_document_bytes(file_name: str, mime_type: str | None, payload: b
     if suffix == ".docx" or normalized_mime in DOCX_MIME_TYPES:
         return parse_docx_bytes(payload)
     if suffix in {".txt", ".md", ".markdown"} or normalized_mime in TEXT_MIME_TYPES:
-        return parse_text_bytes(payload, markdown=suffix in {".md", ".markdown"} or "markdown" in normalized_mime)
+        return parse_text_bytes(
+            payload,
+            markdown=suffix in {".md", ".markdown"} or "markdown" in normalized_mime,
+        )
     raise UnsupportedDocumentTypeError(f"Unsupported document type for {file_name}")
 
 
@@ -51,15 +63,27 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
             if text:
                 pages.append(ParsedPage(page_number=index, text=text))
     combined = "\n\n".join(page.text for page in pages)
-    return ParsedDocument(text=combined, pages=pages, metadata={"page_count": len(pages), "parser": "pdfplumber"})
+    return ParsedDocument(
+        text=combined,
+        pages=pages,
+        metadata={"page_count": len(pages), "parser": "pdfplumber"},
+    )
 
 
 def parse_docx_bytes(payload: bytes) -> ParsedDocument:
     document = docx.Document(io.BytesIO(payload))
-    paragraphs = [paragraph.text.strip() for paragraph in document.paragraphs if paragraph.text.strip()]
+    paragraphs = [
+        paragraph.text.strip()
+        for paragraph in document.paragraphs
+        if paragraph.text.strip()
+    ]
     text = "\n".join(paragraphs)
     pages = [ParsedPage(page_number=None, text=text)] if text else []
-    return ParsedDocument(text=text, pages=pages, metadata={"paragraph_count": len(paragraphs), "parser": "python-docx"})
+    return ParsedDocument(
+        text=text,
+        pages=pages,
+        metadata={"paragraph_count": len(paragraphs), "parser": "python-docx"},
+    )
 
 
 def parse_text_bytes(payload: bytes, *, markdown: bool = False) -> ParsedDocument:
@@ -68,7 +92,11 @@ def parse_text_bytes(payload: bytes, *, markdown: bool = False) -> ParsedDocumen
     return ParsedDocument(
         text=text,
         pages=pages,
-        metadata={"parser": "plain-text", "markdown": markdown, "line_count": len(text.splitlines())},
+        metadata={
+            "parser": "plain-text",
+            "markdown": markdown,
+            "line_count": len(text.splitlines()),
+        },
     )
 
 

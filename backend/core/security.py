@@ -7,10 +7,17 @@ import jwt
 from cryptography.fernet import Fernet, InvalidToken
 from passlib.context import CryptContext
 from pydantic import BaseModel, Field
+import hashlib
+import bcrypt  # Add direct bcrypt import
 
 from backend.core.config import settings
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+# Use a more compatible CryptContext configuration
+pwd_context = CryptContext(
+    schemes=["bcrypt"],
+    deprecated="auto",
+    bcrypt__rounds=12  # Explicitly set rounds for stability
+)
 
 
 class AuthContext(BaseModel):
@@ -98,19 +105,42 @@ app_token_service = AppTokenService()
 connector_secret_cipher = ConnectorSecretCipher(settings.vault_fernet_key)
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
-
-
-
 def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+    """
+    Hash a password using bcrypt with pre-hashing to handle long passwords.
+    The SHA-256 pre-hash ensures we don't hit bcrypt's 72-byte limit.
+    """
+    # Pre-hash with SHA-256 to handle any password length
+    pre_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
 
+    # Use bcrypt directly for better control
+    salt = bcrypt.gensalt(rounds=12)
+    hashed = bcrypt.hashpw(pre_hash.encode('utf-8'), salt)
+    return hashed.decode('utf-8')
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    """
+    Verify a password against its hash.
+    """
+    pre_hash = hashlib.sha256(plain_password.encode('utf-8')).hexdigest()
+
+    try:
+        # Try bcrypt verification first
+        return bcrypt.checkpw(
+            pre_hash.encode('utf-8'),
+            hashed_password.encode('utf-8')
+        )
+    except ValueError:
+        # Fall back to passlib if bcrypt direct fails
+        return pwd_context.verify(pre_hash, hashed_password)
 
 
 def is_password_strong(password: str) -> bool:
     if len(password) < 10:
         return False
-    return any(char.isupper() for char in password) and any(char.islower() for char in password) and any(
-        char.isdigit() for char in password
+    return (
+            any(char.isupper() for char in password)
+            and any(char.islower() for char in password)
+            and any(char.isdigit() for char in password)
     )

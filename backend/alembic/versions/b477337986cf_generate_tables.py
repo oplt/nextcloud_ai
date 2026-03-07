@@ -5,6 +5,7 @@ Revises:
 Create Date: 2026-03-07 05:58:56.318269
 
 """
+
 from typing import Sequence, Union
 
 import pgvector
@@ -26,17 +27,34 @@ def upgrade() -> None:
         "roles",
         sa.Column("name", sa.String(length=100), nullable=False),
         sa.Column("description", sa.Text(), nullable=True),
-        sa.Column("is_system", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column(
+            "is_system", sa.Boolean(), nullable=False, server_default=sa.text("false")
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_roles")),
     )
     op.create_index(op.f("ix_roles_name"), "roles", ["name"], unique=True)
 
     op.create_table(
         "users",
-        sa.Column("auth_provider", sa.String(length=50), nullable=False, server_default="local"),
+        sa.Column(
+            "auth_provider",
+            sa.String(length=50),
+            nullable=False,
+            server_default="local",
+        ),
         sa.Column("external_subject", sa.String(length=255), nullable=True),
         sa.Column("username", sa.String(length=255), nullable=False),
         sa.Column("email", sa.String(length=320), nullable=True),
@@ -44,40 +62,91 @@ def upgrade() -> None:
         sa.Column("full_name", sa.String(length=255), nullable=True),
         sa.Column("nextcloud_base_url", sa.Text(), nullable=True),
         sa.Column("last_login_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
-        sa.Column("is_superuser", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column(
+            "is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")
+        ),
+        sa.Column(
+            "is_superuser",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
+        ),
         sa.Column("job_title", sa.String(length=255), nullable=True),
         sa.Column("avatar_url", sa.Text(), nullable=True),
         sa.Column("role_id", sa.UUID(), nullable=True),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["role_id"], ["roles.id"], name=op.f("fk_users_role_id_roles"), ondelete="SET NULL"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["role_id"],
+            ["roles.id"],
+            name=op.f("fk_users_role_id_roles"),
+            ondelete="SET NULL",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_users")),
-        sa.UniqueConstraint("auth_provider", "external_subject", name="uq_users_auth_provider_external_subject"),
+        sa.UniqueConstraint(
+            "auth_provider",
+            "external_subject",
+            name="uq_users_auth_provider_external_subject",
+        ),
     )
-    op.create_index(op.f("ix_users_auth_provider"), "users", ["auth_provider"], unique=False)
+    op.create_index(
+        op.f("ix_users_auth_provider"), "users", ["auth_provider"], unique=False
+    )
     op.create_index(op.f("ix_users_email"), "users", ["email"], unique=True)
-    op.create_index(op.f("ix_users_external_subject"), "users", ["external_subject"], unique=False)
+    op.create_index(
+        op.f("ix_users_external_subject"), "users", ["external_subject"], unique=False
+    )
     op.create_index(op.f("ix_users_role_id"), "users", ["role_id"], unique=False)
     op.create_index(op.f("ix_users_username"), "users", ["username"], unique=False)
 
     op.create_table(
         "connectors",
-        sa.Column("connector_type", sa.String(length=50), nullable=False, server_default="nextcloud"),
+        sa.Column(
+            "connector_type",
+            sa.String(length=50),
+            nullable=False,
+            server_default="nextcloud",
+        ),
         sa.Column("display_name", sa.String(length=255), nullable=False),
         sa.Column("base_url", sa.Text(), nullable=False),
         sa.Column("username", sa.String(length=255), nullable=False),
         sa.Column("encrypted_secret", sa.Text(), nullable=False),
         sa.Column("root_path", sa.Text(), nullable=False, server_default="/"),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
-        sa.Column("status", sa.String(length=50), nullable=False, server_default="pending"),
+        sa.Column(
+            "is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")
+        ),
+        sa.Column(
+            "status", sa.String(length=50), nullable=False, server_default="pending"
+        ),
         sa.Column("last_sync_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_error", sa.Text(), nullable=True),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_connectors")),
     )
 
@@ -93,34 +162,105 @@ def upgrade() -> None:
         sa.Column("version_tag", sa.String(length=255), nullable=True),
         sa.Column("source_url", sa.Text(), nullable=True),
         sa.Column("modified_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("sync_status", sa.String(length=50), nullable=False, server_default="pending"),
+        sa.Column(
+            "sync_status",
+            sa.String(length=50),
+            nullable=False,
+            server_default="pending",
+        ),
         sa.Column("sync_error", sa.Text(), nullable=True),
-        sa.Column("parse_status", sa.String(length=50), nullable=False, server_default="pending"),
+        sa.Column(
+            "parse_status",
+            sa.String(length=50),
+            nullable=False,
+            server_default="pending",
+        ),
         sa.Column("parse_error", sa.Text(), nullable=True),
         sa.Column("indexed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=True),
-        sa.Column("is_deleted", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column(
+            "is_deleted", sa.Boolean(), nullable=False, server_default=sa.text("false")
+        ),
         sa.Column("owner_external_id", sa.String(length=255), nullable=True),
-        sa.Column("allowed_user_ids", postgresql.ARRAY(sa.String()), nullable=False, server_default="{}"),
-        sa.Column("allowed_group_ids", postgresql.ARRAY(sa.String()), nullable=False, server_default="{}"),
-        sa.Column("public_link_enabled", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column(
+            "allowed_user_ids",
+            postgresql.ARRAY(sa.String()),
+            nullable=False,
+            server_default="{}",
+        ),
+        sa.Column(
+            "allowed_group_ids",
+            postgresql.ARRAY(sa.String()),
+            nullable=False,
+            server_default="{}",
+        ),
+        sa.Column(
+            "public_link_enabled",
+            sa.Boolean(),
+            nullable=False,
+            server_default=sa.text("false"),
+        ),
         sa.Column("acl_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["connector_id"], ["connectors.id"], name=op.f("fk_documents_connector_id_connectors"), ondelete="CASCADE"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["connector_id"],
+            ["connectors.id"],
+            name=op.f("fk_documents_connector_id_connectors"),
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_documents")),
-        sa.UniqueConstraint("connector_id", "external_id", name="uq_documents_connector_external"),
+        sa.UniqueConstraint(
+            "connector_id", "external_id", name="uq_documents_connector_external"
+        ),
     )
-    op.create_index(op.f("ix_documents_checksum"), "documents", ["checksum"], unique=False)
-    op.create_index("ix_documents_connector_file_path", "documents", ["connector_id", "file_path"], unique=False)
-    op.create_index(op.f("ix_documents_connector_id"), "documents", ["connector_id"], unique=False)
-    op.create_index("ix_documents_connector_sync_status", "documents", ["connector_id", "sync_status"], unique=False)
-    op.create_index(op.f("ix_documents_file_name"), "documents", ["file_name"], unique=False)
-    op.create_index(op.f("ix_documents_owner_external_id"), "documents", ["owner_external_id"], unique=False)
-    op.execute("CREATE INDEX IF NOT EXISTS ix_documents_allowed_user_ids_gin ON documents USING gin (allowed_user_ids)")
-    op.execute("CREATE INDEX IF NOT EXISTS ix_documents_allowed_group_ids_gin ON documents USING gin (allowed_group_ids)")
+    op.create_index(
+        op.f("ix_documents_checksum"), "documents", ["checksum"], unique=False
+    )
+    op.create_index(
+        "ix_documents_connector_file_path",
+        "documents",
+        ["connector_id", "file_path"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_documents_connector_id"), "documents", ["connector_id"], unique=False
+    )
+    op.create_index(
+        "ix_documents_connector_sync_status",
+        "documents",
+        ["connector_id", "sync_status"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_documents_file_name"), "documents", ["file_name"], unique=False
+    )
+    op.create_index(
+        op.f("ix_documents_owner_external_id"),
+        "documents",
+        ["owner_external_id"],
+        unique=False,
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_documents_allowed_user_ids_gin ON documents USING gin (allowed_user_ids)"
+    )
+    op.execute(
+        "CREATE INDEX IF NOT EXISTS ix_documents_allowed_group_ids_gin ON documents USING gin (allowed_group_ids)"
+    )
 
     op.create_table(
         "sync_jobs",
@@ -128,26 +268,61 @@ def upgrade() -> None:
         sa.Column("requested_by_id", sa.UUID(), nullable=True),
         sa.Column("job_key", sa.String(length=255), nullable=False),
         sa.Column("worker_task_id", sa.String(length=255), nullable=True),
-        sa.Column("job_type", sa.String(length=50), nullable=False, server_default="sync"),
-        sa.Column("status", sa.String(length=50), nullable=False, server_default="queued"),
+        sa.Column(
+            "job_type", sa.String(length=50), nullable=False, server_default="sync"
+        ),
+        sa.Column(
+            "status", sa.String(length=50), nullable=False, server_default="queued"
+        ),
         sa.Column("retry_count", sa.Integer(), nullable=False, server_default="0"),
         sa.Column("progress_total", sa.Integer(), nullable=True),
         sa.Column("progress_completed", sa.Integer(), nullable=True),
         sa.Column("started_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("completed_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
-        sa.Column("payload_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
-        sa.Column("result_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "payload_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
+        sa.Column(
+            "result_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["connector_id"], ["connectors.id"], name=op.f("fk_sync_jobs_connector_id_connectors"), ondelete="CASCADE"),
-        sa.ForeignKeyConstraint(["requested_by_id"], ["users.id"], name=op.f("fk_sync_jobs_requested_by_id_users"), ondelete="SET NULL"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["connector_id"],
+            ["connectors.id"],
+            name=op.f("fk_sync_jobs_connector_id_connectors"),
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["requested_by_id"],
+            ["users.id"],
+            name=op.f("fk_sync_jobs_requested_by_id_users"),
+            ondelete="SET NULL",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_sync_jobs")),
         sa.UniqueConstraint("job_key", name="uq_sync_jobs_job_key"),
     )
-    op.create_index(op.f("ix_sync_jobs_connector_id"), "sync_jobs", ["connector_id"], unique=False)
-    op.create_index(op.f("ix_sync_jobs_requested_by_id"), "sync_jobs", ["requested_by_id"], unique=False)
+    op.create_index(
+        op.f("ix_sync_jobs_connector_id"), "sync_jobs", ["connector_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_sync_jobs_requested_by_id"),
+        "sync_jobs",
+        ["requested_by_id"],
+        unique=False,
+    )
 
     op.create_table(
         "audit_logs",
@@ -156,29 +331,74 @@ def upgrade() -> None:
         sa.Column("resource_type", sa.String(length=100), nullable=False),
         sa.Column("resource_id", sa.String(length=255), nullable=True),
         sa.Column("message", sa.Text(), nullable=True),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], name=op.f("fk_audit_logs_user_id_users"), ondelete="SET NULL"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_audit_logs_user_id_users"),
+            ondelete="SET NULL",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_audit_logs")),
     )
-    op.create_index(op.f("ix_audit_logs_action"), "audit_logs", ["action"], unique=False)
-    op.create_index(op.f("ix_audit_logs_resource_id"), "audit_logs", ["resource_id"], unique=False)
-    op.create_index(op.f("ix_audit_logs_resource_type"), "audit_logs", ["resource_type"], unique=False)
-    op.create_index(op.f("ix_audit_logs_user_id"), "audit_logs", ["user_id"], unique=False)
+    op.create_index(
+        op.f("ix_audit_logs_action"), "audit_logs", ["action"], unique=False
+    )
+    op.create_index(
+        op.f("ix_audit_logs_resource_id"), "audit_logs", ["resource_id"], unique=False
+    )
+    op.create_index(
+        op.f("ix_audit_logs_resource_type"),
+        "audit_logs",
+        ["resource_type"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_audit_logs_user_id"), "audit_logs", ["user_id"], unique=False
+    )
 
     op.create_table(
         "chat_sessions",
         sa.Column("user_id", sa.UUID(), nullable=False),
         sa.Column("title", sa.String(length=255), nullable=False),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], name=op.f("fk_chat_sessions_user_id_users"), ondelete="CASCADE"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name=op.f("fk_chat_sessions_user_id_users"),
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_chat_sessions")),
     )
-    op.create_index(op.f("ix_chat_sessions_user_id"), "chat_sessions", ["user_id"], unique=False)
+    op.create_index(
+        op.f("ix_chat_sessions_user_id"), "chat_sessions", ["user_id"], unique=False
+    )
 
     op.create_table(
         "document_chunks",
@@ -192,18 +412,54 @@ def upgrade() -> None:
         sa.Column("section_title", sa.String(length=500), nullable=True),
         sa.Column("heading_path", sa.Text(), nullable=True),
         sa.Column("content_hash", sa.String(length=128), nullable=True),
-        sa.Column("embedding", pgvector.sqlalchemy.vector.VECTOR(dim=768), nullable=True),
-        sa.Column("metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "embedding", pgvector.sqlalchemy.vector.VECTOR(dim=768), nullable=True
+        ),
+        sa.Column(
+            "metadata_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["document_id"], ["documents.id"], name=op.f("fk_document_chunks_document_id_documents"), ondelete="CASCADE"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["document_id"],
+            ["documents.id"],
+            name=op.f("fk_document_chunks_document_id_documents"),
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_document_chunks")),
-        sa.UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_chunk_index"),
+        sa.UniqueConstraint(
+            "document_id", "chunk_index", name="uq_document_chunks_doc_chunk_index"
+        ),
     )
-    op.create_index(op.f("ix_document_chunks_content_hash"), "document_chunks", ["content_hash"], unique=False)
-    op.create_index(op.f("ix_document_chunks_document_id"), "document_chunks", ["document_id"], unique=False)
-    op.create_index("ix_document_chunks_document_page", "document_chunks", ["document_id", "page_number"], unique=False)
+    op.create_index(
+        op.f("ix_document_chunks_content_hash"),
+        "document_chunks",
+        ["content_hash"],
+        unique=False,
+    )
+    op.create_index(
+        op.f("ix_document_chunks_document_id"),
+        "document_chunks",
+        ["document_id"],
+        unique=False,
+    )
+    op.create_index(
+        "ix_document_chunks_document_page",
+        "document_chunks",
+        ["document_id", "page_number"],
+        unique=False,
+    )
     op.execute(
         "CREATE INDEX IF NOT EXISTS ix_document_chunks_embedding_ivfflat "
         "ON document_chunks USING ivfflat (embedding vector_cosine_ops) WITH (lists = 100)"
@@ -214,15 +470,37 @@ def upgrade() -> None:
         sa.Column("session_id", sa.UUID(), nullable=False),
         sa.Column("role", sa.String(length=50), nullable=False),
         sa.Column("content", sa.Text(), nullable=False),
-        sa.Column("citations_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+        sa.Column(
+            "citations_json", postgresql.JSONB(astext_type=sa.Text()), nullable=True
+        ),
         sa.Column("model_name", sa.String(length=255), nullable=True),
         sa.Column("id", sa.UUID(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(timezone=True), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["session_id"], ["chat_sessions.id"], name=op.f("fk_chat_messages_session_id_chat_sessions"), ondelete="CASCADE"),
+        sa.Column(
+            "created_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            server_default=sa.text("now()"),
+            nullable=False,
+        ),
+        sa.ForeignKeyConstraint(
+            ["session_id"],
+            ["chat_sessions.id"],
+            name=op.f("fk_chat_messages_session_id_chat_sessions"),
+            ondelete="CASCADE",
+        ),
         sa.PrimaryKeyConstraint("id", name=op.f("pk_chat_messages")),
     )
-    op.create_index(op.f("ix_chat_messages_session_id"), "chat_messages", ["session_id"], unique=False)
+    op.create_index(
+        op.f("ix_chat_messages_session_id"),
+        "chat_messages",
+        ["session_id"],
+        unique=False,
+    )
 
 
 def downgrade() -> None:

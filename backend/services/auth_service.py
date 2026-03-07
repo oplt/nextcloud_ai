@@ -6,7 +6,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from backend.connectors.nextcloud.schemas import Principal
 from backend.core.exceptions import AuthenticationError, ConflictError
-from backend.core.security import AuthContext, app_token_service, get_password_hash, verify_password
+from backend.core.security import (
+    AuthContext,
+    app_token_service,
+    get_password_hash,
+    verify_password,
+)
 from backend.db.models import User
 from backend.db.repo.user import UserRepository
 from backend.schemas.auth_schema import AuthSessionResponse
@@ -20,9 +25,15 @@ class AuthService:
         self.user_repo = UserRepository(session)
         self.audit = AuditService(session)
 
-    async def login_with_password(self, email: str, password: str) -> AuthSessionResponse:
+    async def login_with_password(
+        self, email: str, password: str
+    ) -> AuthSessionResponse:
         user = await self.user_repo.get_by_email(email)
-        if not user or not user.hashed_password or not verify_password(password, user.hashed_password):
+        if (
+            not user
+            or not user.hashed_password
+            or not verify_password(password, user.hashed_password)
+        ):
             raise AuthenticationError(detail="Incorrect email or password")
         if not user.is_active:
             raise AuthenticationError(detail="Inactive user")
@@ -64,7 +75,9 @@ class AuthService:
         await self.session.refresh(user)
         return user
 
-    async def sync_nextcloud_principal(self, principal: Principal) -> AuthSessionResponse:
+    async def sync_nextcloud_principal(
+        self, principal: Principal
+    ) -> AuthSessionResponse:
         user = await self.user_repo.get_by_external_subject("nextcloud", principal.sub)
         if user is None:
             user = User(

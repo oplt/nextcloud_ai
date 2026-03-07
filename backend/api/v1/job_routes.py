@@ -20,6 +20,8 @@ async def list_jobs(
 
 
 @router.get("/{job_id}", response_model=SyncJobRead)
-async def get_job(job_id: str, session: DbSessionDep, _: CurrentIdentityDep) -> SyncJobRead:
+async def get_job(
+    job_id: str, session: DbSessionDep, _: CurrentIdentityDep
+) -> SyncJobRead:
     job = await JobService(session).get_job(job_id)
     return SyncJobRead.model_validate(job)

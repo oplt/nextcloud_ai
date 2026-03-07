@@ -14,8 +14,13 @@ from backend.db.session import dispose_db
 def configure_logging() -> None:
     logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
     structlog.configure(
-        wrapper_class=structlog.make_filtering_bound_logger(getattr(logging, settings.LOG_LEVEL)),
-        processors=[structlog.processors.TimeStamper(fmt="iso"), structlog.processors.JSONRenderer()],
+        wrapper_class=structlog.make_filtering_bound_logger(
+            getattr(logging, settings.LOG_LEVEL)
+        ),
+        processors=[
+            structlog.processors.TimeStamper(fmt="iso"),
+            structlog.processors.JSONRenderer(),
+        ],
     )
 
 
@@ -23,7 +28,7 @@ configure_logging()
 app = FastAPI(title=settings.APP_NAME, debug=settings.DEBUG)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_URL],
+    allow_origins=settings.FRONTEND_URL,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

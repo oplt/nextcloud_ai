@@ -19,21 +19,30 @@ async def list_documents(
     connector_id: str | None = Query(default=None),
 ) -> list[DocumentRead]:
     repo = DocumentRepository(session)
-    documents = await repo.search(auth=identity.auth, query=query, connector_id=connector_id, limit=100)
+    documents = await repo.search(
+        auth=identity.auth, query=query, connector_id=connector_id, limit=100
+    )
     return [DocumentRead.model_validate(document) for document in documents]
 
 
 @router.get("/{document_id}", response_model=DocumentDetail)
-async def get_document(document_id: str, session: DbSessionDep, identity: CurrentIdentityDep) -> DocumentDetail:
+async def get_document(
+    document_id: str, session: DbSessionDep, identity: CurrentIdentityDep
+) -> DocumentDetail:
     repo = DocumentRepository(session)
     document = await repo.get_with_chunks(document_id)
-    if document is None or await repo.get_visible_to_auth(document_id, identity.auth) is None:
+    if (
+        document is None
+        or await repo.get_visible_to_auth(document_id, identity.auth) is None
+    ):
         raise NotFoundError("Document not found")
     return DocumentDetail.model_validate(document)
 
 
 @router.post("/{document_id}/reindex")
-async def reindex_document(document_id: str, session: DbSessionDep, identity: CurrentIdentityDep) -> dict[str, str]:
+async def reindex_document(
+    document_id: str, session: DbSessionDep, identity: CurrentIdentityDep
+) -> dict[str, str]:
     repo = DocumentRepository(session)
     document = await repo.get_visible_to_auth(document_id, identity.auth)
     if document is None:

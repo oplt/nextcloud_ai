@@ -14,7 +14,9 @@ class ConnectorRepository(BaseRepository[Connector]):
 
     async def list_active(self) -> list[Connector]:
         result = await self.session.execute(
-            select(Connector).where(Connector.is_active.is_(True)).order_by(Connector.created_at.desc())
+            select(Connector)
+            .where(Connector.is_active.is_(True))
+            .order_by(Connector.created_at.desc())
         )
         return list(result.scalars().all())
 

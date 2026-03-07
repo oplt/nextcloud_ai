@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { getCurrentUser, login as apiLogin, logout as apiLogout, storeToken } from '../api/client';
+import { getCurrentUser, getStoredToken, login as apiLogin, logout as apiLogout, storeToken } from '../api/client';
 import type { User } from '../types/api';
 
 type SessionState = {
@@ -14,6 +14,14 @@ export function useSession() {
 
   const refresh = useCallback(async () => {
     setState((current) => ({ ...current, loading: true, error: null }));
+
+    // Check if token exists before making the request
+    const token = getStoredToken();
+    if (!token) {
+      setState({ user: null, loading: false, error: null });
+      return;
+    }
+
     try {
       const user = await getCurrentUser();
       setState({ user, loading: false, error: null });

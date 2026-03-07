@@ -15,7 +15,9 @@ class NextcloudPermissionService:
     def __init__(self, client: AsyncNextcloudClient) -> None:
         self.client = client
 
-    async def build_acl_for_path(self, remote_path: str, owner_user_id: str | None = None) -> AccessControlEntry:
+    async def build_acl_for_path(
+        self, remote_path: str, owner_user_id: str | None = None
+    ) -> AccessControlEntry:
         shares = await self.client.get_shares(remote_path)
         allowed_user_ids: set[str] = set()
         allowed_group_ids: set[str] = set()
@@ -41,12 +43,17 @@ class NextcloudPermissionService:
         )
 
     @staticmethod
-    def _apply_share(share: ShareGrant, allowed_user_ids: set[str], allowed_group_ids: set[str]) -> None:
+    def _apply_share(
+        share: ShareGrant, allowed_user_ids: set[str], allowed_group_ids: set[str]
+    ) -> None:
         if share.share_type == USER_SHARE and share.share_with:
             allowed_user_ids.add(share.share_with)
             return
         if share.share_type == GROUP_SHARE and share.share_with:
             allowed_group_ids.add(share.share_with)
             return
-        if share.share_type in {FEDERATED_SHARE, CIRCLE_SHARE, TALK_CONVERSATION_SHARE} and share.share_with:
+        if (
+            share.share_type in {FEDERATED_SHARE, CIRCLE_SHARE, TALK_CONVERSATION_SHARE}
+            and share.share_with
+        ):
             allowed_group_ids.add(share.share_with)

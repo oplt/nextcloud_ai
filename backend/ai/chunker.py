@@ -32,8 +32,9 @@ class Span:
     end: int
 
 
-
-def chunk_parsed_document(parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40) -> list[ChunkDraft]:
+def chunk_parsed_document(
+    parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40
+) -> list[ChunkDraft]:
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
 
@@ -43,13 +44,33 @@ def chunk_parsed_document(parsed: ParsedDocument, *, chunk_size: int = 220, over
     pages = parsed.pages or [ParsedPage(page_number=None, text=parsed.text)]
 
     for page in pages:
-        for draft in _chunk_text(page.text, chunk_size=chunk_size, overlap=overlap, global_offset=global_offset, page_number=page.page_number, chunk_index_start=chunk_index):
+        for draft in _chunk_text(
+            page.text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            global_offset=global_offset,
+            page_number=page.page_number,
+            chunk_index_start=chunk_index,
+        ):
             drafts.append(draft)
-        chunk_index += len([d for d in drafts if d.page_number == page.page_number]) if page.page_number is not None else len(drafts) - chunk_index
+        chunk_index += (
+            len([d for d in drafts if d.page_number == page.page_number])
+            if page.page_number is not None
+            else len(drafts) - chunk_index
+        )
         global_offset += len(page.text) + 2
 
     if not drafts and parsed.text.strip():
-        drafts.extend(_chunk_text(parsed.text, chunk_size=chunk_size, overlap=overlap, global_offset=0, page_number=None, chunk_index_start=0))
+        drafts.extend(
+            _chunk_text(
+                parsed.text,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                global_offset=0,
+                page_number=None,
+                chunk_index_start=0,
+            )
+        )
 
     for idx, draft in enumerate(drafts):
         draft.chunk_index = idx
@@ -71,7 +92,9 @@ def _chunk_text(
 
     step = chunk_size - overlap
     drafts: list[ChunkDraft] = []
-    for index, word_start in enumerate(range(0, len(spans), step), start=chunk_index_start):
+    for index, word_start in enumerate(
+        range(0, len(spans), step), start=chunk_index_start
+    ):
         word_end = min(word_start + chunk_size, len(spans))
         char_start = spans[word_start].start
         char_end = spans[word_end - 1].end

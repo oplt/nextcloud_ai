@@ -12,7 +12,9 @@ router = APIRouter(prefix="/users", tags=["users"])
 
 
 @router.post("/", response_model=UserRead)
-async def create_user(payload: UserCreate, session: DbSessionDep, superuser: SuperUserDep) -> UserRead:
+async def create_user(
+    payload: UserCreate, session: DbSessionDep, superuser: SuperUserDep
+) -> UserRead:
     user = await AuthService(session).provision_local_user(
         email=payload.email,
         username=payload.username,
@@ -31,7 +33,9 @@ async def list_users(session: DbSessionDep, _: CurrentIdentityDep) -> list[UserR
 
 
 @router.get("/{user_id}", response_model=UserRead)
-async def get_user(user_id: str, session: DbSessionDep, _: CurrentIdentityDep) -> UserRead:
+async def get_user(
+    user_id: str, session: DbSessionDep, _: CurrentIdentityDep
+) -> UserRead:
     user = await UserRepository(session).get(user_id)
     if user is None:
         raise NotFoundError("User not found")
@@ -39,7 +43,9 @@ async def get_user(user_id: str, session: DbSessionDep, _: CurrentIdentityDep) -
 
 
 @router.patch("/{user_id}", response_model=UserRead)
-async def update_user(user_id: str, payload: UserUpdate, session: DbSessionDep, _: SuperUserDep) -> UserRead:
+async def update_user(
+    user_id: str, payload: UserUpdate, session: DbSessionDep, _: SuperUserDep
+) -> UserRead:
     repo = UserRepository(session)
     user = await repo.get(user_id)
     if user is None:

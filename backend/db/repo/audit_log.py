@@ -13,7 +13,9 @@ class AuditLogRepository(BaseRepository[AuditLog]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, AuditLog)
 
-    async def list_for_user(self, user_id: UUID | str, *, offset: int = 0, limit: int = 100) -> list[AuditLog]:
+    async def list_for_user(
+        self, user_id: UUID | str, *, offset: int = 0, limit: int = 100
+    ) -> list[AuditLog]:
         result = await self.session.execute(
             select(AuditLog)
             .where(AuditLog.user_id == user_id)

@@ -8,7 +8,9 @@ from backend.db.models import SyncJob
 
 class JobLifecycleService:
     @staticmethod
-    def mark_running(job: SyncJob, *, task_id: str | None = None, total: int | None = None) -> SyncJob:
+    def mark_running(
+        job: SyncJob, *, task_id: str | None = None, total: int | None = None
+    ) -> SyncJob:
         job.status = "running"
         job.worker_task_id = task_id
         job.started_at = datetime.now(timezone.utc)

@@ -25,7 +25,9 @@ class RedisReplayStore:
             raise RuntimeError(
                 "redis.asyncio is not installed. Add 'redis>=5' to your dependencies."
             )
-        self._client = redis.from_url(self.redis_url, encoding="utf-8", decode_responses=True)
+        self._client = redis.from_url(
+            self.redis_url, encoding="utf-8", decode_responses=True
+        )
 
     def _key(self, jti: str) -> str:
         digest = hashlib.sha256(jti.encode("utf-8")).hexdigest()

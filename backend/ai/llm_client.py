@@ -12,7 +12,11 @@ class LLMClientProtocol(Protocol):
 
 class StubGroundedLLMClient:
     async def generate(self, prompt: str) -> str:
-        lines = [line.strip() for line in prompt.splitlines() if line.strip().startswith("[SOURCE")]
+        lines = [
+            line.strip()
+            for line in prompt.splitlines()
+            if line.strip().startswith("[SOURCE")
+        ]
         references = ", ".join(line.split("]", 1)[0].strip("[") for line in lines[:3])
         if references:
             return f"Grounded draft answer based on {references}. Replace the stub client with Ollama for full generation."
@@ -23,5 +27,7 @@ class LLMClientFactory:
     @staticmethod
     def create() -> LLMClientProtocol:
         if settings.LLM_PROVIDER == "ollama":
-            return OllamaLLMClient(model=settings.OLLAMA_CHAT_MODEL, base_url=str(settings.OLLAMA_BASE_URL))
+            return OllamaLLMClient(
+                model=settings.OLLAMA_CHAT_MODEL, base_url=str(settings.OLLAMA_BASE_URL)
+            )
         return StubGroundedLLMClient()

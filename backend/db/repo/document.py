@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from uuid import UUID
 
-from sqlalchemy import Select, and_, func, or_, select, true, update
+from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
 
@@ -16,20 +16,31 @@ class DocumentRepository(BaseRepository[Document]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, Document)
 
-    async def get_by_connector_and_external_id(self, connector_id: UUID, external_id: str) -> Document | None:
+    async def get_by_connector_and_external_id(
+        self, connector_id: UUID, external_id: str
+    ) -> Document | None:
         result = await self.session.execute(
-            select(Document).where(Document.connector_id == connector_id, Document.external_id == external_id)
+            select(Document).where(
+                Document.connector_id == connector_id,
+                Document.external_id == external_id,
+            )
         )
         return result.scalar_one_or_none()
 
     async def get_with_chunks(self, document_id: UUID | str) -> Document | None:
         result = await self.session.execute(
-            select(Document).options(selectinload(Document.chunks)).where(Document.id == document_id)
+            select(Document)
+            .options(selectinload(Document.chunks))
+            .where(Document.id == document_id)
         )
         return result.scalar_one_or_none()
 
-    async def get_visible_to_auth(self, document_id: UUID | str, auth: AuthContext) -> Document | None:
-        stmt = select(Document).where(Document.id == document_id, self.visibility_clause(auth))
+    async def get_visible_to_auth(
+        self, document_id: UUID | str, auth: AuthContext
+    ) -> Document | None:
+        stmt = select(Document).where(
+            Document.id == document_id, self.visibility_clause(auth)
+        )
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -57,25 +68,39 @@ class DocumentRepository(BaseRepository[Document]):
             filters.append(Document.is_deleted.is_(False))
         if query:
             like = f"%{query}%"
-            filters.append(or_(Document.file_name.ilike(like), Document.file_path.ilike(like)))
+            filters.append(
+                or_(Document.file_name.ilike(like), Document.file_path.ilike(like))
+            )
         if auth is not None:
             filters.append(self.visibility_clause(auth))
         if filters:
             stmt = stmt.where(and_(*filters))
-        result = await self.session.execute(stmt.order_by(Document.updated_at.desc()).offset(offset).limit(limit))
+        result = await self.session.execute(
+            stmt.order_by(Document.updated_at.desc()).offset(offset).limit(limit)
+        )
         return list(result.scalars().all())
 
-    async def mark_deleted_missing_from_external_ids(self, *, connector_id: UUID, external_ids: Sequence[str]) -> int:
+    async def mark_deleted_missing_from_external_ids(
+        self, *, connector_id: UUID, external_ids: Sequence[str]
+    ) -> int:
         stmt = (
             update(Document)
-            .where(Document.connector_id == connector_id, Document.external_id.not_in(list(external_ids)), Document.is_deleted.is_(False))
+            .where(
+                Document.connector_id == connector_id,
+                Document.external_id.not_in(list(external_ids)),
+                Document.is_deleted.is_(False),
+            )
             .values(is_deleted=True, sync_status="deleted")
         )
         result = await self.session.execute(stmt)
         return int(result.rowcount or 0)
 
     async def count_chunks(self, document_id: UUID | str) -> int:
-        result = await self.session.execute(select(func.count()).select_from(DocumentChunk).where(DocumentChunk.document_id == document_id))
+        result = await self.session.execute(
+            select(func.count())
+            .select_from(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+        )
         return int(result.scalar_one())
 
     @staticmethod
@@ -85,7 +110,9 @@ class DocumentRepository(BaseRepository[Document]):
         visibility = [Document.public_link_enabled.is_(True)]
         if auth.external_subject:
             visibility.append(Document.owner_external_id == auth.external_subject)
-            visibility.append(Document.allowed_user_ids.overlap([auth.external_subject]))
+            visibility.append(
+                Document.allowed_user_ids.overlap([auth.external_subject])
+            )
         if auth.groups:
             visibility.append(Document.allowed_group_ids.overlap(auth.groups))
         return and_(Document.is_deleted.is_(False), or_(*visibility))
@@ -95,18 +122,33 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, DocumentChunk)
 
-    async def replace_for_document(self, document_id: UUID | str, chunks: Sequence[DocumentChunk]) -> None:
-        await self.session.execute(update(Document).where(Document.id == document_id).values(parse_status="indexing"))
-        existing = await self.list_by_document(document_id)
-        for chunk in existing:
-            await self.session.delete(chunk)
-        for chunk in chunks:
-            self.session.add(chunk)
+    async def delete_for_document(
+        self, document_id: UUID | str, *, flush: bool = False
+    ) -> int:
+        result = await self.session.execute(
+            delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
+        )
+        if flush:
+            await self.session.flush()
+        return int(result.rowcount or 0)
+
+    async def replace_for_document(
+        self, document_id: UUID | str, chunks: Sequence[DocumentChunk]
+    ) -> None:
+        await self.session.execute(
+            update(Document)
+            .where(Document.id == document_id)
+            .values(parse_status="indexing")
+        )
+        await self.delete_for_document(document_id)
+        self.session.add_all(list(chunks))
         await self.session.flush()
 
     async def list_by_document(self, document_id: UUID | str) -> list[DocumentChunk]:
         result = await self.session.execute(
-            select(DocumentChunk).where(DocumentChunk.document_id == document_id).order_by(DocumentChunk.chunk_index.asc())
+            select(DocumentChunk)
+            .where(DocumentChunk.document_id == document_id)
+            .order_by(DocumentChunk.chunk_index.asc())
         )
         return list(result.scalars().all())
 
@@ -123,7 +165,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             select(DocumentChunk, distance)
             .join(DocumentChunk.document)
             .options(contains_eager(DocumentChunk.document))
-            .where(DocumentChunk.embedding.is_not(None), DocumentRepository.visibility_clause(auth))
+            .where(
+                DocumentChunk.embedding.is_not(None),
+                DocumentRepository.visibility_clause(auth),
+            )
             .order_by(distance.asc())
             .limit(limit)
         )

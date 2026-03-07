@@ -45,7 +45,9 @@ class JobService:
         await self.session.refresh(job)
         return job
 
-    async def list_jobs(self, connector_id: str | None = None, *, limit: int = 100) -> list[SyncJob]:
+    async def list_jobs(
+        self, connector_id: str | None = None, *, limit: int = 100
+    ) -> list[SyncJob]:
         if connector_id:
             return await self.repo.list_by_connector(connector_id, limit=limit)
         return await self.repo.list(limit=limit, order_by=SyncJob.created_at.desc())

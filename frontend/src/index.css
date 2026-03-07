@@ -174,10 +174,24 @@ p {
 
 .flash-banner,
 .error-banner,
-.status-inline {
+.status-inline,
+.login-help {
   border-radius: 14px;
   padding: 10px 14px;
   background: rgba(141, 77, 44, 0.1);
+}
+
+.login-help {
+  margin: 16px 0;
+  color: var(--muted);
+  text-align: left;
+  line-height: 1.5;
+}
+
+.login-help code {
+  background: rgba(28, 27, 23, 0.07);
+  border-radius: 8px;
+  padding: 2px 6px;
 }
 
 .error-banner {

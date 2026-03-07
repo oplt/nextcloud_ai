@@ -5,11 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from backend.connectors.nextcloud.client import AsyncNextcloudClient
 from backend.connectors.nextcloud.config import NextcloudConnectorConfig
 from backend.core.config import settings
-from backend.core.exceptions import ConflictError, NotFoundError
+from backend.core.exceptions import NotFoundError
 from backend.core.security import connector_secret_cipher
 from backend.db.models import Connector, User
 from backend.db.repo.connector import ConnectorRepository
-from backend.schemas.connector_schema import ConnectorCreate, ConnectorTestResponse, ConnectorUpdate
+from backend.schemas.connector_schema import (
+    ConnectorCreate,
+    ConnectorTestResponse,
+    ConnectorUpdate,
+)
 from backend.services.audit_service import AuditService
 
 
@@ -19,7 +23,9 @@ class ConnectorService:
         self.repo = ConnectorRepository(session)
         self.audit = AuditService(session)
 
-    async def create_connector(self, payload: ConnectorCreate, actor: User) -> Connector:
+    async def create_connector(
+        self, payload: ConnectorCreate, actor: User
+    ) -> Connector:
         connector = Connector(
             connector_type="nextcloud",
             display_name=payload.display_name,
@@ -28,7 +34,11 @@ class ConnectorService:
             encrypted_secret=connector_secret_cipher.encrypt(payload.secret),
             root_path=payload.root_path,
             status="pending",
-            metadata_json={"verify_tls": settings.NEXTCLOUD_VERIFY_TLS if payload.verify_tls is None else payload.verify_tls},
+            metadata_json={
+                "verify_tls": settings.NEXTCLOUD_VERIFY_TLS
+                if payload.verify_tls is None
+                else payload.verify_tls
+            },
         )
         await self.repo.add(connector, flush=True)
         await self.audit.log(
@@ -42,14 +52,18 @@ class ConnectorService:
         await self.session.refresh(connector)
         return connector
 
-    async def update_connector(self, connector_id: str, payload: ConnectorUpdate, actor: User) -> Connector:
+    async def update_connector(
+        self, connector_id: str, payload: ConnectorUpdate, actor: User
+    ) -> Connector:
         connector = await self.repo.get(connector_id)
         if connector is None:
             raise NotFoundError("Connector not found")
 
         data = payload.model_dump(exclude_unset=True)
         if "secret" in data and data["secret"]:
-            connector.encrypted_secret = connector_secret_cipher.encrypt(data.pop("secret"))
+            connector.encrypted_secret = connector_secret_cipher.encrypt(
+                data.pop("secret")
+            )
         if "verify_tls" in data:
             metadata = dict(connector.metadata_json or {})
             metadata["verify_tls"] = data.pop("verify_tls")

@@ -21,11 +21,17 @@ router = APIRouter(prefix="/auth/nextcloud", tags=["nextcloud-auth"])
 @lru_cache(maxsize=1)
 def get_bridge_codec() -> BridgeTokenCodec:
     bridge_settings = get_nextcloud_settings()
-    replay_store = RedisReplayStore(redis_url=bridge_settings.bridge_redis_url) if bridge_settings.bridge_redis_url else None
+    replay_store = (
+        RedisReplayStore(redis_url=bridge_settings.bridge_redis_url)
+        if bridge_settings.bridge_redis_url
+        else None
+    )
     return BridgeTokenCodec(settings=bridge_settings, replay_store=replay_store)
 
 
-async def _exchange_principal(session: DbSessionDep, principal: Principal) -> AuthSessionResponse:
+async def _exchange_principal(
+    session: DbSessionDep, principal: Principal
+) -> AuthSessionResponse:
     return await AuthService(session).sync_nextcloud_principal(principal)
 
 
@@ -39,7 +45,9 @@ async def exchange_nextcloud_bridge_token(
     try:
         claims = await codec.verify_and_consume(payload.bridge_token)
     except BridgeTokenError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
+        ) from exc
 
     auth_session = await _exchange_principal(
         session,
@@ -74,7 +82,9 @@ async def consume_nextcloud_bridge_token(
     try:
         claims = await codec.verify_and_consume(bridge_token)
     except BridgeTokenError as exc:
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)
+        ) from exc
 
     auth_session = await _exchange_principal(
         session,
@@ -87,7 +97,9 @@ async def consume_nextcloud_bridge_token(
             nc_base_url=claims.nc_base_url,
         ),
     )
-    redirect = RedirectResponse(url=settings.FRONTEND_URL, status_code=status.HTTP_303_SEE_OTHER)
+    redirect = RedirectResponse(
+        url=settings.FRONTEND_URL, status_code=status.HTTP_303_SEE_OTHER
+    )
     redirect.set_cookie(
         key=settings.AUTH_COOKIE_NAME,
         value=auth_session.access_token,

@@ -18,11 +18,16 @@ class UserRepository(BaseRepository[User]):
         )
         return result.scalar_one_or_none()
 
-    async def get_by_external_subject(self, auth_provider: str, external_subject: str) -> User | None:
+    async def get_by_external_subject(
+        self, auth_provider: str, external_subject: str
+    ) -> User | None:
         result = await self.session.execute(
             select(User)
             .options(selectinload(User.role))
-            .where(User.auth_provider == auth_provider, User.external_subject == external_subject)
+            .where(
+                User.auth_provider == auth_provider,
+                User.external_subject == external_subject,
+            )
         )
         return result.scalar_one_or_none()
 
@@ -38,10 +43,21 @@ class UserRepository(BaseRepository[User]):
         return list(result.scalars().all())
 
     async def search(self, query: str | None = None, *, limit: int = 100) -> list[User]:
-        stmt = select(User).options(selectinload(User.role)).order_by(User.created_at.desc()).limit(limit)
+        stmt = (
+            select(User)
+            .options(selectinload(User.role))
+            .order_by(User.created_at.desc())
+            .limit(limit)
+        )
         if query:
             like = f"%{query}%"
-            stmt = stmt.where(or_(User.email.ilike(like), User.username.ilike(like), User.full_name.ilike(like)))
+            stmt = stmt.where(
+                or_(
+                    User.email.ilike(like),
+                    User.username.ilike(like),
+                    User.full_name.ilike(like),
+                )
+            )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())
 

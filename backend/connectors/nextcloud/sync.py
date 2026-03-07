@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
 
 from backend.connectors.nextcloud.client import AsyncNextcloudClient
@@ -8,22 +9,36 @@ from backend.connectors.nextcloud.schemas import DavNode, SyncBatchItem
 
 
 class NextcloudSyncService:
-    def __init__(self, client: AsyncNextcloudClient, permissions: NextcloudPermissionService) -> None:
+    def __init__(
+        self,
+        client: AsyncNextcloudClient,
+        permissions: NextcloudPermissionService,
+        *,
+        acl_concurrency: int = 8,
+    ) -> None:
         self.client = client
         self.permissions = permissions
+        self.acl_concurrency = max(1, acl_concurrency)
 
     async def crawl(self, root_path: str = "/") -> AsyncIterator[SyncBatchItem]:
-        async for node in self._walk(root_path):
-            if node.is_directory:
-                continue
-            acl = await self.permissions.build_acl_for_path(node.path)
-            yield SyncBatchItem(node=node, acl=acl)
+        for item in await self.snapshot(root_path):
+            yield item
 
     async def snapshot(self, root_path: str = "/") -> list[SyncBatchItem]:
-        items: list[SyncBatchItem] = []
-        async for item in self.crawl(root_path):
-            items.append(item)
-        return items
+        nodes = [node async for node in self._walk(root_path) if not node.is_directory]
+        if not nodes:
+            return []
+
+        semaphore = asyncio.Semaphore(self.acl_concurrency)
+
+        async def build_item(node: DavNode) -> SyncBatchItem:
+            async with semaphore:
+                acl = await self.permissions.build_acl_for_path(
+                    node.path, owner_user_id=self.client.config.username
+                )
+            return SyncBatchItem(node=node, acl=acl)
+
+        return list(await asyncio.gather(*(build_item(node) for node in nodes)))
 
     async def fetch_file_bytes(self, remote_path: str) -> bytes:
         return await self.client.download_file(remote_path)

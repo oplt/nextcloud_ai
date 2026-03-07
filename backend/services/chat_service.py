@@ -27,7 +27,9 @@ class ChatService:
         self.session_repo = ChatSessionRepository(session)
         self.message_repo = ChatMessageRepository(session)
 
-    async def _get_or_create_session(self, *, user: User, request: ChatAskRequest) -> ChatSession:
+    async def _get_or_create_session(
+        self, *, user: User, request: ChatAskRequest
+    ) -> ChatSession:
         if request.session_id:
             existing = await self.session_repo.get(request.session_id)
             if existing is None:
@@ -36,11 +38,15 @@ class ChatService:
                 raise AuthorizationError("Chat session does not belong to this user")
             return existing
 
-        chat_session = ChatSession(user_id=user.id, title=request.question.strip()[:80] or "New chat")
+        chat_session = ChatSession(
+            user_id=user.id, title=request.question.strip()[:80] or "New chat"
+        )
         await self.session_repo.add(chat_session, flush=True)
         return chat_session
 
-    async def ask(self, *, user: User, auth: AuthContext, request: ChatAskRequest) -> ChatAskResponse:
+    async def ask(
+        self, *, user: User, auth: AuthContext, request: ChatAskRequest
+    ) -> ChatAskResponse:
         chat_session = await self._get_or_create_session(user=user, request=request)
         retrieval = await self.retrieval_service.retrieve(
             question=request.question,
@@ -48,15 +54,21 @@ class ChatService:
             top_k=request.top_k,
             document_ids=request.document_ids,
         )
-        prompt = build_grounded_prompt(question=request.question, sources=retrieval.sources)
+        prompt = build_grounded_prompt(
+            question=request.question, sources=retrieval.sources
+        )
         answer = await self.llm_client.generate(prompt)
 
-        user_message = ChatMessage(session_id=chat_session.id, role="user", content=request.question)
+        user_message = ChatMessage(
+            session_id=chat_session.id, role="user", content=request.question
+        )
         assistant_message = ChatMessage(
             session_id=chat_session.id,
             role="assistant",
             content=answer,
-            citations_json=[source.model_dump(mode="json") for source in retrieval.sources],
+            citations_json=[
+                source.model_dump(mode="json") for source in retrieval.sources
+            ],
             model_name=self.llm_client.__class__.__name__,
         )
         await self.message_repo.add(user_message)

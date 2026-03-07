@@ -19,7 +19,11 @@ class RetrievalResult:
 
 
 class RetrievalService:
-    def __init__(self, session: AsyncSession, embedding_client: EmbeddingClientProtocol | None = None) -> None:
+    def __init__(
+        self,
+        session: AsyncSession,
+        embedding_client: EmbeddingClientProtocol | None = None,
+    ) -> None:
         self.session = session
         self.embedding_client = embedding_client or EmbeddingClientFactory.create()
         self.chunk_repo = DocumentChunkRepository(session)

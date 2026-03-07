@@ -13,7 +13,9 @@ from backend.connectors.nextcloud.schemas import BridgeTokenClaims
 
 
 class BridgeTokenCodec:
-    def __init__(self, settings: NextcloudBridgeSettings, replay_store: ReplayStore | None = None) -> None:
+    def __init__(
+        self, settings: NextcloudBridgeSettings, replay_store: ReplayStore | None = None
+    ) -> None:
         self.settings = settings
         self.replay_store = replay_store
 
@@ -66,7 +68,9 @@ class BridgeTokenCodec:
         claims = BridgeTokenClaims.model_validate(decoded)
         if self.replay_store is not None:
             ttl = max(claims.exp - int(time.time()), 1)
-            accepted = await self.replay_store.mark_consumed(claims.jti, ttl_seconds=ttl)
+            accepted = await self.replay_store.mark_consumed(
+                claims.jti, ttl_seconds=ttl
+            )
             if not accepted:
                 raise BridgeTokenError("Replay detected for bridge token")
         return claims

@@ -15,9 +15,9 @@ async def test_retrieval_formats_sources_and_skips_deleted_documents() -> None:
     visible_document = Document(
         id=uuid4(),
         connector_id=uuid4(),
-        external_id='doc-1',
-        file_path='/policies/leave.md',
-        file_name='leave.md',
+        external_id="doc-1",
+        file_path="/policies/leave.md",
+        file_name="leave.md",
         allowed_user_ids=[],
         allowed_group_ids=[],
         is_deleted=False,
@@ -25,9 +25,9 @@ async def test_retrieval_formats_sources_and_skips_deleted_documents() -> None:
     hidden_document = Document(
         id=uuid4(),
         connector_id=uuid4(),
-        external_id='doc-2',
-        file_path='/deleted.md',
-        file_name='deleted.md',
+        external_id="doc-2",
+        file_path="/deleted.md",
+        file_name="deleted.md",
         allowed_user_ids=[],
         allowed_group_ids=[],
         is_deleted=True,
@@ -36,14 +36,14 @@ async def test_retrieval_formats_sources_and_skips_deleted_documents() -> None:
         id=uuid4(),
         document_id=visible_document.id,
         chunk_index=0,
-        content='Employees receive 25 days of leave.',
+        content="Employees receive 25 days of leave.",
     )
     visible_chunk.document = visible_document
     hidden_chunk = DocumentChunk(
         id=uuid4(),
         document_id=hidden_document.id,
         chunk_index=0,
-        content='Old deleted content.',
+        content="Old deleted content.",
     )
     hidden_chunk.document = hidden_document
 
@@ -54,11 +54,16 @@ async def test_retrieval_formats_sources_and_skips_deleted_documents() -> None:
 
     service.chunk_repo = SimpleNamespace(semantic_search=fake_semantic_search)
     result = await service.retrieve(
-        question='How much leave do employees receive?',
-        auth=AuthContext(user_id='1', auth_provider='nextcloud', external_subject='alice', username='alice'),
+        question="How much leave do employees receive?",
+        auth=AuthContext(
+            user_id="1",
+            auth_provider="nextcloud",
+            external_subject="alice",
+            username="alice",
+        ),
         top_k=4,
     )
 
     assert len(result.sources) == 1
-    assert result.sources[0].file_name == 'leave.md'
+    assert result.sources[0].file_name == "leave.md"
     assert result.sources[0].score > 0.9

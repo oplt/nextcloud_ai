@@ -8,12 +8,20 @@ from backend.services.nextcloud_sync_service import NextcloudConnectorSyncServic
 from backend.workers.celery_app import celery_app
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
 def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
     return asyncio.run(_run_connector_sync_job(job_id=job_id, task_id=self.request.id))
 
 
-async def _run_connector_sync_job(*, job_id: str, task_id: str | None) -> dict[str, int]:
+async def _run_connector_sync_job(
+    *, job_id: str, task_id: str | None
+) -> dict[str, int]:
     async with AsyncSessionLocal() as session:
         from backend.db.repo.sync_job import SyncJobRepository
 
@@ -36,7 +44,13 @@ async def _run_connector_sync_job(*, job_id: str, task_id: str | None) -> dict[s
         return result
 
 
-@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
 def run_document_reindex_task(self, document_id: str) -> str:
     return asyncio.run(_run_document_reindex_task(document_id=document_id))
 
@@ -51,7 +65,6 @@ async def _run_document_reindex_task(*, document_id: str) -> str:
 
 def enqueue_connector_sync_job(job_id: str):
     return run_connector_sync_job.delay(job_id)
-
 
 
 def enqueue_document_reindex(document_id: str):

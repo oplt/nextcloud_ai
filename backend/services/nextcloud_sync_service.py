@@ -25,7 +25,13 @@ class NextcloudConnectorSyncService:
         self.audit = AuditService(session)
         self.ingestion = DocumentIngestionService(session)
 
-    async def sync_connector(self, connector: Connector, *, full_reindex: bool = False, job: SyncJob | None = None) -> dict[str, int]:
+    async def sync_connector(
+        self,
+        connector: Connector,
+        *,
+        full_reindex: bool = False,
+        job: SyncJob | None = None,
+    ) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         config = self.connector_service.build_config(connector)
         client = AsyncNextcloudClient(config)
@@ -48,8 +54,12 @@ class NextcloudConnectorSyncService:
             for item in items:
                 discovered += 1
                 seen_external_ids.append(item.node.file_id or item.node.path)
-                document = await self._upsert_document(connector, item)
-                should_reindex = full_reindex or self._document_needs_reindex(document, item.node.etag)
+                document, previous_version_tag = await self._upsert_document(
+                    connector, item
+                )
+                should_reindex = full_reindex or self._document_needs_reindex(
+                    document, previous_version_tag, item.node.etag
+                )
                 if should_reindex:
                     try:
                         payload = await sync_service.fetch_file_bytes(item.node.path)
@@ -81,7 +91,12 @@ class NextcloudConnectorSyncService:
                     },
                 )
             await self.session.commit()
-            return {"discovered": discovered, "indexed": indexed, "failed": failed, "deleted": deleted}
+            return {
+                "discovered": discovered,
+                "indexed": indexed,
+                "failed": failed,
+                "deleted": deleted,
+            }
         except Exception as exc:
             connector.status = "error"
             connector.last_error = str(exc)
@@ -92,12 +107,24 @@ class NextcloudConnectorSyncService:
         finally:
             await client.aclose()
 
-    async def _upsert_document(self, connector: Connector, item) -> Document:
+    async def _upsert_document(
+        self, connector: Connector, item
+    ) -> tuple[Document, str | None]:
         external_id = item.node.file_id or item.node.path
-        document = await self.document_repo.get_by_connector_and_external_id(connector.id, external_id)
+        document = await self.document_repo.get_by_connector_and_external_id(
+            connector.id, external_id
+        )
+        previous_version_tag: str | None = None
         if document is None:
-            document = Document(connector_id=connector.id, external_id=external_id, file_path=item.node.path, file_name=item.node.path.split("/")[-1])
+            document = Document(
+                connector_id=connector.id,
+                external_id=external_id,
+                file_path=item.node.path,
+                file_name=item.node.path.split("/")[-1],
+            )
             await self.document_repo.add(document, flush=True)
+        else:
+            previous_version_tag = document.version_tag
 
         document.file_path = item.node.path
         document.file_name = item.node.path.split("/")[-1]
@@ -117,12 +144,14 @@ class NextcloudConnectorSyncService:
         document.public_link_enabled = item.acl.public_link_enabled
         document.acl_json = item.acl.model_dump(mode="json")
         document.metadata_json = {"href": item.node.href}
-        return document
+        return document, previous_version_tag
 
     @staticmethod
-    def _document_needs_reindex(document: Document, new_etag: str | None) -> bool:
+    def _document_needs_reindex(
+        document: Document, previous_version_tag: str | None, new_etag: str | None
+    ) -> bool:
         if document.indexed_at is None:
             return True
         if document.parse_status in {"failed", "pending", "unsupported"}:
             return True
-        return document.version_tag != new_etag
+        return previous_version_tag != new_etag

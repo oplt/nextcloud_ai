@@ -11,7 +11,10 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from backend.connectors.nextcloud.config import NextcloudConnectorConfig
-from backend.connectors.nextcloud.exceptions import NextcloudAPIError, NextcloudAuthenticationError
+from backend.connectors.nextcloud.exceptions import (
+    NextcloudAPIError,
+    NextcloudAuthenticationError,
+)
 from backend.connectors.nextcloud.schemas import DavNode, ShareGrant
 
 DAV_NS = "DAV:"
@@ -42,8 +45,12 @@ class AsyncNextcloudClient:
     async def verify_credentials(self) -> None:
         response = await self._client.get("ocs/v2.php/cloud/user?format=json")
         if response.status_code in {401, 403}:
-            raise NextcloudAuthenticationError("Nextcloud connector authentication failed")
-        self._raise_for_status(response, "Could not verify Nextcloud connector credentials")
+            raise NextcloudAuthenticationError(
+                "Nextcloud connector authentication failed"
+            )
+        self._raise_for_status(
+            response, "Could not verify Nextcloud connector credentials"
+        )
 
     async def list_directory(self, remote_path: str, depth: int = 1) -> list[DavNode]:
         dav_path = self._dav_path(remote_path)
@@ -76,7 +83,11 @@ class AsyncNextcloudClient:
     async def get_shares(self, remote_path: str) -> list[ShareGrant]:
         response = await self._client.get(
             "ocs/v2.php/apps/files_sharing/api/v1/shares",
-            params={"format": "json", "path": self._normalize_path(remote_path), "reshares": "true"},
+            params={
+                "format": "json",
+                "path": self._normalize_path(remote_path),
+                "reshares": "true",
+            },
         )
         self._raise_for_status(response, f"Could not fetch shares for {remote_path}")
         payload = response.json()
@@ -85,7 +96,9 @@ class AsyncNextcloudClient:
 
     def _dav_path(self, remote_path: str) -> str:
         normalized = self._normalize_path(remote_path)
-        joined = posixpath.join("remote.php/dav/files", self.config.username, normalized.lstrip("/"))
+        joined = posixpath.join(
+            "remote.php/dav/files", self.config.username, normalized.lstrip("/")
+        )
         return quote(joined)
 
     @staticmethod
@@ -114,12 +127,19 @@ class AsyncNextcloudClient:
                 continue
 
             resourcetype = prop.find("d:resourcetype", NS)
-            is_directory = resourcetype is not None and resourcetype.find("d:collection", NS) is not None
+            is_directory = (
+                resourcetype is not None
+                and resourcetype.find("d:collection", NS) is not None
+            )
             file_id = prop.findtext("oc:fileid", default=None, namespaces=NS)
             etag = prop.findtext("d:getetag", default=None, namespaces=NS)
-            content_type = prop.findtext("d:getcontenttype", default=None, namespaces=NS)
+            content_type = prop.findtext(
+                "d:getcontenttype", default=None, namespaces=NS
+            )
             size_text = prop.findtext("d:getcontentlength", default=None, namespaces=NS)
-            last_modified_text = prop.findtext("d:getlastmodified", default=None, namespaces=NS)
+            last_modified_text = prop.findtext(
+                "d:getlastmodified", default=None, namespaces=NS
+            )
             path = self._href_to_path(href)
             size_bytes = int(size_text) if size_text and size_text.isdigit() else None
             last_modified = self._parse_http_datetime(last_modified_text)
@@ -167,4 +187,6 @@ class AsyncNextcloudClient:
                 details = response.json()
             except ValueError:
                 details = response.text[:500]
-            raise NextcloudAPIError(f"{message}. status={response.status_code} details={details}") from exc
+            raise NextcloudAPIError(
+                f"{message}. status={response.status_code} details={details}"
+            ) from exc

@@ -4,7 +4,7 @@ import base64
 import hashlib
 from functools import cached_property
 from pathlib import Path
-from typing import Literal
+from typing import Literal, List
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "test", "staging", "production"] = "development"
     DEBUG: bool = True
     API_V1_PREFIX: str = "/api/v1"
-    FRONTEND_URL: str = "http://localhost:5173"
+    FRONTEND_URL:List[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"])
 
     DATABASE_URL: str
     SQL_ECHO: bool = False
@@ -80,10 +80,10 @@ class Settings(BaseSettings):
         make_url(normalized)
         return normalized
 
-    @field_validator("FRONTEND_URL")
+    @field_validator("FRONTEND_URL", mode="after")
     @classmethod
-    def strip_frontend_url(cls, value: str) -> str:
-        return value.rstrip("/")
+    def strip_frontend_urls(cls, values: List[str]) -> List[str]:
+        return [url.rstrip("/") for url in values]
 
     @cached_property
     def effective_celery_broker_url(self) -> str:
@@ -99,7 +99,11 @@ class Settings(BaseSettings):
 
     @cached_property
     def vault_fernet_key(self) -> bytes:
-        raw = (self.SETTINGS_VAULT_KEY or self.JWT_SECRET_KEY).get_secret_value().encode("utf-8")
+        raw = (
+            (self.SETTINGS_VAULT_KEY or self.JWT_SECRET_KEY)
+            .get_secret_value()
+            .encode("utf-8")
+        )
         digest = hashlib.sha256(raw).digest()
         return base64.urlsafe_b64encode(digest)
 

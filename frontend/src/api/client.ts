@@ -49,6 +49,11 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
+    // For auth/me endpoint with 401, return a special error
+    if (path === '/auth/me' && response.status === 401) {
+      throw new Error('UNAUTHORIZED');
+    }
+
     const message = await response.text().catch(() => `Request failed with ${response.status}`);
     throw new Error(message || `Request failed with ${response.status}`);
   }
@@ -97,11 +102,12 @@ export async function syncConnector(connectorId: string, fullReindex = false): P
 }
 
 export async function listDocuments(query?: string): Promise<DocumentSummary[]> {
-  const url = new URL(`${API_BASE}/documents`);
+  const params = new URLSearchParams();
   if (query) {
-    url.searchParams.set('query', query);
+    params.set('query', query);
   }
-  return request<DocumentSummary[]>(url.pathname + url.search);
+  const suffix = params.toString();
+  return request<DocumentSummary[]>(`/documents${suffix ? `?${suffix}` : ''}`);
 }
 
 export async function getDocument(documentId: string): Promise<DocumentDetail> {
