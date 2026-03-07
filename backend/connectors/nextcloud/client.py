@@ -10,9 +10,9 @@ from urllib.parse import quote, urlparse
 
 import httpx
 
-from .config import NextcloudSettings
-from .exceptions import NextcloudAPIError, NextcloudAuthenticationError
-from .schemas import DavNode, ShareGrant
+from backend.connectors.nextcloud.config import NextcloudConnectorConfig
+from backend.connectors.nextcloud.exceptions import NextcloudAPIError, NextcloudAuthenticationError
+from backend.connectors.nextcloud.schemas import DavNode, ShareGrant
 
 DAV_NS = "DAV:"
 OC_NS = "http://owncloud.org/ns"
@@ -20,19 +20,19 @@ NS = {"d": DAV_NS, "oc": OC_NS}
 
 
 class AsyncNextcloudClient:
-    def __init__(self, settings: NextcloudSettings) -> None:
-        self.settings = settings
-        creds = f"{settings.service_user}:{settings.service_password.get_secret_value()}"
+    def __init__(self, config: NextcloudConnectorConfig) -> None:
+        self.config = config
+        creds = f"{config.username}:{config.app_password.get_secret_value()}"
         auth_header = base64.b64encode(creds.encode("utf-8")).decode("ascii")
         self._client = httpx.AsyncClient(
-            base_url=str(settings.base_url).rstrip("/") + "/",
+            base_url=str(config.base_url).rstrip("/") + "/",
             headers={
                 "Authorization": f"Basic {auth_header}",
                 "OCS-APIRequest": "true",
                 "Accept": "application/json",
             },
-            verify=settings.verify_tls,
-            timeout=settings.request_timeout_seconds,
+            verify=config.verify_tls,
+            timeout=config.request_timeout_seconds,
             follow_redirects=True,
         )
 
@@ -42,8 +42,8 @@ class AsyncNextcloudClient:
     async def verify_credentials(self) -> None:
         response = await self._client.get("ocs/v2.php/cloud/user?format=json")
         if response.status_code in {401, 403}:
-            raise NextcloudAuthenticationError("Nextcloud technical account authentication failed")
-        self._raise_for_status(response, "Could not verify technical account")
+            raise NextcloudAuthenticationError("Nextcloud connector authentication failed")
+        self._raise_for_status(response, "Could not verify Nextcloud connector credentials")
 
     async def list_directory(self, remote_path: str, depth: int = 1) -> list[DavNode]:
         dav_path = self._dav_path(remote_path)
@@ -85,7 +85,7 @@ class AsyncNextcloudClient:
 
     def _dav_path(self, remote_path: str) -> str:
         normalized = self._normalize_path(remote_path)
-        joined = posixpath.join("remote.php/dav/files", self.settings.service_user, normalized.lstrip("/"))
+        joined = posixpath.join("remote.php/dav/files", self.config.username, normalized.lstrip("/"))
         return quote(joined)
 
     @staticmethod
@@ -140,15 +140,13 @@ class AsyncNextcloudClient:
     def _href_to_path(self, href: str) -> str:
         parsed = urlparse(href)
         path = parsed.path
-        instance_path = urlparse(str(self.settings.base_url)).path.rstrip('/')
+        instance_path = urlparse(str(self.config.base_url)).path.rstrip("/")
         if instance_path and path.startswith(instance_path):
-            path = path[len(instance_path):]
-        prefix = f"/remote.php/dav/files/{self.settings.service_user}"
+            path = path[len(instance_path) :]
+        prefix = f"/remote.php/dav/files/{self.config.username}"
         if path.startswith(prefix):
             path = path[len(prefix) :]
-        if not path:
-            path = "/"
-        return path
+        return path or "/"
 
     @staticmethod
     def _parse_http_datetime(value: str | None) -> datetime | None:

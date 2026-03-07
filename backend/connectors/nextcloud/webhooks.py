@@ -7,10 +7,10 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
-from .config import NextcloudSettings, get_nextcloud_settings
-from .schemas import NextcloudWebhookEvent
+from backend.connectors.nextcloud.config import NextcloudBridgeSettings, get_nextcloud_settings
+from backend.connectors.nextcloud.schemas import NextcloudWebhookEvent
 
-router = APIRouter(prefix="/api/v1/nextcloud", tags=["nextcloud-webhooks"])
+router = APIRouter(prefix="/nextcloud", tags=["nextcloud-webhooks"])
 
 
 def _verify_secret(raw_body: bytes, signature: str | None, secret: str | None) -> None:
@@ -26,7 +26,7 @@ def _verify_secret(raw_body: bytes, signature: str | None, secret: str | None) -
 @router.post("/webhooks")
 async def receive_nextcloud_webhook(
     request: Request,
-    settings: Annotated[NextcloudSettings, Depends(get_nextcloud_settings)],
+    settings: Annotated[NextcloudBridgeSettings, Depends(get_nextcloud_settings)],
     x_webhook_signature: Annotated[str | None, Header(alias="X-Webhook-Signature")] = None,
 ) -> dict[str, object]:
     raw_body = await request.body()
@@ -40,11 +40,11 @@ async def receive_nextcloud_webhook(
 
     event = NextcloudWebhookEvent(
         event=str(payload.get("event") or payload.get("type") or "unknown"),
+        connector_id=payload.get("connector_id"),
         subject=payload.get("subject"),
         path=payload.get("path"),
         actor=payload.get("actor"),
         timestamp=payload.get("timestamp"),
         raw=payload,
     )
-    # Enqueue your background sync job here.
     return {"accepted": True, "event": event.model_dump(mode="json")}

@@ -1,40 +1,39 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, status
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, Response, status
 
-from backend.api.deps import CurrentUserDep, DbSessionDep
-from backend.core.exceptions import AuthenticationError
-from backend.core.security import create_access_token, verify_password
-from backend.db.repo.user import UserRepository
-from backend.schemas.auth_schema import LoginRequest, LoginResponse, Token
+from backend.api.deps import CurrentIdentityDep, DbSessionDep
+from backend.core.config import settings
+from backend.schemas.auth_schema import AuthSessionResponse, LoginRequest
 from backend.schemas.user_schema import UserRead
+from backend.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 
 
-@router.post("/login", response_model=LoginResponse, status_code=status.HTTP_200_OK)
-async def login(
-        payload: LoginRequest,
-        session: DbSessionDep,
-) -> LoginResponse:
-    repo = UserRepository(session)
-    user = await repo.get_by_email(payload.email)
-
-    if not user or not verify_password(payload.password, user.hashed_password):
-        raise AuthenticationError(detail="Incorrect email or password")
-
-    if not user.is_active:
-        raise AuthenticationError(detail="Inactive user")
-
-    token = create_access_token(str(user.id))
-    return LoginResponse(
-        access_token=token,
-        token_type="bearer",
-        user=UserRead.model_validate(user),
+@router.post("/login", response_model=AuthSessionResponse, status_code=status.HTTP_200_OK)
+async def login(payload: LoginRequest, response: Response, session: DbSessionDep) -> AuthSessionResponse:
+    auth_service = AuthService(session)
+    auth_session = await auth_service.login_with_password(payload.email, payload.password)
+    response.set_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        value=auth_session.access_token,
+        max_age=settings.auth_cookie_max_age,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        domain=settings.AUTH_COOKIE_DOMAIN,
+        path="/",
     )
+    return auth_session
+
+
+@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+async def logout(response: Response) -> Response:
+    response.delete_cookie(key=settings.AUTH_COOKIE_NAME, domain=settings.AUTH_COOKIE_DOMAIN, path="/")
+    return response
 
 
 @router.get("/me", response_model=UserRead)
-async def read_me(current_user: CurrentUserDep) -> UserRead:
-    return UserRead.model_validate(current_user)
+async def read_me(identity: CurrentIdentityDep) -> UserRead:
+    return UserRead.model_validate(identity.user)

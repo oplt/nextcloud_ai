@@ -1,46 +1,58 @@
 from __future__ import annotations
 
-from sqlalchemy.ext.asyncio import AsyncSession
+import asyncio
+from backend.db.session import AsyncSessionLocal
+from backend.services.indexing_service import DocumentIngestionService
+from backend.services.job_lifecycle import JobLifecycleService
+from backend.services.nextcloud_sync_service import NextcloudConnectorSyncService
+from backend.workers.celery_app import celery_app
 
-from backend.ingestion.pipeline import IngestionPipeline
-from backend.db.models import Document
-from backend.parsers.document_parser import parse_docx, parse_pdf, parse_txt
-from backend.db.repo.document import DocumentRepository
+
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
+def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
+    return asyncio.run(_run_connector_sync_job(job_id=job_id, task_id=self.request.id))
 
 
-class IndexingService:
+async def _run_connector_sync_job(*, job_id: str, task_id: str | None) -> dict[str, int]:
+    async with AsyncSessionLocal() as session:
+        from backend.db.repo.sync_job import SyncJobRepository
 
-    def __init__(self, session: AsyncSession):
-        self.session = session
-        self.doc_repo = DocumentRepository(session)
-        self.pipeline = IngestionPipeline(session)
+        job_repo = SyncJobRepository(session)
+        job = await job_repo.get(job_id)
+        if job is None:
+            raise ValueError(f"Sync job {job_id} not found")
+        JobLifecycleService.mark_running(job, task_id=task_id)
+        await session.commit()
 
-    async def index_document(self, document_id):
-
-        document = await self.doc_repo.get(document_id)
-
-        if not document:
-            raise ValueError("Document not found")
-
-        path = document.file_path
-
-        if path.endswith(".pdf"):
-            text = await parse_pdf(path)
-
-        elif path.endswith(".docx"):
-            text = await parse_docx(path)
-
-        elif path.endswith(".txt"):
-            text = await parse_txt(path)
-
-        else:
-            raise ValueError("Unsupported format")
-
-        await self.pipeline.ingest_document(
-            document_id=document.id,
-            text=text,
+        service = NextcloudConnectorSyncService(session)
+        connector = await service.connector_repo.get(job.connector_id)
+        if connector is None:
+            raise ValueError(f"Connector {job.connector_id} not found")
+        result = await service.sync_connector(
+            connector,
+            full_reindex=bool((job.payload_json or {}).get("full_reindex", False)),
+            job=job,
         )
+        return result
 
-        document.parse_status = "indexed"
 
-        await self.session.commit()
+@celery_app.task(bind=True, autoretry_for=(Exception,), retry_backoff=True, retry_jitter=True, max_retries=3)
+def run_document_reindex_task(self, document_id: str) -> str:
+    return asyncio.run(_run_document_reindex_task(document_id=document_id))
+
+
+async def _run_document_reindex_task(*, document_id: str) -> str:
+    async with AsyncSessionLocal() as session:
+        service = DocumentIngestionService(session)
+        document = await service.index_document(document_id)
+        await session.commit()
+        return str(document.id)
+
+
+def enqueue_connector_sync_job(job_id: str):
+    return run_connector_sync_job.delay(job_id)
+
+
+
+def enqueue_document_reindex(document_id: str):
+    return run_document_reindex_task.delay(document_id)

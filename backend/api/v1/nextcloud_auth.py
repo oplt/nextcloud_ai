@@ -3,100 +3,99 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Form, HTTPException, status
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
+from fastapi.responses import RedirectResponse
 
-from backend.api.auth import get_current_principal
 from backend.connectors.nextcloud import BridgeTokenCodec, get_nextcloud_settings
 from backend.connectors.nextcloud.exceptions import BridgeTokenError
 from backend.connectors.nextcloud.replay_store import RedisReplayStore
-from backend.connectors.nextcloud.schemas import (
-    BridgeExchangeRequest,
-    BridgeExchangeResponse,
-    Principal,
-)
-from backend.core.security import AppTokenService, get_app_security_settings
+from backend.connectors.nextcloud.schemas import BridgeExchangeRequest, Principal
+from backend.core.config import settings
+from backend.schemas.auth_schema import AuthSessionResponse
+from backend.services.auth_service import AuthService
+from backend.api.deps import DbSessionDep
 
-router = APIRouter(prefix="/api/v1/auth/nextcloud", tags=["nextcloud-auth"])
+router = APIRouter(prefix="/auth/nextcloud", tags=["nextcloud-auth"])
 
 
 @lru_cache(maxsize=1)
 def get_bridge_codec() -> BridgeTokenCodec:
-    settings = get_nextcloud_settings()
-    replay_store = (
-        RedisReplayStore(redis_url=settings.bridge_redis_url)
-        if settings.bridge_redis_url
-        else None
-    )
-    return BridgeTokenCodec(settings=settings, replay_store=replay_store)
+    bridge_settings = get_nextcloud_settings()
+    replay_store = RedisReplayStore(redis_url=bridge_settings.bridge_redis_url) if bridge_settings.bridge_redis_url else None
+    return BridgeTokenCodec(settings=bridge_settings, replay_store=replay_store)
 
 
-@lru_cache(maxsize=1)
-def get_token_service() -> AppTokenService:
-    return AppTokenService(get_app_security_settings())
+async def _exchange_principal(session: DbSessionDep, principal: Principal) -> AuthSessionResponse:
+    return await AuthService(session).sync_nextcloud_principal(principal)
 
 
-@router.post("/exchange", response_model=BridgeExchangeResponse)
+@router.post("/exchange", response_model=AuthSessionResponse)
 async def exchange_nextcloud_bridge_token(
     payload: BridgeExchangeRequest,
+    response: Response,
+    session: DbSessionDep,
     codec: Annotated[BridgeTokenCodec, Depends(get_bridge_codec)],
-    token_service: Annotated[AppTokenService, Depends(get_token_service)],
-) -> BridgeExchangeResponse:
+) -> AuthSessionResponse:
     try:
         claims = await codec.verify_and_consume(payload.bridge_token)
     except BridgeTokenError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
-    principal = Principal(
-        sub=claims.sub,
-        username=claims.preferred_username,
-        display_name=claims.display_name,
-        email=claims.email,
-        groups=claims.groups,
-        nc_base_url=claims.nc_base_url,
+    auth_session = await _exchange_principal(
+        session,
+        Principal(
+            sub=claims.sub,
+            username=claims.preferred_username,
+            display_name=claims.display_name,
+            email=claims.email,
+            groups=claims.groups,
+            nc_base_url=claims.nc_base_url,
+        ),
     )
-    access_token, expires_in = token_service.issue_access_token(principal)
-    return BridgeExchangeResponse(access_token=access_token, expires_in=expires_in, principal=principal)
+    response.set_cookie(
+        key=settings.AUTH_COOKIE_NAME,
+        value=auth_session.access_token,
+        max_age=settings.auth_cookie_max_age,
+        httponly=True,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        domain=settings.AUTH_COOKIE_DOMAIN,
+        path="/",
+    )
+    return auth_session
 
 
 @router.post("/sso/consume")
 async def consume_nextcloud_bridge_token(
     bridge_token: Annotated[str, Form(...)],
+    session: DbSessionDep,
     codec: Annotated[BridgeTokenCodec, Depends(get_bridge_codec)],
-    token_service: Annotated[AppTokenService, Depends(get_token_service)],
 ):
     try:
         claims = await codec.verify_and_consume(bridge_token)
     except BridgeTokenError as exc:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
 
-    principal = Principal(
-        sub=claims.sub,
-        username=claims.preferred_username,
-        display_name=claims.display_name,
-        email=claims.email,
-        groups=claims.groups,
-        nc_base_url=claims.nc_base_url,
+    auth_session = await _exchange_principal(
+        session,
+        Principal(
+            sub=claims.sub,
+            username=claims.preferred_username,
+            display_name=claims.display_name,
+            email=claims.email,
+            groups=claims.groups,
+            nc_base_url=claims.nc_base_url,
+        ),
     )
-    access_token, _ = token_service.issue_access_token(principal)
-
-    settings = get_app_security_settings()
-    redirect = RedirectResponse(url=settings.frontend_redirect_url, status_code=status.HTTP_303_SEE_OTHER)
+    redirect = RedirectResponse(url=settings.FRONTEND_URL, status_code=status.HTTP_303_SEE_OTHER)
     redirect.set_cookie(
-        key=settings.cookie_name,
-        value=access_token,
-        max_age=settings.access_token_ttl_minutes * 60,
+        key=settings.AUTH_COOKIE_NAME,
+        value=auth_session.access_token,
+        max_age=settings.auth_cookie_max_age,
         httponly=True,
-        secure=settings.cookie_secure,
-        samesite=settings.cookie_samesite,
-        domain=settings.cookie_domain,
+        secure=settings.AUTH_COOKIE_SECURE,
+        samesite=settings.AUTH_COOKIE_SAMESITE,
+        domain=settings.AUTH_COOKIE_DOMAIN,
         path="/",
     )
     return redirect
-
-
-@router.get("/me")
-async def current_nextcloud_principal(
-    principal: Annotated[Principal, Depends(get_current_principal)],
-) -> JSONResponse:
-    return JSONResponse(content=principal.model_dump(mode="json"))

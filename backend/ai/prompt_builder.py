@@ -6,35 +6,32 @@ from backend.schemas.chat_schema import ChatSource
 
 _PREAMBLE = (
     "You are a private company knowledge assistant.\n"
-    "Answer ONLY from the provided sources.\n"
+    "Answer only from the provided sources.\n"
     "If the sources are insufficient, say so clearly.\n"
     "Do not invent facts.\n"
-    "Prefer precise and concise answers.\n"
-    "When relevant, mention which source numbers support each point.\n"
+    "Cite source numbers inline, for example [1] or [1][2].\n"
 )
 
 
 def build_grounded_prompt(question: str, sources: list[ChatSource]) -> str:
-    buf = io.StringIO()
-    buf.write(_PREAMBLE)
-    buf.write("\nQUESTION:\n")
-    buf.write(question)
-    buf.write("\n\nSOURCES:\n")
+    buffer = io.StringIO()
+    buffer.write(_PREAMBLE)
+    buffer.write("\nQUESTION:\n")
+    buffer.write(question)
+    buffer.write("\n\nSOURCES:\n")
 
-    for idx, src in enumerate(sources, start=1):
-        parts = []
-        if src.page_number is not None:
-            parts.append(f"page {src.page_number}")
-        if src.section_title:
-            parts.append(f"section {src.section_title}")
-
-        location_str = f" ({', '.join(parts)})" if parts else ""
-
-        buf.write(
-            f"\n[SOURCE {idx}] {src.file_name}{location_str}\n"
-            f"Path: {src.file_path}\n"
-            f"Excerpt: {src.snippet}\n"
+    for index, source in enumerate(sources, start=1):
+        location_bits = []
+        if source.page_number is not None:
+            location_bits.append(f"page {source.page_number}")
+        if source.section_title:
+            location_bits.append(source.section_title)
+        location = f" ({', '.join(location_bits)})" if location_bits else ""
+        buffer.write(
+            f"\n[SOURCE {index}] {source.file_name}{location}\n"
+            f"Path: {source.file_path}\n"
+            f"Excerpt: {source.snippet}\n"
         )
 
-    buf.write("\nFINAL ANSWER:\n")
-    return buf.getvalue()
+    buffer.write("\nFINAL ANSWER:\n")
+    return buffer.getvalue()

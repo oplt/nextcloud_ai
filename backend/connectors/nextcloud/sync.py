@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 
-from .client import AsyncNextcloudClient
-from .permissions import NextcloudPermissionService
-from .schemas import DavNode, SyncBatchItem
+from backend.connectors.nextcloud.client import AsyncNextcloudClient
+from backend.connectors.nextcloud.permissions import NextcloudPermissionService
+from backend.connectors.nextcloud.schemas import DavNode, SyncBatchItem
 
 
 class NextcloudSyncService:
@@ -25,10 +25,12 @@ class NextcloudSyncService:
             items.append(item)
         return items
 
+    async def fetch_file_bytes(self, remote_path: str) -> bytes:
+        return await self.client.download_file(remote_path)
+
     async def _walk(self, remote_path: str) -> AsyncIterator[DavNode]:
         listing = await self.client.list_directory(remote_path, depth=1)
         normalized_current = remote_path.rstrip("/") or "/"
-
         for node in listing:
             if node.path.rstrip("/") == normalized_current.rstrip("/"):
                 continue

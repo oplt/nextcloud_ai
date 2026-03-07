@@ -1,120 +1,116 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Any
-from jose import JWTError, jwt
-from passlib.context import CryptContext
-from backend.core.config import settings
-from functools import lru_cache
+from typing import Any, Literal
+
 import jwt
-from pydantic import Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from cryptography.fernet import Fernet, InvalidToken
+from passlib.context import CryptContext
+from pydantic import BaseModel, Field
 
-from backend.connectors.nextcloud.schemas import Principal
-
+from backend.core.config import settings
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
 
-def verify_password(plain_password: str, hashed_password: str) -> bool:
-    return pwd_context.verify(plain_password, hashed_password)
+class AuthContext(BaseModel):
+    user_id: str
+    auth_provider: Literal["local", "nextcloud"]
+    external_subject: str | None = None
+    username: str | None = None
+    display_name: str | None = None
+    email: str | None = None
+    groups: list[str] = Field(default_factory=list)
+    nextcloud_base_url: str | None = None
+    is_superuser: bool = False
+    role_name: str | None = None
 
 
-def get_password_hash(password: str) -> str:
-    return pwd_context.hash(password)
+class ConnectorSecretCipher:
+    def __init__(self, secret_key: bytes) -> None:
+        self._fernet = Fernet(secret_key)
 
+    def encrypt(self, value: str) -> str:
+        return self._fernet.encrypt(value.encode("utf-8")).decode("utf-8")
 
-def create_access_token(subject: str, expires_delta: timedelta | None = None) -> str:
-    expire = datetime.now(timezone.utc) + (
-            expires_delta or timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
-    )
-    to_encode: dict[str, Any] = {
-        "sub": subject,
-        "exp": expire,
-        "type": "access",
-    }
-    return jwt.encode(to_encode, settings.JWT_SECRET_KEY, algorithm=settings.ALGORITHM)
-
-
-def decode_token(token: str) -> dict[str, Any]:
-    return jwt.decode(token, settings.JWT_SECRET_KEY, algorithms=[settings.ALGORITHM])
-
-
-def is_password_strong(password: str) -> bool:
-    if len(password) < 10:
-        return False
-    has_upper = any(c.isupper() for c in password)
-    has_lower = any(c.islower() for c in password)
-    has_digit = any(c.isdigit() for c in password)
-    return has_upper and has_lower and has_digit
-
-
-class AppSecuritySettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="APP_AUTH_",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    jwt_secret: SecretStr = Field(..., description="FastAPI application JWT signing secret")
-    issuer: str = Field(default="fastapi-app")
-    audience: str = Field(default="fastapi-users")
-    access_token_ttl_minutes: int = Field(default=15, ge=5, le=1440)
-    cookie_name: str = Field(default="nc_ai_access_token")
-    cookie_secure: bool = True
-    cookie_samesite: str = Field(default="lax")
-    cookie_domain: str | None = None
-    frontend_redirect_url: str = Field(default="/app")
-
-
-@lru_cache(maxsize=1)
-def get_app_security_settings() -> AppSecuritySettings:
-    return AppSecuritySettings()
+    def decrypt(self, value: str) -> str:
+        try:
+            return self._fernet.decrypt(value.encode("utf-8")).decode("utf-8")
+        except InvalidToken as exc:
+            raise ValueError("Connector secret could not be decrypted") from exc
 
 
 class AppTokenService:
-    def __init__(self, settings: AppSecuritySettings) -> None:
-        self.settings = settings
-
-    def issue_access_token(self, principal: Principal) -> tuple[str, int]:
+    def issue_access_token(self, context: AuthContext) -> tuple[str, int]:
         now = datetime.now(tz=timezone.utc)
-        expires_at = now + timedelta(minutes=self.settings.access_token_ttl_minutes)
+        expires_at = now + timedelta(minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES)
         payload: dict[str, Any] = {
-            "iss": self.settings.issuer,
-            "aud": self.settings.audience,
-            "sub": principal.sub,
-            "provider": principal.provider,
-            "username": principal.username,
-            "display_name": principal.display_name,
-            "email": principal.email,
-            "groups": principal.groups,
-            "nc_base_url": principal.nc_base_url,
+            "iss": settings.AUTH_ISSUER,
+            "aud": settings.AUTH_AUDIENCE,
+            "sub": context.user_id,
+            "type": "access",
+            "auth_provider": context.auth_provider,
+            "external_subject": context.external_subject,
+            "username": context.username,
+            "display_name": context.display_name,
+            "email": context.email,
+            "groups": context.groups,
+            "nextcloud_base_url": context.nextcloud_base_url,
+            "is_superuser": context.is_superuser,
+            "role_name": context.role_name,
             "iat": int(now.timestamp()),
             "nbf": int(now.timestamp()),
             "exp": int(expires_at.timestamp()),
         }
         token = jwt.encode(
             payload,
-            self.settings.jwt_secret.get_secret_value(),
+            settings.JWT_SECRET_KEY.get_secret_value(),
             algorithm="HS256",
         )
         return token, int((expires_at - now).total_seconds())
 
-    def decode_access_token(self, token: str) -> Principal:
-        decoded = jwt.decode(
+    def decode_access_token(self, token: str) -> AuthContext:
+        payload = jwt.decode(
             token,
-            self.settings.jwt_secret.get_secret_value(),
+            settings.JWT_SECRET_KEY.get_secret_value(),
             algorithms=["HS256"],
-            audience=self.settings.audience,
-            issuer=self.settings.issuer,
-            options={"require": ["iss", "aud", "sub", "exp", "iat", "nbf"]},
+            audience=settings.AUTH_AUDIENCE,
+            issuer=settings.AUTH_ISSUER,
+            options={"require": ["iss", "aud", "sub", "exp", "iat", "nbf", "type"]},
         )
-        return Principal(
-            sub=decoded["sub"],
-            provider="nextcloud",
-            username=decoded["username"],
-            display_name=decoded.get("display_name"),
-            email=decoded.get("email"),
-            groups=list(decoded.get("groups", [])),
-            nc_base_url=decoded["nc_base_url"],
+        if payload.get("type") != "access":
+            raise jwt.InvalidTokenError("Unexpected token type")
+        return AuthContext(
+            user_id=payload["sub"],
+            auth_provider=payload.get("auth_provider", "local"),
+            external_subject=payload.get("external_subject"),
+            username=payload.get("username"),
+            display_name=payload.get("display_name"),
+            email=payload.get("email"),
+            groups=list(payload.get("groups", [])),
+            nextcloud_base_url=payload.get("nextcloud_base_url"),
+            is_superuser=bool(payload.get("is_superuser", False)),
+            role_name=payload.get("role_name"),
         )
+
+
+app_token_service = AppTokenService()
+connector_secret_cipher = ConnectorSecretCipher(settings.vault_fernet_key)
+
+
+def verify_password(plain_password: str, hashed_password: str) -> bool:
+    return pwd_context.verify(plain_password, hashed_password)
+
+
+
+def get_password_hash(password: str) -> str:
+    return pwd_context.hash(password)
+
+
+
+def is_password_strong(password: str) -> bool:
+    if len(password) < 10:
+        return False
+    return any(char.isupper() for char in password) and any(char.islower() for char in password) and any(
+        char.isdigit() for char in password
+    )

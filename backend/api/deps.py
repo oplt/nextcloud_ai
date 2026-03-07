@@ -1,57 +1,58 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Annotated
-from uuid import UUID
 
-from fastapi import Depends
-from fastapi.security import OAuth2PasswordBearer
-from jose import JWTError
+import jwt
+from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.api.auth import extract_access_token
 from backend.core.exceptions import AuthenticationError, AuthorizationError
-from backend.core.security import decode_token
-from backend.db.session import get_db_session
+from backend.core.security import AuthContext, app_token_service
 from backend.db.models import User
 from backend.db.repo.user import UserRepository
-
-oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/v1/auth/login")
+from backend.db.session import get_db_session
 
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
-TokenDep = Annotated[str, Depends(oauth2_scheme)]
 
 
-async def get_current_user(
-    session: DbSessionDep,
-    token: TokenDep,
-) -> User:
+@dataclass(slots=True)
+class AuthenticatedUser:
+    user: User
+    auth: AuthContext
+
+
+async def get_current_identity(request: Request, session: DbSessionDep) -> AuthenticatedUser:
+    token = extract_access_token(request)
+    if not token:
+        raise AuthenticationError("Missing access token")
     try:
-        payload = decode_token(token)
-        subject = payload.get("sub")
-        token_type = payload.get("type")
-        if not subject or token_type != "access":
-            raise AuthenticationError()
-        user_id = UUID(subject)
-    except (JWTError, ValueError):
-        raise AuthenticationError()
+        auth = app_token_service.decode_access_token(token)
+    except jwt.PyJWTError as exc:
+        raise AuthenticationError("Invalid access token") from exc
 
-    repo = UserRepository(session)
-    user = await repo.get(user_id)
-    if not user or not user.is_active:
-        raise AuthenticationError()
+    user = await UserRepository(session).get(auth.user_id)
+    if user is None or not user.is_active:
+        raise AuthenticationError("User is inactive or missing")
+    return AuthenticatedUser(user=user, auth=auth)
 
-    return user
+
+CurrentIdentityDep = Annotated[AuthenticatedUser, Depends(get_current_identity)]
+
+
+async def get_current_user(identity: CurrentIdentityDep) -> User:
+    return identity.user
 
 
 CurrentUserDep = Annotated[User, Depends(get_current_user)]
 
 
-async def get_current_active_superuser(
-    current_user: CurrentUserDep,
-) -> User:
-    if not current_user.is_superuser:
+async def get_current_superuser(identity: CurrentIdentityDep) -> AuthenticatedUser:
+    if not identity.user.is_superuser:
         raise AuthorizationError()
-    return current_user
+    return identity
 
 
-SuperUserDep = Annotated[User, Depends(get_current_active_superuser)]
+SuperUserDep = Annotated[AuthenticatedUser, Depends(get_current_superuser)]

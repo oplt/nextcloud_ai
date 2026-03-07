@@ -13,19 +13,15 @@ class ConnectorRepository(BaseRepository[Connector]):
         super().__init__(session, Connector)
 
     async def list_active(self) -> list[Connector]:
-        stmt = (
-            select(Connector)
-            .where(Connector.is_active.is_(True))
-            .order_by(Connector.created_at.desc())
+        result = await self.session.execute(
+            select(Connector).where(Connector.is_active.is_(True)).order_by(Connector.created_at.desc())
         )
-        result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
     async def get_with_documents(self, connector_id: str) -> Connector | None:
-        stmt = (
+        result = await self.session.execute(
             select(Connector)
             .options(selectinload(Connector.documents))
             .where(Connector.id == connector_id)
         )
-        result = await self.session.execute(stmt)
         return result.scalar_one_or_none()

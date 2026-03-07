@@ -18,8 +18,8 @@ class DavNode(BaseModel):
 
 
 class ShareGrant(BaseModel):
-    share_id: str
-    share_type: int
+    share_id: str = Field(validation_alias="id")
+    share_type: int = Field(validation_alias="share_type")
     permissions: int
     path: str
     uid_owner: str | None = None
@@ -80,6 +80,7 @@ class BridgeExchangeResponse(BaseModel):
 
 class NextcloudWebhookEvent(BaseModel):
     event: str
+    connector_id: str | None = None
     subject: str | None = None
     path: str | None = None
     actor: str | None = None

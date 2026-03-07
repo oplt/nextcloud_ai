@@ -1,74 +1,49 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from uuid import UUID
-
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.ai.citations import build_snippet, distance_to_score
-from backend.ai.embedding_client import EmbeddingClientProtocol, SimpleDeterministicEmbeddingClient
-from backend.db.models import DocumentChunk
-from backend.db.repo.document import DocumentChunkRepository
-from backend.schemas.chat_schema import ChatSource
+from backend.connectors.nextcloud.client import AsyncNextcloudClient
+from backend.core.exceptions import NotFoundError
+from backend.db.models import Document
+from backend.db.repo.document import DocumentRepository
+from backend.ingestion.pipeline import IngestionPipeline
+from backend.parsers.document_parser import UnsupportedDocumentTypeError, parse_document_bytes
+from backend.services.connector_service import ConnectorService
 
 
-@dataclass(slots=True)
-class RetrievalResult:
-    sources: list[ChatSource]
-    query_embedding: list[float]
-
-
-class RetrievalService:
-    def __init__(
-            self,
-            session: AsyncSession,
-            embedding_client: EmbeddingClientProtocol | None = None,
-    ) -> None:
+class DocumentIngestionService:
+    def __init__(self, session: AsyncSession) -> None:
         self.session = session
-        self.embedding_client = embedding_client or SimpleDeterministicEmbeddingClient()
-        self.chunk_repo = DocumentChunkRepository(session)
+        self.document_repo = DocumentRepository(session)
+        self.connector_service = ConnectorService(session)
+        self.pipeline = IngestionPipeline(session)
 
-    async def retrieve(
-            self,
-            *,
-            question: str,
-            top_k: int = 6,
-            document_ids: list[UUID] | None = None,
-    ) -> RetrievalResult:
-        query_embedding = await self.embedding_client.embed_query(question)
+    async def index_document(self, document_id: str) -> Document:
+        document = await self.document_repo.get(document_id)
+        if document is None:
+            raise NotFoundError("Document not found")
+        connector = await self.connector_service.get_connector(str(document.connector_id))
+        client = AsyncNextcloudClient(self.connector_service.build_config(connector))
+        try:
+            payload = await client.download_file(document.file_path)
+            return await self.ingest_document_bytes(document, payload)
+        finally:
+            await client.aclose()
 
-        # PERF FIX: pass eager_load_document=True so the repository issues a
-        # single JOIN query that fetches chunks *and* their parent documents
-        # together.  Without this, accessing `chunk.document` inside the loop
-        # below would fire one extra SELECT per chunk (N+1 problem).
-        rows = await self.chunk_repo.semantic_search(
-            embedding=query_embedding,
-            limit=top_k,
-            document_ids=document_ids,
-            eager_load_document=True,  # <-- eliminates N+1
-        )
+    async def ingest_document_bytes(self, document: Document, payload: bytes) -> Document:
+        try:
+            parsed = await parse_document_bytes(document.file_name, document.mime_type, payload)
+        except UnsupportedDocumentTypeError as exc:
+            document.parse_status = "unsupported"
+            document.parse_error = str(exc)
+            await self.session.flush()
+            return document
+        except Exception as exc:
+            document.parse_status = "failed"
+            document.parse_error = str(exc)
+            await self.session.flush()
+            raise
 
-        sources: list[ChatSource] = []
-        for chunk, distance in rows:
-            document = chunk.document
-            if document is None or document.is_deleted:
-                continue
-
-            sources.append(
-                ChatSource(
-                    chunk_id=chunk.id,
-                    document_id=document.id,
-                    file_name=document.file_name,
-                    file_path=document.file_path,
-                    page_number=chunk.page_number,
-                    section_title=chunk.section_title,
-                    snippet=build_snippet(chunk.content),
-                    distance=distance,
-                    score=distance_to_score(distance),
-                )
-            )
-
-        return RetrievalResult(
-            sources=sources,
-            query_embedding=query_embedding,
-        )
+        await self.pipeline.ingest_document(document, parsed)
+        await self.session.flush()
+        return document

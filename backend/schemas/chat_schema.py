@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from datetime import datetime
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -31,13 +30,17 @@ class ChatMessageRead(TimestampedSchema):
     session_id: UUID
     role: str
     content: str
-    retrieved_chunks_json: list[dict] | None = None
+    citations_json: list[dict] | None = None
     model_name: str | None = None
 
 
 class ChatSessionRead(TimestampedSchema):
     user_id: UUID
     title: str
+
+
+class ChatSessionDetail(ChatSessionRead):
+    messages: list[ChatMessageRead]
 
 
 class ChatAskResponse(BaseModel):

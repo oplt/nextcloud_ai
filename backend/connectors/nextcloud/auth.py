@@ -6,14 +6,14 @@ from typing import Any
 
 import jwt
 
-from .config import NextcloudSettings
-from .exceptions import BridgeTokenError
-from .replay_store import ReplayStore
-from .schemas import BridgeTokenClaims
+from backend.connectors.nextcloud.config import NextcloudBridgeSettings
+from backend.connectors.nextcloud.exceptions import BridgeTokenError
+from backend.connectors.nextcloud.replay_store import ReplayStore
+from backend.connectors.nextcloud.schemas import BridgeTokenClaims
 
 
 class BridgeTokenCodec:
-    def __init__(self, settings: NextcloudSettings, replay_store: ReplayStore | None = None) -> None:
+    def __init__(self, settings: NextcloudBridgeSettings, replay_store: ReplayStore | None = None) -> None:
         self.settings = settings
         self.replay_store = replay_store
 
@@ -60,7 +60,7 @@ class BridgeTokenCodec:
                 leeway=self.settings.allowed_clock_skew_seconds,
                 options={"require": ["iss", "aud", "sub", "jti", "iat", "nbf", "exp"]},
             )
-        except jwt.PyJWTError as exc:  # pragma: no cover - library exception surface
+        except jwt.PyJWTError as exc:
             raise BridgeTokenError(f"Invalid bridge token: {exc}") from exc
 
         claims = BridgeTokenClaims.model_validate(decoded)

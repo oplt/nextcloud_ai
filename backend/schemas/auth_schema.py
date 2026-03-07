@@ -10,18 +10,8 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class Token(BaseModel):
+class AuthSessionResponse(BaseModel):
     access_token: str
     token_type: str = "bearer"
-
-
-class TokenPayload(BaseModel):
-    sub: str | None = None
-    exp: int | None = None
-    type: str | None = None
-
-
-class LoginResponse(BaseModel):
-    access_token: str
-    token_type: str = "bearer"
+    expires_in: int
     user: UserRead

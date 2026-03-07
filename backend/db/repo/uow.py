@@ -2,18 +2,17 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.repositories.audit_log import AuditLogRepository
-from backend.repositories.chat import ChatMessageRepository, ChatSessionRepository
-from backend.repositories.connector import ConnectorRepository
-from backend.repositories.document import DocumentChunkRepository, DocumentRepository
-from backend.repositories.sync_job import SyncJobRepository
-from backend.repositories.user import RoleRepository, UserRepository
+from backend.db.repo.audit_log import AuditLogRepository
+from backend.db.repo.chat import ChatMessageRepository, ChatSessionRepository
+from backend.db.repo.connector import ConnectorRepository
+from backend.db.repo.document import DocumentChunkRepository, DocumentRepository
+from backend.db.repo.sync_job import SyncJobRepository
+from backend.db.repo.user import RoleRepository, UserRepository
 
 
 class UnitOfWork:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
-
         self.users = UserRepository(session)
         self.roles = RoleRepository(session)
         self.connectors = ConnectorRepository(session)

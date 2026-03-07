@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
-
-from pydantic import BaseModel
 
 from backend.schemas.common_schema import TimestampedSchema
 
@@ -19,7 +18,7 @@ class DocumentChunkRead(TimestampedSchema):
     section_title: str | None = None
     heading_path: str | None = None
     content_hash: str | None = None
-    metadata_json: dict | None = None
+    metadata_json: dict[str, Any] | None = None
 
 
 class DocumentRead(TimestampedSchema):
@@ -32,12 +31,20 @@ class DocumentRead(TimestampedSchema):
     size_bytes: int | None = None
     version_tag: str | None = None
     source_url: str | None = None
+    modified_at: datetime | None = None
+    sync_status: str
+    sync_error: str | None = None
     parse_status: str
     parse_error: str | None = None
     indexed_at: datetime | None = None
     last_seen_at: datetime | None = None
     is_deleted: bool
-    metadata_json: dict | None = None
+    owner_external_id: str | None = None
+    allowed_user_ids: list[str]
+    allowed_group_ids: list[str]
+    public_link_enabled: bool
+    acl_json: dict[str, Any] | None = None
+    metadata_json: dict[str, Any] | None = None
 
 
 class DocumentDetail(DocumentRead):

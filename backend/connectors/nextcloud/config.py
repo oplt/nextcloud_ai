@@ -2,38 +2,42 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import AnyHttpUrl, Field, SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import AnyHttpUrl, BaseModel, SecretStr
+
+from backend.core.config import settings
 
 
-class NextcloudSettings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="NEXTCLOUD_",
-        case_sensitive=False,
-        extra="ignore",
-    )
-
-    base_url: AnyHttpUrl = Field(..., description="Base URL of the Nextcloud instance")
-    service_user: str = Field(..., description="Dedicated Nextcloud technical account")
-    service_password: SecretStr = Field(..., description="App password for the technical account")
-
-    bridge_shared_secret: SecretStr = Field(
-        ..., description="Shared HMAC secret between Nextcloud PHP app and FastAPI"
-    )
-    bridge_issuer: str = Field(default="nextcloud-bridge")
-    bridge_audience: str = Field(default="fastapi-nextcloud")
-    bridge_ttl_seconds: int = Field(default=60, ge=15, le=300)
-    allowed_clock_skew_seconds: int = Field(default=15, ge=0, le=60)
-    bridge_redis_url: str | None = Field(default=None)
-
-    webhook_secret: SecretStr | None = Field(
-        default=None, description="Optional secret for incoming webhook payloads"
-    )
-
+class NextcloudBridgeSettings(BaseModel):
+    bridge_shared_secret: SecretStr
+    bridge_issuer: str
+    bridge_audience: str
+    bridge_ttl_seconds: int
+    allowed_clock_skew_seconds: int
+    bridge_redis_url: str | None = None
+    webhook_secret: SecretStr | None = None
     verify_tls: bool = True
-    request_timeout_seconds: float = Field(default=30.0, ge=1.0, le=120.0)
+    request_timeout_seconds: float = 30.0
+
+
+class NextcloudConnectorConfig(BaseModel):
+    base_url: AnyHttpUrl
+    username: str
+    app_password: SecretStr
+    root_path: str = "/"
+    verify_tls: bool = True
+    request_timeout_seconds: float = 30.0
 
 
 @lru_cache(maxsize=1)
-def get_nextcloud_settings() -> NextcloudSettings:
-    return NextcloudSettings()
+def get_nextcloud_settings() -> NextcloudBridgeSettings:
+    return NextcloudBridgeSettings(
+        bridge_shared_secret=settings.NEXTCLOUD_BRIDGE_SHARED_SECRET,
+        bridge_issuer=settings.NEXTCLOUD_BRIDGE_ISSUER,
+        bridge_audience=settings.NEXTCLOUD_BRIDGE_AUDIENCE,
+        bridge_ttl_seconds=settings.NEXTCLOUD_BRIDGE_TTL_SECONDS,
+        allowed_clock_skew_seconds=settings.NEXTCLOUD_BRIDGE_ALLOWED_CLOCK_SKEW_SECONDS,
+        bridge_redis_url=settings.NEXTCLOUD_BRIDGE_REDIS_URL,
+        webhook_secret=settings.NEXTCLOUD_WEBHOOK_SECRET,
+        verify_tls=settings.NEXTCLOUD_VERIFY_TLS,
+        request_timeout_seconds=settings.NEXTCLOUD_REQUEST_TIMEOUT_SECONDS,
+    )

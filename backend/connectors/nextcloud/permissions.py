@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from .client import AsyncNextcloudClient
-from .schemas import AccessControlEntry, ShareGrant
+from backend.connectors.nextcloud.client import AsyncNextcloudClient
+from backend.connectors.nextcloud.schemas import AccessControlEntry, ShareGrant
 
-# OCS share types documented by Nextcloud. Extend as needed for your deployment.
 USER_SHARE = 0
 GROUP_SHARE = 1
 PUBLIC_LINK_SHARE = 3
@@ -29,6 +28,8 @@ class NextcloudPermissionService:
             self._apply_share(share, allowed_user_ids, allowed_group_ids)
             if share.share_type == PUBLIC_LINK_SHARE:
                 public_link_enabled = True
+            if share.uid_owner:
+                owner_user_id = owner_user_id or share.uid_owner
 
         return AccessControlEntry(
             path=remote_path,
@@ -40,11 +41,7 @@ class NextcloudPermissionService:
         )
 
     @staticmethod
-    def _apply_share(
-        share: ShareGrant,
-        allowed_user_ids: set[str],
-        allowed_group_ids: set[str],
-    ) -> None:
+    def _apply_share(share: ShareGrant, allowed_user_ids: set[str], allowed_group_ids: set[str]) -> None:
         if share.share_type == USER_SHARE and share.share_with:
             allowed_user_ids.add(share.share_with)
             return
@@ -52,5 +49,4 @@ class NextcloudPermissionService:
             allowed_group_ids.add(share.share_with)
             return
         if share.share_type in {FEDERATED_SHARE, CIRCLE_SHARE, TALK_CONVERSATION_SHARE} and share.share_with:
-            # Keep these namespaces explicit rather than dropping them on the floor.
             allowed_group_ids.add(share.share_with)

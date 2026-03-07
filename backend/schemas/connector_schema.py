@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field
@@ -14,6 +15,7 @@ class ConnectorCreate(BaseModel):
     username: str = Field(min_length=1, max_length=255)
     secret: str = Field(min_length=1)
     root_path: str = "/"
+    verify_tls: bool | None = None
 
 
 class ConnectorUpdate(BaseModel):
@@ -23,6 +25,7 @@ class ConnectorUpdate(BaseModel):
     root_path: str | None = None
     is_active: bool | None = None
     status: str | None = None
+    verify_tls: bool | None = None
 
 
 class ConnectorRead(TimestampedSchema):
@@ -35,3 +38,13 @@ class ConnectorRead(TimestampedSchema):
     status: str
     last_sync_at: datetime | None = None
     last_error: str | None = None
+    metadata_json: dict[str, Any] | None = None
+
+
+class ConnectorSyncRequest(BaseModel):
+    full_reindex: bool = False
+
+
+class ConnectorTestResponse(BaseModel):
+    ok: bool
+    message: str

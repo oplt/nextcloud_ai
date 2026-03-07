@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field
 
 from backend.schemas.common_schema import ORMBaseSchema, TimestampedSchema
 
@@ -16,14 +16,16 @@ class RoleRead(ORMBaseSchema):
 
 
 class UserBase(BaseModel):
-    email: EmailStr
+    email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=255)
     job_title: str | None = Field(default=None, max_length=255)
 
 
 class UserCreate(UserBase):
+    username: str = Field(min_length=1, max_length=255)
     password: str = Field(min_length=10, max_length=128)
     role_id: UUID | None = None
+    is_superuser: bool = False
 
 
 class UserUpdate(BaseModel):
@@ -35,16 +37,15 @@ class UserUpdate(BaseModel):
 
 
 class UserRead(TimestampedSchema):
-    email: EmailStr
+    auth_provider: str
+    external_subject: str | None = None
+    username: str
+    email: EmailStr | None = None
     full_name: str | None = None
+    nextcloud_base_url: str | None = None
+    last_login_at: datetime | None = None
     is_active: bool
     is_superuser: bool
     job_title: str | None = None
     avatar_url: str | None = None
     role: RoleRead | None = None
-
-
-class UserPublic(BaseModel):
-    id: UUID
-    email: EmailStr
-    full_name: str | None = None

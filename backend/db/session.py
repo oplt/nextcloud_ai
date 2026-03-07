@@ -27,5 +27,12 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
         yield session
 
 
+async def init_models() -> None:
+    from backend.db.models import Base
+
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+
 async def dispose_db() -> None:
     await engine.dispose()
