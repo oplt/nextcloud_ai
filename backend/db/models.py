@@ -1,0 +1,334 @@
+from __future__ import annotations
+
+import uuid
+from datetime import datetime, timezone
+from sqlalchemy import DateTime, MetaData, String, func, Text, Boolean, ForeignKey, Index, Integer, UniqueConstraint
+from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.orm import DeclarativeBase, Mapped, declared_attr, mapped_column, relationship
+from pgvector.sqlalchemy import Vector
+from backend.core.config import settings
+
+
+NAMING_CONVENTION = {
+    "ix": "ix_%(column_0_label)s",
+    "uq": "uq_%(table_name)s_%(column_0_name)s",
+    "ck": "ck_%(table_name)s_%(constraint_name)s",
+    "fk": "fk_%(table_name)s_%(column_0_name)s_%(referred_table_name)s",
+    "pk": "pk_%(table_name)s",
+}
+
+
+class Base(DeclarativeBase):
+    metadata = MetaData(naming_convention=NAMING_CONVENTION)
+
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return cls.__name__.lower()
+
+
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+class UUIDPrimaryKeyMixin:
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        primary_key=True,
+        default=uuid.uuid4,
+    )
+
+
+class TimestampMixin:
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+
+class SoftDeleteMixin:
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class UserTrackingMixin:
+    created_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    updated_by_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+
+
+class TableNameMixin:
+    @declared_attr.directive
+    def __tablename__(cls) -> str:
+        return cls.__name__.lower()
+
+
+class SlugMixin:
+    slug: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True, index=True)
+
+
+class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "roles"
+
+    name: Mapped[str] = mapped_column(String(100), unique=True, nullable=False, index=True)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+
+    users: Mapped[list["User"]] = relationship(
+        back_populates="role",
+        lazy="selectin",
+    )
+
+
+class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "users"
+
+    email: Mapped[str] = mapped_column(String(320), unique=True, nullable=False, index=True)
+    hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
+    full_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    is_superuser: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    job_title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    role_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("roles.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    role: Mapped["Role | None"] = relationship(
+        back_populates="users",
+        lazy="selectin",
+    )
+
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(
+        back_populates="user",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+    audit_logs: Mapped[list["AuditLog"]] = relationship(
+        back_populates="user",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class Connector(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "connectors"
+
+    connector_type: Mapped[str] = mapped_column(String(50), nullable=False, default="nextcloud")
+    display_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    base_url: Mapped[str] = mapped_column(Text, nullable=False)
+    username: Mapped[str] = mapped_column(String(255), nullable=False)
+
+    # Store encrypted app password / token, not raw secret
+    encrypted_secret: Mapped[str] = mapped_column(Text, nullable=False)
+
+    root_path: Mapped[str] = mapped_column(Text, nullable=False, default="/")
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    last_sync_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    documents: Mapped[list["Document"]] = relationship(
+        back_populates="connector",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+    sync_jobs: Mapped[list["SyncJob"]] = relationship(
+        back_populates="connector",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+
+class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "documents"
+    __table_args__ = (
+        UniqueConstraint("connector_id", "external_id", name="uq_documents_connector_external"),
+        Index("ix_documents_connector_file_path", "connector_id", "file_path"),
+    )
+
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("connectors.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    external_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    file_path: Mapped[str] = mapped_column(Text, nullable=False)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    checksum: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    version_tag: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    parse_status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending")
+    parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    indexed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    last_seen_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    is_deleted: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    connector: Mapped["Connector"] = relationship(
+        back_populates="documents",
+        lazy="selectin",
+    )
+
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="DocumentChunk.chunk_index",
+    )
+
+
+
+class DocumentChunk(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "document_chunks"
+    __table_args__ = (
+        UniqueConstraint("document_id", "chunk_index", name="uq_document_chunks_doc_chunk_index"),
+        Index("ix_document_chunks_document_page", "document_id", "page_number"),
+        # Approximate vector index should usually be added in Alembic, not inline ORM.
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    char_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    page_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    section_title: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    heading_path: Mapped[str | None] = mapped_column(Text, nullable=True)
+    content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+
+    embedding: Mapped[list[float] | None] = mapped_column(
+        Vector(settings.EMBEDDING_DIM),
+        nullable=True,
+    )
+
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    document: Mapped["Document"] = relationship(
+        back_populates="chunks",
+        lazy="selectin",
+    )
+
+
+class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "sync_jobs"
+
+    connector_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("connectors.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+
+    job_type: Mapped[str] = mapped_column(String(50), nullable=False, default="sync")
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued")
+    started_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    payload_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    result_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    connector: Mapped["Connector"] = relationship(
+        back_populates="sync_jobs",
+        lazy="selectin",
+    )
+
+
+
+class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "chat_sessions"
+
+    user_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    title: Mapped[str] = mapped_column(String(255), nullable=False, default="New chat")
+
+    user: Mapped["User"] = relationship(
+        back_populates="chat_sessions",
+        lazy="selectin",
+    )
+
+    messages: Mapped[list["ChatMessage"]] = relationship(
+        back_populates="session",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="ChatMessage.created_at",
+    )
+
+
+
+class ChatMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "chat_messages"
+
+    session_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("chat_sessions.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    role: Mapped[str] = mapped_column(String(50), nullable=False)  # user / assistant / system
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+
+    retrieved_chunks_json: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+    session: Mapped["ChatSession"] = relationship(
+        back_populates="messages",
+        lazy="selectin",
+    )
+
+
+
+class AuditLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "audit_logs"
+
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+
+    action: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    resource_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    resource_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    user: Mapped["User | None"] = relationship(
+        back_populates="audit_logs",
+        lazy="selectin",
+    )

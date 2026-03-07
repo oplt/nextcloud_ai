@@ -1,0 +1,21 @@
+<?xml version="1.0"?>
+<info>
+    <id>nc_ai_bridge</id>
+    <name>NC AI Bridge</name>
+    <summary>Launch an external FastAPI AI workspace from the current Nextcloud session</summary>
+    <description>Thin bridge app that turns the logged-in Nextcloud user session into a short-lived signed handoff for an external FastAPI service.</description>
+    <version>0.1.0</version>
+    <licence>agpl</licence>
+    <namespace>NcAiBridge</namespace>
+    <category>integration</category>
+    <author mail="founder@example.com">Your Company</author>
+    <default_enable />
+    <navigation>
+        <name>AI Workspace</name>
+        <route>nc_ai_bridge.page.index</route>
+        <order>20</order>
+    </navigation>
+    <dependencies>
+        <nextcloud min-version="31" max-version="32"/>
+    </dependencies>
+</info>

@@ -1,0 +1,211 @@
+backend/
+│
+├── app/
+│
+│   ├── main.py
+│   ├── config.py
+│   ├── logging.py
+│
+│   ├── core/
+│   │
+│   │   ├── config.py
+│   │   ├── security.py
+│   │   ├── auth.py
+│   │   ├── encryption.py
+│   │   ├── permissions.py
+│   │   ├── exceptions.py
+│   │   └── constants.py
+│
+│   ├── api/
+│   │
+│   │   ├── router.py
+│   │   ├── deps.py
+│   │
+│   │   └── v1/
+│   │       │
+│   │       ├── auth_routes.py
+│   │       ├── user_routes.py
+│   │       ├── chat_routes.py
+│   │       ├── document_routes.py
+│   │       ├── connector_routes.py
+│   │       ├── job_routes.py
+│   │       └── health_routes.py
+│
+│   ├── models/
+│   │
+│   │   ├── base.py
+│   │   ├── user.py
+│   │   ├── role.py
+│   │   ├── document.py
+│   │   ├── document_chunk.py
+│   │   ├── connector.py
+│   │   ├── sync_job.py
+│   │   ├── chat_session.py
+│   │   ├── chat_message.py
+│   │   └── audit_log.py
+│
+│   ├── schemas/
+│   │
+│   │   ├── auth_schema.py
+│   │   ├── user_schema.py
+│   │   ├── document_schema.py
+│   │   ├── connector_schema.py
+│   │   ├── chat_schema.py
+│   │   └── job_schema.py
+│
+│   ├── services/
+│   │
+│   │   ├── auth_service.py
+│   │   ├── user_service.py
+│   │   ├── connector_service.py
+│   │   ├── document_service.py
+│   │   ├── chat_service.py
+│   │   ├── retrieval_service.py
+│   │   ├── permission_service.py
+│   │   └── audit_service.py
+│
+│   ├── connectors/
+│   │
+│   │   └── nextcloud/
+│   │
+│   │       ├── nextcloud_client.py
+│   │       ├── nextcloud_sync.py
+│   │       ├── nextcloud_permissions.py
+│   │       └── nextcloud_events.py
+│
+│   ├── ingestion/
+│   │
+│   │   ├── pipeline.py
+│   │   ├── file_loader.py
+│   │   ├── document_parser.py
+│   │   ├── chunker.py
+│   │   ├── metadata_extractor.py
+│   │   └── checksum.py
+│
+│   ├── ai/
+│   │
+│   │   ├── llm_client.py
+│   │   ├── embedding_client.py
+│   │   ├── reranker.py
+│   │   ├── prompt_templates.py
+│   │   ├── rag_pipeline.py
+│   │   └── citation_builder.py
+│
+│   ├── workers/
+│   │
+│   │   ├── celery_app.py
+│   │   ├── ingestion_tasks.py
+│   │   ├── sync_tasks.py
+│   │   ├── reindex_tasks.py
+│   │   └── cleanup_tasks.py
+│
+│   ├── db/
+│   │
+│   │   ├── session.py
+│   │   ├── base.py
+│   │   ├── init_db.py
+│   │   └── migrations/
+│
+│   ├── parsers/
+│   │
+│   │   ├── pdf_parser.py
+│   │   ├── docx_parser.py
+│   │   ├── txt_parser.py
+│   │   └── markdown_parser.py
+│
+│   ├── storage/
+│   │
+│   │   ├── temp_store.py
+│   │   └── file_cache.py
+│
+│   └── utils/
+│       │
+│       ├── hashing.py
+│       ├── datetime_utils.py
+│       ├── file_types.py
+│       └── token_count.py
+│
+└── tests/
+
+
+
+frontend/
+│
+├── src/
+│
+│   ├── app/
+│   │
+│   │   ├── router.tsx
+│   │   └── providers.tsx
+│
+│   ├── pages/
+│   │
+│   │   ├── LoginPage.tsx
+│   │   ├── DashboardPage.tsx
+│   │   ├── ChatPage.tsx
+│   │   ├── DocumentsPage.tsx
+│   │   ├── ConnectorsPage.tsx
+│   │   └── JobsPage.tsx
+│
+│   ├── components/
+│   │
+│   │   ├── layout/
+│   │   │
+│   │   │   ├── Sidebar.tsx
+│   │   │   ├── Header.tsx
+│   │   │   └── PageContainer.tsx
+│   │
+│   │   ├── chat/
+│   │   │
+│   │   │   ├── ChatWindow.tsx
+│   │   │   ├── ChatInput.tsx
+│   │   │   ├── MessageBubble.tsx
+│   │   │   └── SourcePanel.tsx
+│   │
+│   │   ├── documents/
+│   │   │
+│   │   │   ├── DocumentTable.tsx
+│   │   │   └── DocumentViewer.tsx
+│   │
+│   │   ├── connectors/
+│   │   │
+│   │   │   └── NextcloudConnectorForm.tsx
+│   │
+│   │   └── ui/
+│   │
+│   │       ├── Button.tsx
+│   │       ├── Card.tsx
+│   │       ├── Modal.tsx
+│   │       └── Spinner.tsx
+│
+│   ├── hooks/
+│   │
+│   │   ├── useAuth.ts
+│   │   ├── useChat.ts
+│   │   ├── useDocuments.ts
+│   │   └── useConnector.ts
+│
+│   ├── api/
+│   │
+│   │   ├── client.ts
+│   │   ├── authApi.ts
+│   │   ├── chatApi.ts
+│   │   ├── documentApi.ts
+│   │   └── connectorApi.ts
+│
+│   ├── store/
+│   │
+│   │   └── authStore.ts
+│
+│   ├── types/
+│   │
+│   │   ├── user.ts
+│   │   ├── chat.ts
+│   │   ├── document.ts
+│   │   └── connector.ts
+│
+│   └── styles/
+│
+│       └── globals.css
+│
+└── index.html

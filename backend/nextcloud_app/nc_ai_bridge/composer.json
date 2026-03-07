@@ -1,0 +1,11 @@
+{
+  "name": "your-company/nc-ai-bridge",
+  "description": "Thin Nextcloud bridge to an external FastAPI AI workspace",
+  "type": "project",
+  "license": "AGPL-3.0-or-later",
+  "autoload": {
+    "psr-4": {
+      "OCA\\NcAiBridge\\": "lib/"
+    }
+  }
+}
