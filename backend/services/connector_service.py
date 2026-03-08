@@ -88,6 +88,18 @@ class ConnectorService:
             raise NotFoundError("Connector not found")
         return connector
 
+    async def delete_connector(self, connector_id: str, actor: User) -> None:
+        connector = await self.get_connector(connector_id)
+        await self.repo.delete(connector)
+        await self.audit.log(
+            action="connector.deleted",
+            resource_type="connector",
+            resource_id=str(connector.id),
+            message="Connector deleted",
+            user=actor,
+        )
+        await self.session.commit()
+
     async def test_connector(self, connector: Connector) -> ConnectorTestResponse:
         client = AsyncNextcloudClient(self.build_config(connector))
         try:

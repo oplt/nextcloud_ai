@@ -1,5 +1,6 @@
 <?xml version="1.0"?>
-<info>
+<info xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      xsi:noNamespaceSchemaLocation="https://apps.nextcloud.com/schema/apps/info.xsd">
     <id>nc_ai_bridge</id>
     <name>NC AI Bridge</name>
     <summary>Launch an external FastAPI AI workspace from the current Nextcloud session</summary>
@@ -9,12 +10,15 @@
     <namespace>NcAiBridge</namespace>
     <category>integration</category>
     <author mail="founder@example.com">Your Company</author>
-    <default_enable />
-    <navigation>
-        <name>AI Workspace</name>
-        <route>nc_ai_bridge.page.index</route>
-        <order>20</order>
-    </navigation>
+    <navigations>
+        <navigation>
+            <name>AI Workspace</name>
+            <route>nc_ai_bridge.page.index</route>
+            <order>20</order>
+            <icon>app.svg</icon>
+            <type>link</type>
+        </navigation>
+    </navigations>
     <dependencies>
         <nextcloud min-version="31" max-version="32"/>
     </dependencies>

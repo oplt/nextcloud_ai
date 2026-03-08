@@ -4,11 +4,33 @@ import { NextcloudConnectorForm } from '../components/NextcloudConnectorForm';
 type ConnectorsPageProps = {
   connectors: Connector[];
   onCreate: (payload: ConnectorPayload) => Promise<void>;
+  onDelete: (connectorId: string) => Promise<void>;
   onTest: (connectorId: string) => Promise<void>;
   onSync: (connectorId: string, fullReindex?: boolean) => Promise<void>;
 };
 
-export function ConnectorsPage({ connectors, onCreate, onTest, onSync }: ConnectorsPageProps) {
+function TrashIcon() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path
+        d="M9 3h6l1 2h4v2H4V5h4l1-2zm1 6h2v8h-2V9zm4 0h2v8h-2V9zM7 9h2v8H7V9zm1 11h8a2 2 0 0 0 2-2V8H6v10a2 2 0 0 0 2 2z"
+        fill="currentColor"
+      />
+    </svg>
+  );
+}
+
+export function ConnectorsPage({ connectors, onCreate, onDelete, onTest, onSync }: ConnectorsPageProps) {
+  const handleDelete = async (connectorId: string, displayName: string) => {
+    const confirmed = window.confirm(
+      `Delete "${displayName}" and all synced documents and jobs for this connector?`
+    );
+    if (!confirmed) {
+      return;
+    }
+    await onDelete(connectorId);
+  };
+
   return (
     <section className="split-layout">
       <NextcloudConnectorForm onSubmit={onCreate} />
@@ -34,6 +56,15 @@ export function ConnectorsPage({ connectors, onCreate, onTest, onSync }: Connect
                 </button>
                 <button type="button" onClick={() => void onSync(connector.id, true)}>
                   Full Reindex
+                </button>
+                <button
+                  type="button"
+                  className="icon-button icon-button--danger"
+                  onClick={() => void handleDelete(connector.id, connector.display_name)}
+                  aria-label={`Delete ${connector.display_name}`}
+                  title={`Delete ${connector.display_name}`}
+                >
+                  <TrashIcon />
                 </button>
               </div>
             </article>

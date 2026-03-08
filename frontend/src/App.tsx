@@ -3,6 +3,7 @@ import { useEffect, useMemo, useState } from 'react';
 import {
   askChat,
   createConnector,
+  deleteConnector,
   getChatSession,
   getDocument,
   listChatSessions,
@@ -100,6 +101,16 @@ function App() {
     }, 'Connector saved');
   };
 
+  const handleDeleteConnector = async (connectorId: string) => {
+    await withFeedback(async () => {
+      await deleteConnector(connectorId);
+      if (selectedDocument?.connector_id === connectorId) {
+        setSelectedDocument(null);
+      }
+      await loadData();
+    }, 'Connector deleted');
+  };
+
   const handleSelectDocument = async (document: DocumentSummary) => {
     await withFeedback(async () => {
       const detail = await getDocument(document.id);
@@ -189,6 +200,7 @@ function App() {
           <ConnectorsPage
             connectors={connectors}
             onCreate={handleCreateConnector}
+            onDelete={handleDeleteConnector}
             onTest={(connectorId) => withFeedback(async () => {
               const result = await testConnector(connectorId);
               setFlash(result.message);

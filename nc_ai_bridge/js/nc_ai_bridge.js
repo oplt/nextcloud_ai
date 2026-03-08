@@ -1,6 +1,19 @@
 (function () {
   'use strict';
 
+  function getRequestToken() {
+    if (window.OC && typeof window.OC.requestToken === 'string' && window.OC.requestToken) {
+      return window.OC.requestToken;
+    }
+
+    if (typeof window.oc_requesttoken === 'string' && window.oc_requesttoken) {
+      return window.oc_requesttoken;
+    }
+
+    const meta = document.querySelector('meta[name="requesttoken"]');
+    return meta ? meta.getAttribute('content') : '';
+  }
+
   async function bootstrapAndPost() {
     const root = document.getElementById('nc-ai-bridge');
     if (!root) return;
@@ -18,11 +31,13 @@
     }
 
     try {
+      const requestToken = getRequestToken();
       const response = await fetch(bootstrapUrl, {
         method: 'POST',
         headers: {
           'Accept': 'application/json',
-          'requesttoken': OC.requestToken,
+          'requesttoken': requestToken,
+          'X-Requested-With': 'XMLHttpRequest',
         },
         credentials: 'same-origin',
       });

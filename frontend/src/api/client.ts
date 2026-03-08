@@ -54,8 +54,22 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
       throw new Error('UNAUTHORIZED');
     }
 
-    const message = await response.text().catch(() => `Request failed with ${response.status}`);
-    throw new Error(message || `Request failed with ${response.status}`);
+    try {
+      const payload = await response.json();
+      if (typeof payload?.detail === 'string' && payload.detail) {
+        throw new Error(payload.detail);
+      }
+      if (typeof payload?.message === 'string' && payload.message) {
+        throw new Error(payload.message);
+      }
+      throw new Error(JSON.stringify(payload));
+    } catch (jsonError) {
+      if (jsonError instanceof Error && jsonError.message) {
+        throw jsonError;
+      }
+      const message = await response.text().catch(() => `Request failed with ${response.status}`);
+      throw new Error(message || `Request failed with ${response.status}`);
+    }
   }
 
   return response.json() as Promise<T>;
@@ -87,6 +101,12 @@ export async function createConnector(payload: ConnectorPayload): Promise<Connec
   return request<Connector>('/connectors', {
     method: 'POST',
     body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteConnector(connectorId: string): Promise<void> {
+  return request<void>(`/connectors/${connectorId}`, {
+    method: 'DELETE',
   });
 }
 

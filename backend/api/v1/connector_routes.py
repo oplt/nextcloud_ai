@@ -1,8 +1,13 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 
 from backend.api.deps import CurrentIdentityDep, DbSessionDep
+from backend.connectors.nextcloud.exceptions import (
+    NextcloudAPIError,
+    NextcloudAuthenticationError,
+)
+from backend.core.exceptions import BadRequestError
 from backend.schemas.connector_schema import (
     ConnectorCreate,
     ConnectorRead,
@@ -57,13 +62,30 @@ async def update_connector(
     return ConnectorRead.model_validate(connector)
 
 
+@router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_connector(
+    connector_id: str,
+    session: DbSessionDep,
+    identity: CurrentIdentityDep,
+) -> Response:
+    await ConnectorService(session).delete_connector(connector_id, actor=identity.user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+
 @router.post("/{connector_id}/test", response_model=ConnectorTestResponse)
 async def test_connector(
     connector_id: str, session: DbSessionDep, _: CurrentIdentityDep
 ) -> ConnectorTestResponse:
     service = ConnectorService(session)
     connector = await service.get_connector(connector_id)
-    return await service.test_connector(connector)
+    try:
+        return await service.test_connector(connector)
+    except NextcloudAuthenticationError as exc:
+        raise BadRequestError(
+            "Nextcloud rejected the connector credentials. Use the account username and an app password."
+        ) from exc
+    except NextcloudAPIError as exc:
+        raise BadRequestError(str(exc)) from exc
 
 
 @router.post("/{connector_id}/sync", response_model=SyncJobRead)

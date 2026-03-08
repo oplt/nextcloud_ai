@@ -98,7 +98,7 @@ async def consume_nextcloud_bridge_token(
         ),
     )
     redirect = RedirectResponse(
-        url=settings.FRONTEND_URL, status_code=status.HTTP_303_SEE_OTHER
+        url=settings.frontend_redirect_url, status_code=status.HTTP_303_SEE_OTHER
     )
     redirect.set_cookie(
         key=settings.AUTH_COOKIE_NAME,

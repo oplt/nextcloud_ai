@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import json
 from functools import cached_property
 from pathlib import Path
 from typing import Literal, List
@@ -25,7 +26,9 @@ class Settings(BaseSettings):
     APP_ENV: Literal["development", "test", "staging", "production"] = "development"
     DEBUG: bool = True
     API_V1_PREFIX: str = "/api/v1"
-    FRONTEND_URL:List[str] = Field(default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"])
+    FRONTEND_URL: str | List[str] = Field(
+        default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
+    )
 
     DATABASE_URL: str
     SQL_ECHO: bool = False
@@ -80,10 +83,45 @@ class Settings(BaseSettings):
         make_url(normalized)
         return normalized
 
+    @field_validator("FRONTEND_URL", mode="before")
+    @classmethod
+    def normalize_frontend_url(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+
+        normalized = value.strip()
+        if normalized.startswith("'[") and normalized.endswith("]'"):
+            normalized = normalized[1:-1]
+        elif normalized.startswith('"[') and normalized.endswith(']"'):
+            normalized = normalized[1:-1]
+
+        if normalized.startswith("[") and normalized.endswith("]"):
+            parsed = json.loads(normalized)
+            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+                return parsed
+
+        return normalized.strip("'\"")
+
     @field_validator("FRONTEND_URL", mode="after")
     @classmethod
-    def strip_frontend_urls(cls, values: List[str]) -> List[str]:
+    def strip_frontend_urls(cls, values: str | List[str]) -> str | List[str]:
+        if isinstance(values, str):
+            return values.rstrip("/")
         return [url.rstrip("/") for url in values]
+
+    @cached_property
+    def frontend_allowed_origins(self) -> List[str]:
+        if isinstance(self.FRONTEND_URL, str):
+            return [self.FRONTEND_URL]
+        return self.FRONTEND_URL
+
+    @cached_property
+    def frontend_redirect_url(self) -> str:
+        if isinstance(self.FRONTEND_URL, str):
+            return self.FRONTEND_URL
+        if not self.FRONTEND_URL:
+            raise ValueError("FRONTEND_URL must contain at least one URL")
+        return self.FRONTEND_URL[-1]
 
     @cached_property
     def effective_celery_broker_url(self) -> str:

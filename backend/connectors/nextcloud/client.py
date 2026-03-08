@@ -43,7 +43,7 @@ class AsyncNextcloudClient:
         await self._client.aclose()
 
     async def verify_credentials(self) -> None:
-        response = await self._client.get("ocs/v2.php/cloud/user?format=json")
+        response = await self._request("GET", "ocs/v2.php/cloud/user?format=json")
         if response.status_code in {401, 403}:
             raise NextcloudAuthenticationError(
                 "Nextcloud connector authentication failed"
@@ -66,7 +66,7 @@ class AsyncNextcloudClient:
   </d:prop>
 </d:propfind>
 """
-        response = await self._client.request(
+        response = await self._request(
             "PROPFIND",
             dav_path,
             headers={"Depth": str(depth), "Content-Type": "application/xml"},
@@ -76,12 +76,13 @@ class AsyncNextcloudClient:
         return self._parse_multistatus(response.text)
 
     async def download_file(self, remote_path: str) -> bytes:
-        response = await self._client.get(self._dav_path(remote_path))
+        response = await self._request("GET", self._dav_path(remote_path))
         self._raise_for_status(response, f"Could not download file {remote_path}")
         return response.content
 
     async def get_shares(self, remote_path: str) -> list[ShareGrant]:
-        response = await self._client.get(
+        response = await self._request(
+            "GET",
             "ocs/v2.php/apps/files_sharing/api/v1/shares",
             params={
                 "format": "json",
@@ -176,6 +177,16 @@ class AsyncNextcloudClient:
             return parsedate_to_datetime(value).astimezone(timezone.utc)
         except (TypeError, ValueError, IndexError):
             return None
+
+    async def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        try:
+            return await self._client.request(method, url, **kwargs)
+        except httpx.RequestError as exc:
+            base_url = str(self.config.base_url).rstrip("/")
+            raise NextcloudAPIError(
+                f"Could not reach Nextcloud at {base_url}. "
+                "Check the connector base URL and that the server is reachable from the backend."
+            ) from exc
 
     @staticmethod
     def _raise_for_status(response: httpx.Response, message: str) -> None:
