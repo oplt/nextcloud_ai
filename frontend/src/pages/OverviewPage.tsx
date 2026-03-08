@@ -66,18 +66,20 @@ export function OverviewPage({
               New chat
             </button>
           </header>
-          {sessions.length === 0 ? <p className="empty-state">No chats yet. Start with a question.</p> : null}
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              className={`session-button${session.id === activeSession?.id ? ' session-button--active' : ''}`}
-              onClick={() => void onSelectSession(session.id)}
-            >
-              <strong>{session.title}</strong>
-              <small>{new Date(session.updated_at).toLocaleString()}</small>
-            </button>
-          ))}
+          <div className="session-list__content">
+            {sessions.length === 0 ? <p className="empty-state">No chats yet. Start with a question.</p> : null}
+            {sessions.map((session) => (
+              <button
+                key={session.id}
+                type="button"
+                className={`session-button${session.id === activeSession?.id ? ' session-button--active' : ''}`}
+                onClick={() => void onSelectSession(session.id)}
+              >
+                <strong>{session.title}</strong>
+                <small>{new Date(session.updated_at).toLocaleString()}</small>
+              </button>
+            ))}
+          </div>
         </aside>
         <div className="chat-main">
           <ChatWindow messages={activeSession?.messages ?? []} loading={loading} />

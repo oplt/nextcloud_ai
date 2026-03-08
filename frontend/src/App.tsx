@@ -31,10 +31,25 @@ import type {
 
 type View = 'overview' | 'connectors' | 'documents';
 
-const navItems: Array<{ key: View; label: string }> = [
-  { key: 'overview', label: 'Home' },
-  { key: 'connectors', label: 'Connectors' },
-  { key: 'documents', label: 'Documents' },
+const navItems: Array<{ key: View; label: string; heading: string; description: string }> = [
+  {
+    key: 'overview',
+    label: 'Home',
+    heading: 'Private company knowledge workspace',
+    description: 'Track connector health, browse synced content, and work with the latest chat context.',
+  },
+  {
+    key: 'connectors',
+    label: 'Connectors',
+    heading: 'Connector management',
+    description: 'Configure Nextcloud sources, validate credentials, and run sync jobs from one place.',
+  },
+  {
+    key: 'documents',
+    label: 'Documents',
+    heading: 'Document catalog',
+    description: 'Review indexed files, inspect metadata, and requeue document parsing when needed.',
+  },
 ];
 
 function createLocalChatMessage(
@@ -54,6 +69,18 @@ function createLocalChatMessage(
     created_at: timestamp,
     updated_at: timestamp,
   };
+}
+
+function getUserInitials(name: string | null | undefined): string {
+  const parts = name?.trim().split(/\s+/).filter(Boolean) ?? [];
+  if (parts.length === 0) {
+    return 'NC';
+  }
+
+  return parts
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase() ?? '')
+    .join('');
 }
 
 function App() {
@@ -112,7 +139,10 @@ function App() {
     });
   }, [user]);
 
-  const currentTitle = useMemo(() => navItems.find((item) => item.key === view)?.label ?? 'Home', [view]);
+  const currentView = useMemo(
+    () => navItems.find((item) => item.key === view) ?? navItems[0],
+    [view],
+  );
 
   const withFeedback = async (work: () => Promise<void>, successMessage: string) => {
     setBusy(true);
@@ -231,85 +261,106 @@ function App() {
     return <LoginPage onLogin={login} error={error} />;
   }
 
+  const userLabel = user.full_name ?? user.username;
+  const userMeta = user.email ?? user.external_subject ?? 'Authenticated session';
+
   return (
     <div className="app-shell">
-      <aside className="sidebar">
-        <div>
-          <p className="eyebrow">MVP Control Plane</p>
-          <h1>Nextcloud AI</h1>
+      <header className="top-nav">
+        <div className="nav-brand">
+          <div className="nav-brand-icon" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="presentation">
+              <path
+                fill="currentColor"
+                d="M18.5 18a3.5 3.5 0 0 0 .72-6.93A6 6 0 0 0 7.3 9.3 4.5 4.5 0 0 0 6 18h12.5Zm-12.43-2a2.5 2.5 0 1 1 .6-4.93l1.23.3.22-1.25a4 4 0 0 1 7.93.55v1h.75a1.5 1.5 0 1 1 0 3H6.07Z"
+              />
+            </svg>
+          </div>
+          <div className="nav-brand-name">
+            Nextcloud <span className="accent">AI</span>
+          </div>
         </div>
-        <nav>
+        <nav className="nav-links" aria-label="Primary">
           {navItems.map((item) => (
             <button
               key={item.key}
               type="button"
-              className={item.key === view ? 'nav-button nav-button--active' : 'nav-button'}
+              className={item.key === view ? 'nav-link active' : 'nav-link'}
+              aria-current={item.key === view ? 'page' : undefined}
               onClick={() => setView(item.key)}
             >
               {item.label}
             </button>
           ))}
         </nav>
-        <footer className="sidebar-footer">
-          <p>{user.full_name ?? user.username}</p>
-          <small>{user.email ?? user.external_subject}</small>
-          <div className="sidebar-actions">
-            <button type="button" onClick={() => void refresh()}>
-              Refresh Session
-            </button>
-            <button type="button" onClick={() => void logout()}>
-              Logout
-            </button>
+        <div className="nav-end">
+          <button type="button" className="btn" onClick={() => void refresh()}>
+            Refresh Session
+          </button>
+          <div className="nav-avatar" title={userLabel}>
+            {getUserInitials(userLabel)}
           </div>
-        </footer>
-      </aside>
-      <main className="main-shell">
-        <header className="main-header">
+          <button type="button" className="nav-link nav-link--logout" onClick={() => void logout()}>
+            Logout
+          </button>
+        </div>
+      </header>
+      <main className="page-content">
+        <div className="page-body">
+          <header className="page-header">
+            <div>
+              <p className="page-kicker">{currentView.label}</p>
+              <h1>{currentView.heading}</h1>
+              <p className="page-description">{currentView.description}</p>
+            </div>
+            <div className="page-header-meta">
+              <strong>{userLabel}</strong>
+              <span>{userMeta}</span>
+            </div>
+          </header>
           <div>
-            <p className="eyebrow">{currentTitle}</p>
-            <h2>Private company knowledge workspace</h2>
+            {flash ? <p className="flash-banner">{flash}</p> : null}
           </div>
-          {flash ? <p className="flash-banner">{flash}</p> : null}
-        </header>
 
-        {view === 'overview' ? (
-          <OverviewPage
-            user={user}
-            connectors={connectors}
-            documents={documents}
-            sessions={sessions}
-            activeSession={activeSessionView}
-            sources={sources}
-            loading={busy}
-            onSelectSession={handleSelectSession}
-            onAsk={handleAsk}
-            onNewChat={handleNewChat}
-          />
-        ) : null}
-        {view === 'connectors' ? (
-          <ConnectorsPage
-            connectors={connectors}
-            onCreate={handleCreateConnector}
-            onDelete={handleDeleteConnector}
-            onTest={(connectorId) => withFeedback(async () => {
-              const result = await testConnector(connectorId);
-              setFlash(result.message);
-            }, 'Connector validated')}
-            onSync={(connectorId, fullReindex) => withFeedback(async () => {
-              await syncConnector(connectorId, Boolean(fullReindex));
-              await loadData();
-            }, fullReindex ? 'Full reindex queued' : 'Sync queued')}
-          />
-        ) : null}
-        {view === 'documents' ? (
-          <DocumentsPage
-            documents={documents}
-            selectedDocumentId={selectedDocumentId}
-            selectedDocument={selectedDocument}
-            onSelect={handleSelectDocument}
-            onReindex={handleReindexDocument}
-          />
-        ) : null}
+          {view === 'overview' ? (
+            <OverviewPage
+              user={user}
+              connectors={connectors}
+              documents={documents}
+              sessions={sessions}
+              activeSession={activeSessionView}
+              sources={sources}
+              loading={busy}
+              onSelectSession={handleSelectSession}
+              onAsk={handleAsk}
+              onNewChat={handleNewChat}
+            />
+          ) : null}
+          {view === 'connectors' ? (
+            <ConnectorsPage
+              connectors={connectors}
+              onCreate={handleCreateConnector}
+              onDelete={handleDeleteConnector}
+              onTest={(connectorId) => withFeedback(async () => {
+                const result = await testConnector(connectorId);
+                setFlash(result.message);
+              }, 'Connector validated')}
+              onSync={(connectorId, fullReindex) => withFeedback(async () => {
+                await syncConnector(connectorId, Boolean(fullReindex));
+                await loadData();
+              }, fullReindex ? 'Full reindex queued' : 'Sync queued')}
+            />
+          ) : null}
+          {view === 'documents' ? (
+            <DocumentsPage
+              documents={documents}
+              selectedDocumentId={selectedDocumentId}
+              selectedDocument={selectedDocument}
+              onSelect={handleSelectDocument}
+              onReindex={handleReindexDocument}
+            />
+          ) : null}
+        </div>
       </main>
     </div>
   );

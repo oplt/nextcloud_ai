@@ -3,6 +3,8 @@ from __future__ import annotations
 import io
 from dataclasses import dataclass
 from pathlib import Path
+import xml.etree.ElementTree as ET
+from zipfile import BadZipFile, ZipFile
 
 import docx
 import pdfplumber
@@ -29,12 +31,22 @@ PDF_MIME_TYPES = {"application/pdf"}
 DOCX_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 }
+ODT_MIME_TYPES = {"application/vnd.oasis.opendocument.text"}
 TEXT_MIME_TYPES = {
     "text/plain",
     "text/markdown",
     "text/x-markdown",
     "application/octet-stream",
 }
+
+ODT_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+ODT_TEXT_NS = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ODT_DOCUMENT_CONTENT_TAG = f"{{{ODT_OFFICE_NS}}}document-content"
+ODT_PARAGRAPH_TAG = f"{{{ODT_TEXT_NS}}}p"
+ODT_HEADING_TAG = f"{{{ODT_TEXT_NS}}}h"
+ODT_LINE_BREAK_TAG = f"{{{ODT_TEXT_NS}}}line-break"
+ODT_TAB_TAG = f"{{{ODT_TEXT_NS}}}tab"
+ODT_SPACE_TAG = f"{{{ODT_TEXT_NS}}}s"
 
 
 async def parse_document_bytes(
@@ -47,6 +59,8 @@ async def parse_document_bytes(
         return parse_pdf_bytes(payload)
     if suffix == ".docx" or normalized_mime in DOCX_MIME_TYPES:
         return parse_docx_bytes(payload)
+    if suffix == ".odt" or normalized_mime in ODT_MIME_TYPES:
+        return parse_odt_bytes(payload)
     if suffix in {".txt", ".md", ".markdown"} or normalized_mime in TEXT_MIME_TYPES:
         return parse_text_bytes(
             payload,
@@ -86,6 +100,40 @@ def parse_docx_bytes(payload: bytes) -> ParsedDocument:
     )
 
 
+def parse_odt_bytes(payload: bytes) -> ParsedDocument:
+    try:
+        with ZipFile(io.BytesIO(payload)) as archive:
+            content_xml = archive.read("content.xml")
+    except (BadZipFile, KeyError) as exc:
+        raise ValueError("Invalid ODT payload") from exc
+
+    try:
+        root = ET.fromstring(content_xml)
+    except ET.ParseError as exc:
+        raise ValueError("Invalid ODT XML payload") from exc
+
+    if root.tag != ODT_DOCUMENT_CONTENT_TAG:
+        raise ValueError("Invalid ODT document root")
+
+    document_text = root.find(f"./{{{ODT_OFFICE_NS}}}body/{{{ODT_OFFICE_NS}}}text")
+    if document_text is None:
+        raise ValueError("Invalid ODT document body")
+
+    blocks = [
+        block_text
+        for element in document_text.iter()
+        if element.tag in {ODT_PARAGRAPH_TAG, ODT_HEADING_TAG}
+        if (block_text := _extract_odt_text(element))
+    ]
+    text = "\n".join(blocks)
+    pages = [ParsedPage(page_number=None, text=text)] if text else []
+    return ParsedDocument(
+        text=text,
+        pages=pages,
+        metadata={"block_count": len(blocks), "parser": "odt-xml"},
+    )
+
+
 def parse_text_bytes(payload: bytes, *, markdown: bool = False) -> ParsedDocument:
     text = _decode_text(payload)
     pages = [ParsedPage(page_number=None, text=text)] if text.strip() else []
@@ -107,3 +155,25 @@ def _decode_text(payload: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return payload.decode("utf-8", errors="ignore")
+
+
+def _extract_odt_text(element: ET.Element) -> str:
+    parts: list[str] = []
+    if element.text:
+        parts.append(element.text)
+
+    for child in element:
+        if child.tag == ODT_LINE_BREAK_TAG:
+            parts.append("\n")
+        elif child.tag == ODT_TAB_TAG:
+            parts.append("\t")
+        elif child.tag == ODT_SPACE_TAG:
+            count = int(child.attrib.get(f"{{{ODT_TEXT_NS}}}c", "1"))
+            parts.append(" " * max(1, count))
+        else:
+            parts.append(_extract_odt_text(child))
+
+        if child.tail:
+            parts.append(child.tail)
+
+    return "".join(parts).strip()

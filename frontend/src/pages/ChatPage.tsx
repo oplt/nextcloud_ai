@@ -27,12 +27,19 @@ export function ChatPage({
           <h3>Chats</h3>
           <span>{sessions.length}</span>
         </header>
-        {sessions.map((session) => (
-          <button key={session.id} type="button" className="session-button" onClick={() => void onSelectSession(session.id)}>
-            <strong>{session.title}</strong>
-            <small>{new Date(session.updated_at).toLocaleString()}</small>
-          </button>
-        ))}
+        <div className="session-list__content">
+          {sessions.map((session) => (
+            <button
+              key={session.id}
+              type="button"
+              className="session-button"
+              onClick={() => void onSelectSession(session.id)}
+            >
+              <strong>{session.title}</strong>
+              <small>{new Date(session.updated_at).toLocaleString()}</small>
+            </button>
+          ))}
+        </div>
       </aside>
       <div className="chat-main">
         <ChatWindow messages={activeSession?.messages ?? []} loading={loading} />
