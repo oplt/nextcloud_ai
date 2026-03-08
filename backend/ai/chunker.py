@@ -33,31 +33,25 @@ class Span:
 
 
 def chunk_parsed_document(
-    parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40
+        parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40
 ) -> list[ChunkDraft]:
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
 
     drafts: list[ChunkDraft] = []
     global_offset = 0
-    chunk_index = 0
     pages = parsed.pages or [ParsedPage(page_number=None, text=parsed.text)]
 
     for page in pages:
         for draft in _chunk_text(
-            page.text,
-            chunk_size=chunk_size,
-            overlap=overlap,
-            global_offset=global_offset,
-            page_number=page.page_number,
-            chunk_index_start=chunk_index,
+                page.text,
+                chunk_size=chunk_size,
+                overlap=overlap,
+                global_offset=global_offset,
+                page_number=page.page_number,
+                chunk_index_start=len(drafts),
         ):
             drafts.append(draft)
-        chunk_index += (
-            len([d for d in drafts if d.page_number == page.page_number])
-            if page.page_number is not None
-            else len(drafts) - chunk_index
-        )
         global_offset += len(page.text) + 2
 
     if not drafts and parsed.text.strip():
@@ -78,13 +72,13 @@ def chunk_parsed_document(
 
 
 def _chunk_text(
-    text: str,
-    *,
-    chunk_size: int,
-    overlap: int,
-    global_offset: int,
-    page_number: int | None,
-    chunk_index_start: int,
+        text: str,
+        *,
+        chunk_size: int,
+        overlap: int,
+        global_offset: int,
+        page_number: int | None,
+        chunk_index_start: int,
 ) -> list[ChunkDraft]:
     spans = [Span(match.start(), match.end()) for match in _WORD_RE.finditer(text)]
     if not spans:
@@ -93,7 +87,7 @@ def _chunk_text(
     step = chunk_size - overlap
     drafts: list[ChunkDraft] = []
     for index, word_start in enumerate(
-        range(0, len(spans), step), start=chunk_index_start
+            range(0, len(spans), step), start=chunk_index_start
     ):
         word_end = min(word_start + chunk_size, len(spans))
         char_start = spans[word_start].start

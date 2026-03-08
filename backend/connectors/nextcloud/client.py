@@ -6,7 +6,7 @@ import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
@@ -160,8 +160,8 @@ class AsyncNextcloudClient:
 
     def _href_to_path(self, href: str) -> str:
         parsed = urlparse(href)
-        path = parsed.path
-        instance_path = urlparse(str(self.config.base_url)).path.rstrip("/")
+        path = unquote(parsed.path)
+        instance_path = unquote(urlparse(str(self.config.base_url)).path).rstrip("/")
         if instance_path and path.startswith(instance_path):
             path = path[len(instance_path) :]
         prefix = f"/remote.php/dav/files/{self.config.username}"

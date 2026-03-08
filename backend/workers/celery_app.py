@@ -18,4 +18,6 @@ celery_app.conf.update(
     accept_content=["json"],
     timezone="UTC",
     enable_utc=True,
+    task_always_eager=settings.celery_task_always_eager,
+    task_store_eager_result=settings.celery_task_always_eager,
 )

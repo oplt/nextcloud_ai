@@ -1,11 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import uuid
+from dataclasses import dataclass
+
 from backend.db.session import AsyncSessionLocal
 from backend.services.indexing_service import DocumentIngestionService
 from backend.services.job_lifecycle import JobLifecycleService
 from backend.services.nextcloud_sync_service import NextcloudConnectorSyncService
 from backend.workers.celery_app import celery_app
+
+logger = logging.getLogger(__name__)
+
+
+@dataclass(slots=True)
+class EnqueuedTaskHandle:
+    id: str
+
+
+async def _run_logged_background_task(coro, *, label: str) -> None:
+    try:
+        await coro
+    except Exception:
+        logger.exception("Background task %s failed", label)
 
 
 @celery_app.task(
@@ -63,9 +81,40 @@ async def _run_document_reindex_task(*, document_id: str) -> str:
         return str(document.id)
 
 
+def _enqueue_eager_task(coro, *, label: str) -> EnqueuedTaskHandle:
+    task_id = str(uuid.uuid4())
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.run(coro)
+    else:
+        loop.create_task(_run_logged_background_task(coro, label=label), name=label)
+    return EnqueuedTaskHandle(id=task_id)
+
+
 def enqueue_connector_sync_job(job_id: str):
+    if celery_app.conf.task_always_eager:
+        task_id = str(uuid.uuid4())
+        coro = _run_connector_sync_job(job_id=job_id, task_id=task_id)
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(coro)
+        else:
+            loop.create_task(
+                _run_logged_background_task(
+                    coro, label=f"connector_sync:{job_id}"
+                ),
+                name=f"connector_sync:{job_id}",
+            )
+        return EnqueuedTaskHandle(id=task_id)
     return run_connector_sync_job.delay(job_id)
 
 
 def enqueue_document_reindex(document_id: str):
+    if celery_app.conf.task_always_eager:
+        return _enqueue_eager_task(
+            _run_document_reindex_task(document_id=document_id),
+            label=f"document_reindex:{document_id}",
+        )
     return run_document_reindex_task.delay(document_id)

@@ -26,11 +26,11 @@ class NextcloudConnectorSyncService:
         self.ingestion = DocumentIngestionService(session)
 
     async def sync_connector(
-        self,
-        connector: Connector,
-        *,
-        full_reindex: bool = False,
-        job: SyncJob | None = None,
+            self,
+            connector: Connector,
+            *,
+            full_reindex: bool = False,
+            job: SyncJob | None = None,
     ) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         config = self.connector_service.build_config(connector)
@@ -49,7 +49,8 @@ class NextcloudConnectorSyncService:
         try:
             items = await sync_service.snapshot(connector.root_path)
             if job is not None:
-                JobLifecycleService.mark_running(job, total=len(items))
+                job.progress_total = len(items)
+                job.progress_completed = 0
 
             for item in items:
                 discovered += 1
@@ -108,7 +109,7 @@ class NextcloudConnectorSyncService:
             await client.aclose()
 
     async def _upsert_document(
-        self, connector: Connector, item
+            self, connector: Connector, item
     ) -> tuple[Document, str | None]:
         external_id = item.node.file_id or item.node.path
         document = await self.document_repo.get_by_connector_and_external_id(
@@ -148,10 +149,10 @@ class NextcloudConnectorSyncService:
 
     @staticmethod
     def _document_needs_reindex(
-        document: Document, previous_version_tag: str | None, new_etag: str | None
+            document: Document, previous_version_tag: str | None, new_etag: str | None
     ) -> bool:
         if document.indexed_at is None:
             return True
-        if document.parse_status in {"failed", "pending", "unsupported"}:
+        if document.parse_status in {"failed", "pending"}:
             return True
         return previous_version_tag != new_etag

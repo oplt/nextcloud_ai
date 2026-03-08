@@ -15,8 +15,12 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
     if (!trimmed || disabled) {
       return;
     }
-    setQuestion('');
-    await onSubmit(trimmed);
+    try {
+      await onSubmit(trimmed);
+      setQuestion('');
+    } catch {
+      // Keep the draft in place if the request fails before the chat refresh completes.
+    }
   };
 
   return (

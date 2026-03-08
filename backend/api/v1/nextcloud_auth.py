@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 from functools import lru_cache
+from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
-from fastapi.responses import RedirectResponse
+from fastapi.responses import HTMLResponse
 
 from backend.connectors.nextcloud import BridgeTokenCodec, get_nextcloud_settings
 from backend.connectors.nextcloud.exceptions import BridgeTokenError
@@ -97,10 +99,29 @@ async def consume_nextcloud_bridge_token(
             nc_base_url=claims.nc_base_url,
         ),
     )
-    redirect = RedirectResponse(
-        url=settings.frontend_redirect_url, status_code=status.HTTP_303_SEE_OTHER
-    )
-    redirect.set_cookie(
+    frontend_url = settings.frontend_redirect_url
+    escaped_frontend_url = escape(frontend_url, quote=True)
+    frontend_url_js = json.dumps(frontend_url)
+    html = f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="refresh" content="0;url={escaped_frontend_url}">
+    <title>Signing in…</title>
+  </head>
+  <body>
+    <p>Sign-in complete. Redirecting…</p>
+    <script>
+      window.location.replace({frontend_url_js});
+    </script>
+    <noscript>
+      <p><a href="{escaped_frontend_url}">Continue to the workspace</a></p>
+    </noscript>
+  </body>
+</html>"""
+    response = HTMLResponse(content=html, status_code=status.HTTP_200_OK)
+    response.headers["Cache-Control"] = "no-store"
+    response.set_cookie(
         key=settings.AUTH_COOKIE_NAME,
         value=auth_session.access_token,
         max_age=settings.auth_cookie_max_age,
@@ -110,4 +131,4 @@ async def consume_nextcloud_bridge_token(
         domain=settings.AUTH_COOKIE_DOMAIN,
         path="/",
     )
-    return redirect
+    return response

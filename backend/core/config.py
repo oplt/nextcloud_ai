@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     CELERY_BROKER_URL: str | None = None
     CELERY_RESULT_BACKEND: str | None = None
+    CELERY_TASK_ALWAYS_EAGER: bool | None = None
 
     JWT_SECRET_KEY: SecretStr = Field(default=SecretStr("change-me"))
     SETTINGS_VAULT_KEY: SecretStr | None = None
@@ -53,12 +54,12 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: str = "admin@example.com"
     FIRST_SUPERUSER_PASSWORD: str = "ChangeMe123!"
 
-    EMBEDDING_DIM: int = Field(default=768, ge=32, le=4096)
+    EMBEDDING_DIM: int
     EMBEDDING_PROVIDER: Literal["deterministic", "ollama"] = "deterministic"
     LLM_PROVIDER: Literal["stub", "ollama"] = "stub"
     OLLAMA_BASE_URL: AnyHttpUrl = Field(default="http://localhost:11434")
-    OLLAMA_EMBEDDING_MODEL: str = "nomic-embed-text"
-    OLLAMA_CHAT_MODEL: str = "llama3:8b-instruct"
+    OLLAMA_EMBEDDING_MODEL: str = "bge-m3:latest"
+    OLLAMA_CHAT_MODEL: str = "llama3:latest"
 
     NEXTCLOUD_BRIDGE_SHARED_SECRET: SecretStr = Field(default=SecretStr("change-me"))
     NEXTCLOUD_BRIDGE_ISSUER: str = "nextcloud-bridge"
@@ -130,6 +131,12 @@ class Settings(BaseSettings):
     @cached_property
     def effective_celery_result_backend(self) -> str:
         return self.CELERY_RESULT_BACKEND or self.REDIS_URL
+
+    @cached_property
+    def celery_task_always_eager(self) -> bool:
+        if self.CELERY_TASK_ALWAYS_EAGER is not None:
+            return self.CELERY_TASK_ALWAYS_EAGER
+        return self.APP_ENV == "development"
 
     @cached_property
     def auth_cookie_max_age(self) -> int:

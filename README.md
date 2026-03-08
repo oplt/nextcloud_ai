@@ -214,6 +214,8 @@ Run the worker:
 celery -A backend.workers.celery_app.celery_app worker --loglevel=INFO
 ```
 
+In `APP_ENV=development`, connector sync and document reindex run eagerly in the backend process by default. A separate worker is only required if you explicitly set `CELERY_TASK_ALWAYS_EAGER=false` or when running non-development environments.
+
 ### 6.2 Frontend
 
 ```bash
@@ -360,7 +362,7 @@ Check:
 Check:
 
 - documents were actually indexed
-- the worker is running
+- the worker is running if `CELERY_TASK_ALWAYS_EAGER=false` or you are outside development
 - file types are supported
 - embeddings are configured correctly
 - the logged-in user is allowed to see the synced documents

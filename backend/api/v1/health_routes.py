@@ -20,6 +20,6 @@ async def ready(session: DbSessionDep) -> dict[str, object]:
     return {
         "status": "ready",
         "database": "ok",
-        "redis": settings.REDIS_URL,
-        "broker": settings.effective_celery_broker_url,
+        "redis": "ok",
+        "broker": "ok",
     }

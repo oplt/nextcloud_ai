@@ -17,13 +17,13 @@ class DocumentRepository(BaseRepository[Document]):
         super().__init__(session, Document)
 
     async def get_by_connector_and_external_id(
-        self, connector_id: UUID, external_id: str
+            self, connector_id: UUID, external_id: str
     ) -> Document | None:
         result = await self.session.execute(
             select(Document).where(
                 Document.connector_id == connector_id,
                 Document.external_id == external_id,
-            )
+                )
         )
         return result.scalar_one_or_none()
 
@@ -35,8 +35,18 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return result.scalar_one_or_none()
 
+    async def get_with_chunks_visible_to_auth(
+            self, document_id: UUID | str, auth: AuthContext
+    ) -> Document | None:
+        result = await self.session.execute(
+            select(Document)
+            .options(selectinload(Document.chunks))
+            .where(Document.id == document_id, self.visibility_clause(auth))
+        )
+        return result.scalar_one_or_none()
+
     async def get_visible_to_auth(
-        self, document_id: UUID | str, auth: AuthContext
+            self, document_id: UUID | str, auth: AuthContext
     ) -> Document | None:
         stmt = select(Document).where(
             Document.id == document_id, self.visibility_clause(auth)
@@ -45,16 +55,16 @@ class DocumentRepository(BaseRepository[Document]):
         return result.scalar_one_or_none()
 
     async def search(
-        self,
-        *,
-        auth: AuthContext | None = None,
-        query: str | None = None,
-        connector_id: UUID | None = None,
-        mime_type: str | None = None,
-        parse_status: str | None = None,
-        include_deleted: bool = False,
-        offset: int = 0,
-        limit: int = 50,
+            self,
+            *,
+            auth: AuthContext | None = None,
+            query: str | None = None,
+            connector_id: UUID | None = None,
+            mime_type: str | None = None,
+            parse_status: str | None = None,
+            include_deleted: bool = False,
+            offset: int = 0,
+            limit: int = 50,
     ) -> list[Document]:
         stmt: Select[tuple[Document]] = select(Document)
         filters = []
@@ -81,7 +91,7 @@ class DocumentRepository(BaseRepository[Document]):
         return list(result.scalars().all())
 
     async def mark_deleted_missing_from_external_ids(
-        self, *, connector_id: UUID, external_ids: Sequence[str]
+            self, *, connector_id: UUID, external_ids: Sequence[str]
     ) -> int:
         stmt = (
             update(Document)
@@ -89,7 +99,7 @@ class DocumentRepository(BaseRepository[Document]):
                 Document.connector_id == connector_id,
                 Document.external_id.not_in(list(external_ids)),
                 Document.is_deleted.is_(False),
-            )
+                )
             .values(is_deleted=True, sync_status="deleted")
         )
         result = await self.session.execute(stmt)
@@ -123,7 +133,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         super().__init__(session, DocumentChunk)
 
     async def delete_for_document(
-        self, document_id: UUID | str, *, flush: bool = False
+            self, document_id: UUID | str, *, flush: bool = False
     ) -> int:
         result = await self.session.execute(
             delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
@@ -133,7 +143,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         return int(result.rowcount or 0)
 
     async def replace_for_document(
-        self, document_id: UUID | str, chunks: Sequence[DocumentChunk]
+            self, document_id: UUID | str, chunks: Sequence[DocumentChunk]
     ) -> None:
         await self.session.execute(
             update(Document)
@@ -153,12 +163,12 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         return list(result.scalars().all())
 
     async def semantic_search(
-        self,
-        *,
-        embedding: list[float],
-        auth: AuthContext,
-        limit: int = 8,
-        document_ids: Sequence[UUID] | None = None,
+            self,
+            *,
+            embedding: list[float],
+            auth: AuthContext,
+            limit: int = 8,
+            document_ids: Sequence[UUID] | None = None,
     ) -> list[tuple[DocumentChunk, float]]:
         distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
         stmt = (
@@ -176,3 +186,40 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
         result = await self.session.execute(stmt)
         return [(row[0], float(row[1])) for row in result.all()]
+
+    async def keyword_search(
+            self,
+            *,
+            terms: Sequence[str],
+            auth: AuthContext,
+            limit: int = 16,
+            document_ids: Sequence[UUID] | None = None,
+    ) -> list[DocumentChunk]:
+        normalized_terms = [term.strip() for term in terms if term.strip()]
+        if not normalized_terms:
+            return []
+
+        like_clauses = []
+        for term in normalized_terms:
+            pattern = f"%{term}%"
+            like_clauses.extend(
+                [
+                    DocumentChunk.content.ilike(pattern),
+                    DocumentChunk.section_title.ilike(pattern),
+                    Document.file_name.ilike(pattern),
+                    Document.file_path.ilike(pattern),
+                ]
+            )
+
+        stmt = (
+            select(DocumentChunk)
+            .join(DocumentChunk.document)
+            .options(contains_eager(DocumentChunk.document))
+            .where(DocumentRepository.visibility_clause(auth), or_(*like_clauses))
+            .order_by(DocumentChunk.chunk_index.asc())
+            .limit(limit)
+        )
+        if document_ids:
+            stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
