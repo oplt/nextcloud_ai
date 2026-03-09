@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import type { DocumentDetail, DocumentSummary } from '../types/api';
 import {
@@ -15,8 +15,8 @@ type DocumentsPageProps = {
   documents: DocumentSummary[];
   selectedDocumentId: string | null;
   selectedDocument: DocumentDetail | null;
-  onSelect: (document: DocumentSummary) => Promise<void>;
-  onReindex: (documentId: string) => Promise<void>;
+  onSelect:   (document: DocumentSummary) => Promise<void>;
+  onReindex:  (documentId: string) => Promise<void>;
 };
 
 export function DocumentsPage({
@@ -26,51 +26,46 @@ export function DocumentsPage({
   onSelect,
   onReindex,
 }: DocumentsPageProps) {
-  const [sortColumn, setSortColumn] = useState<DocumentSortColumn>('updated');
+  const [sortColumn, setSortColumn]       = useState<DocumentSortColumn>('updated');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
-  const [currentPage, setCurrentPage] = useState(1);
+  const [currentPage, setCurrentPage]     = useState(1);
 
   const sortedDocuments = useMemo(() => {
-    const sorted = [...documents].sort((left, right) => {
-      const direction = sortDirection === 'asc' ? 1 : -1;
+    return [...documents].sort((a, b) => {
+      const dir = sortDirection === 'asc' ? 1 : -1;
 
       if (sortColumn === 'updated') {
-        const leftTime = left.modified_at ? new Date(left.modified_at).getTime() : Number.NEGATIVE_INFINITY;
-        const rightTime = right.modified_at ? new Date(right.modified_at).getTime() : Number.NEGATIVE_INFINITY;
-        if (leftTime !== rightTime) {
-          return (leftTime - rightTime) * direction;
-        }
-        return left.file_name.localeCompare(right.file_name) * direction;
+        const at = a.modified_at ? new Date(a.modified_at).getTime() : Number.NEGATIVE_INFINITY;
+        const bt = b.modified_at ? new Date(b.modified_at).getTime() : Number.NEGATIVE_INFINITY;
+        if (at !== bt) return (at - bt) * dir;
+        return a.file_name.localeCompare(b.file_name) * dir;
       }
 
       if (sortColumn === 'type') {
-        const typeComparison = getDocumentTypeLabel(left).localeCompare(getDocumentTypeLabel(right));
-        if (typeComparison !== 0) {
-          return typeComparison * direction;
-        }
-        return left.file_name.localeCompare(right.file_name) * direction;
+        const c = getDocumentTypeLabel(a).localeCompare(getDocumentTypeLabel(b));
+        if (c !== 0) return c * dir;
+        return a.file_name.localeCompare(b.file_name) * dir;
       }
 
       if (sortColumn === 'status') {
-        const statusComparison = left.parse_status.localeCompare(right.parse_status);
-        if (statusComparison !== 0) {
-          return statusComparison * direction;
-        }
-        return left.file_name.localeCompare(right.file_name) * direction;
+        const c = a.parse_status.localeCompare(b.parse_status);
+        if (c !== 0) return c * dir;
+        return a.file_name.localeCompare(b.file_name) * dir;
       }
 
-      return left.file_name.localeCompare(right.file_name) * direction;
+      // default: name
+      return a.file_name.localeCompare(b.file_name) * dir;
     });
-
-    return sorted;
   }, [documents, sortColumn, sortDirection]);
 
   const totalPages = Math.max(1, Math.ceil(sortedDocuments.length / ROWS_PER_PAGE));
 
+  // Clamp page when total changes
   useEffect(() => {
-    setCurrentPage((page) => Math.min(page, totalPages));
+    setCurrentPage((p) => Math.min(p, totalPages));
   }, [totalPages]);
 
+  // Reset to page 1 on sort change
   useEffect(() => {
     setCurrentPage(1);
   }, [sortColumn, sortDirection]);
@@ -80,15 +75,17 @@ export function DocumentsPage({
     return sortedDocuments.slice(start, start + ROWS_PER_PAGE);
   }, [currentPage, sortedDocuments]);
 
-  const handleSort = (column: DocumentSortColumn) => {
-    if (column === sortColumn) {
-      setSortDirection((currentDirection) => (currentDirection === 'asc' ? 'desc' : 'asc'));
-      return;
-    }
-
-    setSortColumn(column);
-    setSortDirection(column === 'updated' ? 'desc' : 'asc');
-  };
+  const handleSort = useCallback(
+    (column: DocumentSortColumn) => {
+      if (column === sortColumn) {
+        setSortDirection((d) => (d === 'asc' ? 'desc' : 'asc'));
+      } else {
+        setSortColumn(column);
+        setSortDirection(column === 'updated' ? 'desc' : 'asc');
+      }
+    },
+    [sortColumn],
+  );
 
   return (
     <section className="split-layout split-layout--wide">
@@ -103,7 +100,7 @@ export function DocumentsPage({
         rowsPerPage={ROWS_PER_PAGE}
         onPageChange={setCurrentPage}
         onSort={handleSort}
-        onSelect={(document) => void onSelect(document)}
+        onSelect={(doc) => void onSelect(doc)}
       />
       <DocumentViewer document={selectedDocument} onReindex={onReindex} />
     </section>

@@ -19,6 +19,7 @@ class ChatSessionRepository(BaseRepository[ChatSession]):
     ) -> list[ChatSession]:
         result = await self.session.execute(
             select(ChatSession)
+            .options(selectinload(ChatSession.messages))
             .where(ChatSession.user_id == user_id)
             .order_by(ChatSession.updated_at.desc())
             .offset(offset)
@@ -45,4 +46,15 @@ class ChatMessageRepository(BaseRepository[ChatMessage]):
             .where(ChatMessage.session_id == session_id)
             .order_by(ChatMessage.created_at.asc())
         )
+        return list(result.scalars().all())
+
+    async def list_by_session(self, session_id: str, limit: int | None = None) -> list[ChatMessage]:
+        query = select(ChatMessage).where(
+            ChatMessage.session_id == session_id
+        ).order_by(ChatMessage.created_at.asc())
+
+        if limit:
+            query = query.limit(limit)
+
+        result = await self.session.execute(query)
         return list(result.scalars().all())

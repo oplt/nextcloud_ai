@@ -327,6 +327,15 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         order_by="ChatMessage.created_at",
     )
 
+    @property
+    def subject(self) -> str:
+        if self.messages:
+            latest_content = self.messages[-1].content if self.messages[-1].content else ""
+            normalized_content = " ".join(latest_content.split())
+            if normalized_content:
+                return normalized_content
+        return self.title
+
 
 class ChatMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "chat_messages"

@@ -1,44 +1,146 @@
-import type { ChatSource } from '../types/api';
+import type { ChatActiveContextDocument, ChatSource } from '../types/api';
 
 type SourcePanelProps = {
   sources: ChatSource[];
+  activeContextDocuments?: ChatActiveContextDocument[];
 };
 
-function dedupeSourcesByDocument(sources: ChatSource[]): ChatSource[] {
-  const byDocument = new Map<string, ChatSource>();
+type SourceGroup = {
+  document_id: string;
+  file_name: string;
+  file_path: string;
+  maxScore: number;
+  chunks: ChatSource[];
+};
 
-  for (const source of sources) {
-    const existing = byDocument.get(source.document_id);
-    if (!existing || source.score > existing.score) {
-      byDocument.set(source.document_id, source);
+// ─── Helpers ──────────────────────────────────────────────────
+function groupByDocument(sources: ChatSource[]): SourceGroup[] {
+  const map = new Map<string, SourceGroup>();
+
+  for (const s of sources) {
+    const existing = map.get(s.document_id);
+    if (!existing) {
+      map.set(s.document_id, {
+        document_id: s.document_id,
+        file_name:   s.file_name,
+        file_path:   s.file_path,
+        maxScore:    s.score,
+        chunks:      [s],
+      });
+    } else {
+      existing.maxScore = Math.max(existing.maxScore, s.score);
+      existing.chunks.push(s);
     }
   }
 
-  return [...byDocument.values()].sort((left, right) => right.score - left.score);
+  return [...map.values()]
+    .map((g) => ({ ...g, chunks: [...g.chunks].sort((a, b) => b.score - a.score) }))
+    .sort((a, b) => b.maxScore - a.maxScore);
 }
 
-export function SourcePanel({ sources }: SourcePanelProps) {
-  const uniqueSources = dedupeSourcesByDocument(sources);
+function locationLabel(source: ChatSource): string {
+  const parts: string[] = [];
+  if (source.page_number != null)  parts.push(`Page ${source.page_number}`);
+  if (source.section_title)        parts.push(source.section_title);
+  else if (source.heading_path)    parts.push(source.heading_path);
+  return parts.join(' · ');
+}
+
+// ─── Sub-components ───────────────────────────────────────────
+function SourceCard({ group }: { group: SourceGroup }) {
+  const pct = Math.round(group.maxScore * 100);
+  return (
+    <article className="source-card">
+      <div className="source-card__header">
+        <strong className="source-card__name">{group.file_name}</strong>
+        <span className="source-card__score">{pct}%</span>
+      </div>
+      <span className="source-card__path" title={group.file_path}>
+        {group.file_path}
+      </span>
+      <div
+        className="source-score-bar"
+        role="meter"
+        aria-valuenow={pct}
+        aria-valuemin={0}
+        aria-valuemax={100}
+        aria-label={`Relevance ${pct}%`}
+      >
+        <div className="source-score-bar__fill" style={{ width: `${pct}%` }} />
+      </div>
+      <div className="source-card__chunks">
+        {group.chunks.map((chunk) => {
+          const loc = locationLabel(chunk);
+          return (
+            <div key={chunk.chunk_id} className="source-card__chunk">
+              {loc ? <span className="source-card__location">{loc}</span> : null}
+              <p className="source-card__snippet">{chunk.snippet}</p>
+            </div>
+          );
+        })}
+      </div>
+    </article>
+  );
+}
+
+function ContextCard({ document }: { document: ChatActiveContextDocument }) {
+  return (
+    <article className="source-card source-card--context">
+      <strong className="source-card__name">{document.file_name}</strong>
+      <span className="source-card__path" title={document.file_path}>
+        {document.file_path}
+      </span>
+    </article>
+  );
+}
+
+function EmptySources() {
+  return (
+    <div className="empty-state">
+      <div className="empty-state-icon" aria-hidden="true">
+        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
+          <path d="M6 9h8M6 13h5M4 3h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </div>
+      <span>Sources appear here after retrieval.</span>
+    </div>
+  );
+}
+
+// ─── SourcePanel ──────────────────────────────────────────────
+export function SourcePanel({ sources, activeContextDocuments = [] }: SourcePanelProps) {
+  const groups = groupByDocument(sources);
 
   return (
     <aside className="card source-panel">
       <header className="panel-header">
-        <h3>Sources</h3>
-        <span>{uniqueSources.length}</span>
+        <h3>Sources for this answer</h3>
+        {groups.length > 0 ? <span>{groups.length}</span> : null}
       </header>
-      {uniqueSources.length === 0 ? <p className="empty-state">Sources appear here after retrieval.</p> : null}
-      <div className="source-list">
-        {uniqueSources.map((source) => (
-          <article key={source.chunk_id} className="source-card">
-            <strong>{source.file_name}</strong>
-            <p>{source.snippet}</p>
-            <footer>
-              <span>{source.file_path}</span>
-              <span>{Math.round(source.score * 100)}%</span>
-            </footer>
-          </article>
-        ))}
-      </div>
+
+      {groups.length === 0 ? (
+        <EmptySources />
+      ) : (
+        <div className="source-list">
+          {groups.map((g) => (
+            <SourceCard key={g.document_id} group={g} />
+          ))}
+        </div>
+      )}
+
+      {activeContextDocuments.length > 0 ? (
+        <>
+          <header className="panel-header source-panel__subheader">
+            <h4>Active context</h4>
+            <span>{activeContextDocuments.length}</span>
+          </header>
+          <div className="source-list source-list--context">
+            {activeContextDocuments.map((doc) => (
+              <ContextCard key={doc.document_id} document={doc} />
+            ))}
+          </div>
+        </>
+      ) : null}
     </aside>
   );
 }

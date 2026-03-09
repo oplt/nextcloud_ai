@@ -1,8 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import {
   askChat,
   createConnector,
+  deleteChatSession,
   deleteConnector,
   getChatSession,
   getDocument,
@@ -19,46 +20,91 @@ import { DocumentsPage } from './pages/DocumentsPage';
 import { LoginPage } from './pages/LoginPage';
 import { OverviewPage } from './pages/OverviewPage';
 import type {
+  ChatAskResponse,
   ChatMessage,
   ChatSessionDetail,
   ChatSessionSummary,
-  ChatSource,
   Connector,
   ConnectorPayload,
   DocumentDetail,
   DocumentSummary,
 } from './types/api';
 
+// ─── Types ────────────────────────────────────────────────────
 type View = 'overview' | 'connectors' | 'documents';
 
-const navItems: Array<{ key: View; label: string; heading: string; description: string }> = [
+type NavItem = {
+  key: View;
+  label: string;
+  heading: string;
+  description: string;
+  icon: React.ReactNode;
+};
+
+// ─── Nav icon components ──────────────────────────────────────
+function HomeIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M3 9.5L10 3l7 6.5V17a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9.5z" />
+      <path d="M7 18v-6h6v6" />
+    </svg>
+  );
+}
+
+function ConnectorIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <rect x="2" y="3" width="6" height="4" rx="1" />
+      <rect x="12" y="3" width="6" height="4" rx="1" />
+      <rect x="7" y="13" width="6" height="4" rx="1" />
+      <path d="M5 7v2a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3V7" />
+      <line x1="10" y1="12" x2="10" y2="13" />
+    </svg>
+  );
+}
+
+function DocumentIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4 4a2 2 0 0 1 2-2h6l4 4v10a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V4z" />
+      <polyline points="12 2 12 6 16 6" />
+      <line x1="7" y1="10" x2="13" y2="10" />
+      <line x1="7" y1="14" x2="11" y2="14" />
+    </svg>
+  );
+}
+
+const navItems: NavItem[] = [
   {
     key: 'overview',
     label: 'Home',
     heading: 'Private company knowledge workspace',
     description: 'Track connector health, browse synced content, and work with the latest chat context.',
+    icon: <HomeIcon />,
   },
   {
     key: 'connectors',
     label: 'Connectors',
     heading: 'Connector management',
     description: 'Configure Nextcloud sources, validate credentials, and run sync jobs from one place.',
+    icon: <ConnectorIcon />,
   },
   {
     key: 'documents',
     label: 'Documents',
     heading: 'Document catalog',
     description: 'Review indexed files, inspect metadata, and requeue document parsing when needed.',
+    icon: <DocumentIcon />,
   },
 ];
 
+// ─── Helpers ─────────────────────────────────────────────────
 function createLocalChatMessage(
   role: 'user' | 'assistant',
   content: string,
   sessionId: string | null,
 ): ChatMessage {
   const timestamp = new Date().toISOString();
-
   return {
     id: `local-${role}-${crypto.randomUUID()}`,
     session_id: sessionId ?? 'local-session',
@@ -71,257 +117,326 @@ function createLocalChatMessage(
   };
 }
 
+function getLastAssistantMessageId(messages: ChatMessage[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === 'assistant') return messages[i].id;
+  }
+  return null;
+}
+
+function extractActiveContextDocumentIds(messages: ChatMessage[]): string[] {
+  const last = [...messages].reverse().find((m) => m.role === 'assistant');
+  const citations = Array.isArray(last?.citations_json) ? last.citations_json : [];
+  const ids: string[] = [];
+  for (const c of citations) {
+    const id = typeof c.document_id === 'string' ? c.document_id : null;
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
 function getUserInitials(name: string | null | undefined): string {
   const parts = name?.trim().split(/\s+/).filter(Boolean) ?? [];
-  if (parts.length === 0) {
-    return 'NC';
-  }
-
+  if (!parts.length) return 'NC';
   return parts
     .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase() ?? '')
+    .map((p) => p[0]?.toUpperCase() ?? '')
     .join('');
 }
 
+// ─── App ──────────────────────────────────────────────────────
 function App() {
   const { user, loading, error, login, logout, refresh } = useSession();
   const [view, setView] = useState<View>('overview');
-  const [connectors, setConnectors] = useState<Connector[]>([]);
-  const [documents, setDocuments] = useState<DocumentSummary[]>([]);
-  const [sessions, setSessions] = useState<ChatSessionSummary[]>([]);
+
+  // Data
+  const [connectors, setConnectors]       = useState<Connector[]>([]);
+  const [documents, setDocuments]         = useState<DocumentSummary[]>([]);
+  const [sessions, setSessions]           = useState<ChatSessionSummary[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentDetail | null>(null);
-  const [selectedSession, setSelectedSession] = useState<ChatSessionDetail | null>(null);
-  const [sources, setSources] = useState<ChatSource[]>([]);
-  const [pendingMessages, setPendingMessages] = useState<ChatMessage[]>([]);
-  const [busy, setBusy] = useState(false);
+  const [selectedSession, setSelectedSession]   = useState<ChatSessionDetail | null>(null);
+  const [pendingMessages, setPendingMessages]   = useState<ChatMessage[]>([]);
+
+  // UI state
+  const [busy, setBusy]   = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
 
+  const latestChatRequestId = useRef<string | null>(null);
+
   const selectedDocumentId = selectedDocument?.id ?? null;
+
+  // Compose the view-friendly session (optimistic messages merged in)
   const activeSessionView = useMemo<ChatSessionDetail | null>(() => {
     if (selectedSession) {
       return pendingMessages.length === 0
         ? selectedSession
         : { ...selectedSession, messages: [...selectedSession.messages, ...pendingMessages] };
     }
-    if (!user || pendingMessages.length === 0) {
-      return null;
-    }
-
-    const firstMessage = pendingMessages[0];
-    const lastMessage = pendingMessages[pendingMessages.length - 1];
+    if (!user || pendingMessages.length === 0) return null;
+    const first = pendingMessages[0];
+    const last  = pendingMessages[pendingMessages.length - 1];
     return {
       id: 'local-session',
       user_id: user.id,
-      title: firstMessage.content.slice(0, 80) || 'New chat',
-      created_at: firstMessage.created_at,
-      updated_at: lastMessage.updated_at,
+      title: first.content.slice(0, 80) || 'New chat',
+      created_at: first.created_at,
+      updated_at: last.updated_at,
       messages: pendingMessages,
     };
   }, [pendingMessages, selectedSession, user]);
 
-  const loadData = async () => {
-    const [nextConnectors, nextDocuments, nextSessions] = await Promise.all([
+  // ── Data loading ────────────────────────────────────────────
+  const loadData = useCallback(async () => {
+    const [nc, nd, ns] = await Promise.all([
       listConnectors(),
       listDocuments(),
       listChatSessions(),
     ]);
-    setConnectors(nextConnectors);
-    setDocuments(nextDocuments);
-    setSessions(nextSessions);
-  };
+    setConnectors(nc);
+    setDocuments(nd);
+    setSessions(ns);
+  }, []);
 
   useEffect(() => {
-    if (!user) {
-      return;
-    }
-    void loadData().catch((loadError: unknown) => {
-      setFlash(loadError instanceof Error ? loadError.message : 'Failed to load dashboard data');
+    if (!user) return;
+    void loadData().catch((e: unknown) => {
+      setFlash(e instanceof Error ? e.message : 'Failed to load dashboard data');
     });
-  }, [user]);
+  }, [user, loadData]);
 
+  // ── Feedback wrapper ────────────────────────────────────────
+  const withFeedback = useCallback(
+    async (work: () => Promise<void>, successMessage: string) => {
+      setBusy(true);
+      setFlash(null);
+      try {
+        await work();
+        setFlash(successMessage);
+      } catch (e) {
+        setFlash(e instanceof Error ? e.message : 'Operation failed');
+      } finally {
+        setBusy(false);
+      }
+    },
+    [],
+  );
+
+  // ── Connector handlers ──────────────────────────────────────
+  const handleCreate = useCallback(
+    async (payload: ConnectorPayload) => {
+      await withFeedback(async () => {
+        await createConnector(payload);
+        await loadData();
+      }, 'Connector saved');
+    },
+    [withFeedback, loadData],
+  );
+
+  const handleDelete = useCallback(
+    async (connectorId: string) => {
+      await withFeedback(async () => {
+        await deleteConnector(connectorId);
+        if (selectedDocument?.connector_id === connectorId) setSelectedDocument(null);
+        await loadData();
+      }, 'Connector deleted');
+    },
+    [withFeedback, loadData, selectedDocument],
+  );
+
+  // ── Document handlers ───────────────────────────────────────
+  const handleSelectDocument = useCallback(
+    async (document: DocumentSummary) => {
+      await withFeedback(async () => {
+        const detail = await getDocument(document.id);
+        setSelectedDocument(detail);
+      }, `Loaded ${document.file_name}`);
+    },
+    [withFeedback],
+  );
+
+  const handleReindexDocument = useCallback(
+    async (documentId: string) => {
+      await withFeedback(async () => {
+        await reindexDocument(documentId);
+        await loadData();
+      }, 'Reindex queued');
+    },
+    [withFeedback, loadData],
+  );
+
+  // ── Chat handlers ───────────────────────────────────────────
+  const handleSelectSession = useCallback(
+    async (sessionId: string) => {
+      await withFeedback(async () => {
+        setPendingMessages([]);
+        const detail = await getChatSession(sessionId);
+        setSelectedSession(detail);
+      }, 'Chat loaded');
+    },
+    [withFeedback],
+  );
+
+  const handleDeleteSessions = useCallback(
+    async (ids: string[]) => {
+      await withFeedback(async () => {
+        await Promise.all(ids.map((id) => deleteChatSession(id)));
+        setSessions((prev) => prev.filter((session) => !ids.includes(session.id)));
+
+        if (selectedSession && ids.includes(selectedSession.id)) {
+          setSelectedSession(null);
+          setPendingMessages([]);
+          latestChatRequestId.current = null;
+        }
+      }, ids.length === 1 ? 'Chat deleted' : `${ids.length} chats deleted`);
+    },
+    [selectedSession, withFeedback],
+  );
+
+  const handleAsk = useCallback(
+    async (question: string): Promise<ChatAskResponse> => {
+      const requestId = crypto.randomUUID();
+      latestChatRequestId.current = requestId;
+
+      const sessionId    = selectedSession?.id ?? null;
+      const currentMsgs  = activeSessionView?.messages ?? [];
+      const parentMsgId  = getLastAssistantMessageId(currentMsgs);
+      const contextDocIds = extractActiveContextDocumentIds(currentMsgs);
+      const optimistic   = createLocalChatMessage('user', question, sessionId);
+
+      setBusy(true);
+      setFlash(null);
+      setPendingMessages((p) => [...p, optimistic]);
+
+      try {
+        const response = await askChat({
+          question,
+          session_id: sessionId,
+          parent_message_id: parentMsgId,
+          active_context_document_ids: contextDocIds,
+          request_id: requestId,
+          top_k: 6,
+        });
+
+        if (latestChatRequestId.current !== requestId) return response;
+
+        try {
+          const [detail, nextSessions] = await Promise.all([
+            getChatSession(response.session_id),
+            listChatSessions(),
+          ]);
+          setSelectedSession(detail);
+          setSessions(nextSessions);
+          setPendingMessages([]);
+        } catch (refreshErr) {
+          const msg = refreshErr instanceof Error ? refreshErr.message : 'Failed to reload chat';
+          setFlash(`Chat saved, but history refresh failed: ${msg}`);
+          setPendingMessages([
+            optimistic,
+            createLocalChatMessage('assistant', response.answer, response.session_id),
+          ]);
+        }
+        return response;
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : 'Chat request failed';
+        setFlash(msg);
+        setPendingMessages([
+          optimistic,
+          createLocalChatMessage('assistant', `I could not complete this request: ${msg}`, sessionId),
+        ]);
+        throw e instanceof Error ? e : new Error(msg);
+      } finally {
+        if (latestChatRequestId.current === requestId) setBusy(false);
+      }
+    },
+    [selectedSession, activeSessionView],
+  );
+
+  const handleNewChat = useCallback(() => {
+    setSelectedSession(null);
+    setPendingMessages([]);
+    setFlash(null);
+    latestChatRequestId.current = null;
+  }, []);
+
+  // ── Derived ─────────────────────────────────────────────────
   const currentView = useMemo(
-    () => navItems.find((item) => item.key === view) ?? navItems[0],
+    () => navItems.find((n) => n.key === view) ?? navItems[0],
     [view],
   );
 
-  const withFeedback = async (work: () => Promise<void>, successMessage: string) => {
-    setBusy(true);
-    setFlash(null);
-    try {
-      await work();
-      setFlash(successMessage);
-    } catch (workError) {
-      setFlash(workError instanceof Error ? workError.message : 'Operation failed');
-    } finally {
-      setBusy(false);
-    }
-  };
+  const userInitials = getUserInitials(user?.full_name ?? user?.username);
 
-  const handleCreateConnector = async (payload: ConnectorPayload) => {
-    await withFeedback(async () => {
-      await createConnector(payload);
-      await loadData();
-    }, 'Connector saved');
-  };
-
-  const handleDeleteConnector = async (connectorId: string) => {
-    await withFeedback(async () => {
-      await deleteConnector(connectorId);
-      if (selectedDocument?.connector_id === connectorId) {
-        setSelectedDocument(null);
-      }
-      await loadData();
-    }, 'Connector deleted');
-  };
-
-  const handleSelectDocument = async (document: DocumentSummary) => {
-    await withFeedback(async () => {
-      const detail = await getDocument(document.id);
-      setSelectedDocument(detail);
-    }, `Loaded ${document.file_name}`);
-  };
-
-  const handleReindexDocument = async (documentId: string) => {
-    await withFeedback(async () => {
-      await reindexDocument(documentId);
-      await loadData();
-    }, 'Document reindex queued');
-  };
-
-  const handleSelectSession = async (sessionId: string) => {
-    await withFeedback(async () => {
-      setPendingMessages([]);
-      const detail = await getChatSession(sessionId);
-      setSelectedSession(detail);
-      const assistantMessages = detail.messages.filter((message) => message.role === 'assistant');
-      const lastAssistant = assistantMessages.at(-1);
-      const citations = Array.isArray(lastAssistant?.citations_json) ? lastAssistant.citations_json : [];
-      setSources(citations as ChatSource[]);
-    }, 'Chat loaded');
-  };
-
-  const handleAsk = async (question: string) => {
-    const sessionId = selectedSession?.id ?? null;
-    const optimisticUserMessage = createLocalChatMessage('user', question, sessionId);
-
-    setBusy(true);
-    setFlash(null);
-    setSources([]);
-    setPendingMessages([optimisticUserMessage]);
-
-    try {
-      const response = await askChat(question, selectedSession?.id);
-      setSources(response.sources);
-      try {
-        const [detail, nextSessions] = await Promise.all([
-          getChatSession(response.session_id),
-          listChatSessions(),
-        ]);
-        setSelectedSession(detail);
-        setSessions(nextSessions);
-        setPendingMessages([]);
-      } catch (refreshError) {
-        const message =
-          refreshError instanceof Error ? refreshError.message : 'Failed to reload chat history';
-        setFlash(`Chat saved, but the history refresh failed: ${message}`);
-        setPendingMessages([
-          optimisticUserMessage,
-          createLocalChatMessage('assistant', response.answer, response.session_id),
-        ]);
-      }
-    } catch (workError) {
-      const message = workError instanceof Error ? workError.message : 'Chat request failed';
-      setFlash(message);
-      setPendingMessages([
-        optimisticUserMessage,
-        createLocalChatMessage(
-          'assistant',
-          `I could not complete this request: ${message}`,
-          sessionId,
-        ),
-      ]);
-      throw workError instanceof Error ? workError : new Error(message);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleNewChat = () => {
-    setSelectedSession(null);
-    setPendingMessages([]);
-    setSources([]);
-    setFlash(null);
-  };
-
-  if (loading) {
-    return <div className="app-loading">Loading workspace…</div>;
-  }
-
-  if (!user) {
-    return <LoginPage onLogin={login} error={error} />;
-  }
-
-  const userLabel = user.full_name ?? user.username;
-  const userMeta = user.email ?? user.external_subject ?? 'Authenticated session';
+  // ── Render ───────────────────────────────────────────────────
+  if (loading) return <div className="app-loading">Loading workspace</div>;
+  if (!user)   return <LoginPage onLogin={login} error={error} />;
 
   return (
     <div className="app-shell">
-      <header className="top-nav">
-        <div className="nav-brand">
-          <div className="nav-brand-icon" aria-hidden="true">
-            <svg viewBox="0 0 24 24" role="presentation">
-              <path
-                fill="currentColor"
-                d="M18.5 18a3.5 3.5 0 0 0 .72-6.93A6 6 0 0 0 7.3 9.3 4.5 4.5 0 0 0 6 18h12.5Zm-12.43-2a2.5 2.5 0 1 1 .6-4.93l1.23.3.22-1.25a4 4 0 0 1 7.93.55v1h.75a1.5 1.5 0 1 1 0 3H6.07Z"
-              />
-            </svg>
-          </div>
-          <div className="nav-brand-name">
-            Nextcloud <span className="accent">AI</span>
+      {/* ── Sidebar ── */}
+      <aside className="sidebar">
+        <div className="sidebar__brand">
+          <div className="sidebar__logo">NC</div>
+          <div className="sidebar__brand-text">
+            <strong>Nextcloud AI</strong>
+            <p>Knowledge cockpit</p>
           </div>
         </div>
-        <nav className="nav-links" aria-label="Primary">
-          {navItems.map((item) => (
+
+        <nav className="sidebar__nav" aria-label="Primary navigation">
+          {navItems.map((item, i) => (
             <button
               key={item.key}
               type="button"
-              className={item.key === view ? 'nav-link active' : 'nav-link'}
-              aria-current={item.key === view ? 'page' : undefined}
+              className={`sidebar__nav-item${item.key === view ? ' sidebar__nav-item--active' : ''}`}
               onClick={() => setView(item.key)}
+              style={{ animationDelay: `${i * 40}ms` }}
+              aria-current={item.key === view ? 'page' : undefined}
             >
-              {item.label}
+              <span className="sidebar__nav-item-icon">{item.icon}</span>
+              <span className="sidebar__nav-item-text">
+                <strong>{item.label}</strong>
+                <small>{item.heading}</small>
+              </span>
             </button>
           ))}
         </nav>
-        <div className="nav-end">
-          <button type="button" className="btn" onClick={() => void refresh()}>
-            Refresh Session
-          </button>
-          <div className="nav-avatar" title={userLabel}>
-            {getUserInitials(userLabel)}
-          </div>
-          <button type="button" className="nav-link nav-link--logout" onClick={() => void logout()}>
-            Logout
-          </button>
-        </div>
-      </header>
-      <main className="page-content">
-        <div className="page-body">
-          <header className="page-header">
-            <div>
-              <p className="page-kicker">{currentView.label}</p>
-              <h1>{currentView.heading}</h1>
-              <p className="page-description">{currentView.description}</p>
-            </div>
-            <div className="page-header-meta">
-              <strong>{userLabel}</strong>
-              <span>{userMeta}</span>
-            </div>
-          </header>
-          <div>
-            {flash ? <p className="flash-banner">{flash}</p> : null}
-          </div>
 
+        <div className="sidebar__footer">
+          <div className="sidebar__user">
+            <span className="sidebar__avatar">{userInitials}</span>
+            <div className="sidebar__user-info">
+              <strong>{user.full_name ?? user.username}</strong>
+              <p>{user.email ?? 'No email synced'}</p>
+            </div>
+          </div>
+          <div className="sidebar__actions">
+            <button type="button" onClick={() => void refresh()}>
+              Refresh
+            </button>
+            <button type="button" onClick={() => void logout()}>
+              Sign out
+            </button>
+          </div>
+        </div>
+      </aside>
+
+      {/* ── Main ── */}
+      <main className="app-main">
+        <header className="app-header">
+          <div className="app-header__left">
+            <span className="eyebrow">Workspace</span>
+            <h1>{currentView.heading}</h1>
+            <p>{currentView.description}</p>
+          </div>
+          <div className="app-header__status">
+            <span className={`status-pill${busy ? ' status-pill--busy' : ''}`}>
+              {busy ? 'Working…' : 'Ready'}
+            </span>
+            {flash ? <span className="status-flash">{flash}</span> : null}
+          </div>
+        </header>
+
+        <div className="app-content">
           {view === 'overview' ? (
             <OverviewPage
               user={user}
@@ -329,33 +444,29 @@ function App() {
               documents={documents}
               sessions={sessions}
               activeSession={activeSessionView}
-              sources={sources}
               loading={busy}
               onSelectSession={handleSelectSession}
               onAsk={handleAsk}
               onNewChat={handleNewChat}
+              onDeleteSessions={handleDeleteSessions}
             />
           ) : null}
+
           {view === 'connectors' ? (
             <ConnectorsPage
               connectors={connectors}
-              onCreate={handleCreateConnector}
-              onDelete={handleDeleteConnector}
-              onTest={(connectorId) => withFeedback(async () => {
-                const result = await testConnector(connectorId);
-                setFlash(result.message);
-              }, 'Connector validated')}
-              onSync={(connectorId, fullReindex) => withFeedback(async () => {
-                await syncConnector(connectorId, Boolean(fullReindex));
-                await loadData();
-              }, fullReindex ? 'Full reindex queued' : 'Sync queued')}
+              onCreate={handleCreate}
+              onDelete={handleDelete}
+              onTest={testConnector}
+              onSync={syncConnector}
             />
           ) : null}
+
           {view === 'documents' ? (
             <DocumentsPage
               documents={documents}
-              selectedDocumentId={selectedDocumentId}
               selectedDocument={selectedDocument}
+              selectedDocumentId={selectedDocumentId}
               onSelect={handleSelectDocument}
               onReindex={handleReindexDocument}
             />

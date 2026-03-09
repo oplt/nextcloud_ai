@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Response, status
 
 from backend.api.deps import CurrentIdentityDep, DbSessionDep
 from backend.core.exceptions import NotFoundError
@@ -43,3 +43,11 @@ async def get_chat_session(
     if item is None or item.user_id != identity.user.id:
         raise NotFoundError("Chat session not found")
     return ChatSessionDetail.model_validate(item)
+
+
+@router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_chat_session(
+    session_id: str, session: DbSessionDep, identity: CurrentIdentityDep
+) -> Response:
+    await ChatService(session).delete_session(session_id, actor=identity.user)
+    return Response(status_code=status.HTTP_204_NO_CONTENT)

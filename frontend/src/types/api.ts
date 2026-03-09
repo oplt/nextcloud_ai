@@ -1,3 +1,7 @@
+// ─────────────────────────────────────────────────────────────
+// API types  –  single source of truth for the frontend
+// ─────────────────────────────────────────────────────────────
+
 export type User = {
   id: string;
   auth_provider: string;
@@ -124,10 +128,24 @@ export type ChatSource = {
   file_path: string;
   page_number: number | null;
   section_title: string | null;
+  heading_path?: string | null;
   snippet: string;
   distance: number;
   score: number;
 };
+
+/** Canonical type for documents in the active chat context. */
+export type ChatActiveContextDocument = {
+  document_id: string;
+  file_name: string;
+  file_path: string;
+};
+
+/**
+ * Alias kept for backward-compat with older page components.
+ * Prefer `ChatActiveContextDocument` in new code.
+ */
+export type ActiveContextDocument = ChatActiveContextDocument;
 
 export type ChatMessage = {
   id: string;
@@ -150,12 +168,29 @@ export type ChatSessionSummary = {
 
 export type ChatSessionDetail = ChatSessionSummary & {
   messages: ChatMessage[];
+  /** IDs of documents pinned as active context for this session. */
+  active_context_document_ids?: string[];
+};
+
+export type ChatAskRequest = {
+  question: string;
+  session_id?: string | null;
+  top_k?: number;
+  parent_message_id?: string | null;
+  active_context_document_ids?: string[];
+  request_id?: string;
 };
 
 export type ChatAskResponse = {
   session_id: string;
   answer: string;
   sources: ChatSource[];
+  cited_sources?: ChatSource[];
   user_message_id: string;
   assistant_message_id: string;
+  parent_message_id?: string | null;
+  request_id?: string | null;
+  active_context_document_ids?: string[];
+  active_context_documents?: ChatActiveContextDocument[];
+  conversation_query?: string;
 };

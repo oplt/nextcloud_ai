@@ -1,51 +1,45 @@
-import type { ChatSessionDetail, ChatSessionSummary, ChatSource } from '../types/api';
-import { ChatInput } from '../components/ChatInput';
-import { ChatWindow } from '../components/ChatWindow';
-import { SourcePanel } from '../components/SourcePanel';
+/**
+ * ChatPage — thin wrapper around ChatWorkspace.
+ *
+ * This page previously duplicated all chat-state logic from OverviewPage.
+ * It now delegates to ChatWorkspace, which centralises that logic and removes
+ * the duplication of parseCitations / buildSourcesMapFromMessages.
+ */
+import { ChatWorkspace } from '../components/ChatWorkspace';
+import type {
+  ChatAskResponse,
+  ChatSessionDetail,
+  ChatSessionSummary,
+} from '../types/api';
 
 type ChatPageProps = {
   sessions: ChatSessionSummary[];
   activeSession: ChatSessionDetail | null;
-  sources: ChatSource[];
   loading: boolean;
   onSelectSession: (sessionId: string) => Promise<void>;
-  onAsk: (question: string) => Promise<void>;
+  onAsk: (question: string) => Promise<ChatAskResponse>;
+  onNewChat?: () => void;
+  onDeleteSessions?: (sessionIds: string[]) => Promise<void>;
 };
 
 export function ChatPage({
   sessions,
   activeSession,
-  sources,
   loading,
   onSelectSession,
   onAsk,
+  onNewChat,
+  onDeleteSessions,
 }: ChatPageProps) {
   return (
-    <section className="chat-layout">
-      <aside className="card session-list">
-        <header className="panel-header">
-          <h3>Chats</h3>
-          <span>{sessions.length}</span>
-        </header>
-        <div className="session-list__content">
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              className="session-button"
-              onClick={() => void onSelectSession(session.id)}
-            >
-              <strong>{session.title}</strong>
-              <small>{new Date(session.updated_at).toLocaleString()}</small>
-            </button>
-          ))}
-        </div>
-      </aside>
-      <div className="chat-main">
-        <ChatWindow messages={activeSession?.messages ?? []} loading={loading} />
-        <ChatInput onSubmit={onAsk} disabled={loading} />
-      </div>
-      <SourcePanel sources={sources} />
-    </section>
+    <ChatWorkspace
+      sessions={sessions}
+      activeSession={activeSession}
+      loading={loading}
+      onSelectSession={onSelectSession}
+      onAsk={onAsk}
+      onNewChat={onNewChat}
+      onDeleteSessions={onDeleteSessions}
+    />
   );
 }

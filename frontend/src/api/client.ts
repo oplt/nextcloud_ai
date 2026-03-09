@@ -1,5 +1,6 @@
 import type {
   AuthSession,
+  ChatAskRequest,
   ChatAskResponse,
   ChatSessionDetail,
   ChatSessionSummary,
@@ -49,7 +50,6 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   }
 
   if (!response.ok) {
-    // For auth/me endpoint with 401, return a special error
     if (path === '/auth/me' && response.status === 401) {
       throw new Error('UNAUTHORIZED');
     }
@@ -152,9 +152,22 @@ export async function getChatSession(sessionId: string): Promise<ChatSessionDeta
   return request<ChatSessionDetail>(`/chat/sessions/${sessionId}`);
 }
 
-export async function askChat(question: string, sessionId?: string | null): Promise<ChatAskResponse> {
+export async function deleteChatSession(sessionId: string): Promise<void> {
+  return request<void>(`/chat/sessions/${sessionId}`, {
+    method: 'DELETE',
+  });
+}
+
+export async function askChat(payload: ChatAskRequest): Promise<ChatAskResponse> {
   return request<ChatAskResponse>('/chat/ask', {
     method: 'POST',
-    body: JSON.stringify({ question, session_id: sessionId ?? null, top_k: 6 }),
+    body: JSON.stringify({
+      question: payload.question,
+      session_id: payload.session_id ?? null,
+      top_k: payload.top_k ?? 6,
+      parent_message_id: payload.parent_message_id ?? null,
+      active_context_document_ids: payload.active_context_document_ids ?? [],
+      request_id: payload.request_id ?? crypto.randomUUID(),
+    }),
   });
 }
