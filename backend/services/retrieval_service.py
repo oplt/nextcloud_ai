@@ -38,6 +38,7 @@ _EDUCATION_HINT_RE = re.compile(
 _ABSOLUTE_MIN_SCORE = 0.40
 _NARROW_CONFIDENCE_THRESHOLD = 0.58
 _MAX_CHUNKS_PER_DOCUMENT = 2
+_MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT = 4
 
 
 @dataclass(slots=True)
@@ -87,6 +88,7 @@ class RetrievalService:
     ) -> RetrievalResult:
         query_embedding = await self.embedding_client.embed_query(question)
         keyword_terms = self._extract_keyword_terms(question)
+        allow_contextual_tail = self._looks_like_relative_employment_question(question)
 
         if preferred_document_ids:
             narrow_result = await self._run_retrieval(
@@ -96,6 +98,12 @@ class RetrievalService:
                 auth=auth,
                 top_k=top_k,
                 document_ids=preferred_document_ids,
+                allow_semantic_context_chunks=allow_contextual_tail,
+                max_chunks_per_document=(
+                    _MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT
+                    if allow_contextual_tail
+                    else _MAX_CHUNKS_PER_DOCUMENT
+                ),
             )
             if narrow_result and narrow_result[0][1] >= _NARROW_CONFIDENCE_THRESHOLD:
                 return self._build_result(narrow_result, query_embedding)
@@ -107,6 +115,12 @@ class RetrievalService:
             auth=auth,
             top_k=top_k,
             document_ids=document_ids,
+            allow_semantic_context_chunks=allow_contextual_tail and bool(document_ids),
+            max_chunks_per_document=(
+                _MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT
+                if allow_contextual_tail and document_ids
+                else _MAX_CHUNKS_PER_DOCUMENT
+            ),
         )
         return self._build_result(broad_result, query_embedding)
 
@@ -119,6 +133,8 @@ class RetrievalService:
         auth: AuthContext,
         top_k: int,
         document_ids: list[UUID] | None,
+        allow_semantic_context_chunks: bool = False,
+        max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
     ) -> list[tuple[DocumentChunk, float]]:
         candidate_limit = max(top_k * 6, 18)
 
@@ -145,6 +161,8 @@ class RetrievalService:
             ranked_chunks=ranked_chunks,
             keyword_terms=keyword_terms,
             top_k=top_k,
+            allow_semantic_context_chunks=allow_semantic_context_chunks,
+            max_chunks_per_document=max_chunks_per_document,
         )
 
     @staticmethod
@@ -248,6 +266,8 @@ class RetrievalService:
         ranked_chunks: list[RankedChunk],
         keyword_terms: list[str],
         top_k: int,
+        allow_semantic_context_chunks: bool = False,
+        max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
     ) -> list[tuple[DocumentChunk, float]]:
         if not ranked_chunks:
             return []
@@ -257,6 +277,7 @@ class RetrievalService:
         min_score = max(_ABSOLUTE_MIN_SCORE, best_score * 0.55)
 
         selected: list[tuple[DocumentChunk, float]] = []
+        selected_chunk_ids: set[str] = set()
         doc_counts: dict[str, int] = {}
 
         for item in ranked_chunks:
@@ -266,21 +287,58 @@ class RetrievalService:
                 continue
             if item.score < _ABSOLUTE_MIN_SCORE or item.score < min_score:
                 continue
-            if has_lexical_hits and keyword_terms and item.lexical_score == 0 and item.score < 0.98:
+            if (
+                has_lexical_hits
+                and keyword_terms
+                and item.lexical_score == 0
+                and item.score < 0.98
+                and not allow_semantic_context_chunks
+            ):
                 continue
 
             document_key = str(document.id)
             current_doc_count = doc_counts.get(document_key, 0)
-            if current_doc_count >= _MAX_CHUNKS_PER_DOCUMENT:
+            if current_doc_count >= max_chunks_per_document:
                 continue
 
             if current_doc_count == 0 and selected and not self._is_additional_document_match(item=item, best_score=best_score):
                 continue
 
             selected.append((chunk, item.score))
+            selected_chunk_ids.add(str(chunk.id))
             doc_counts[document_key] = current_doc_count + 1
             if len(selected) >= top_k:
                 break
+
+        if allow_semantic_context_chunks and selected and len(selected) < top_k:
+            seeded_document_ids = {
+                str(chunk.document.id)
+                for chunk, _ in selected
+                if chunk.document is not None
+            }
+            for item in ranked_chunks:
+                chunk = item.chunk
+                document = chunk.document
+                if document is None or document.is_deleted:
+                    continue
+                if item.score < _ABSOLUTE_MIN_SCORE:
+                    continue
+
+                document_key = str(document.id)
+                if document_key not in seeded_document_ids:
+                    continue
+                if str(chunk.id) in selected_chunk_ids:
+                    continue
+
+                current_doc_count = doc_counts.get(document_key, 0)
+                if current_doc_count >= max_chunks_per_document:
+                    continue
+
+                selected.append((chunk, item.score))
+                selected_chunk_ids.add(str(chunk.id))
+                doc_counts[document_key] = current_doc_count + 1
+                if len(selected) >= top_k:
+                    break
 
         if selected:
             return selected
@@ -332,6 +390,26 @@ class RetrievalService:
         return any(
             term in lowered
             for term in (' work ', ' worked ', ' employer ', ' employed ', ' employment ', ' job ', ' role ', ' position ')
+        )
+
+    @classmethod
+    def _looks_like_relative_employment_question(cls, question: str) -> bool:
+        if not cls._looks_like_employment_question(question):
+            return False
+        lowered = f" {question.lower()} "
+        return any(
+            marker in lowered
+            for marker in (
+                ' after ',
+                ' before ',
+                ' next ',
+                ' previous ',
+                ' then ',
+                ' later ',
+                ' following ',
+                ' subsequent ',
+                ' prior ',
+            )
         )
 
     @staticmethod

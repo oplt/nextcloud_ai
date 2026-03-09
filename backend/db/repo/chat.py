@@ -40,21 +40,25 @@ class ChatMessageRepository(BaseRepository[ChatMessage]):
     def __init__(self, session: AsyncSession) -> None:
         super().__init__(session, ChatMessage)
 
-    async def list_by_session(self, session_id: UUID | str) -> list[ChatMessage]:
+    async def list_by_session(
+        self,
+        session_id: UUID | str,
+        limit: int | None = None,
+    ) -> list[ChatMessage]:
+        if limit is None:
+            result = await self.session.execute(
+                select(ChatMessage)
+                .where(ChatMessage.session_id == session_id)
+                .order_by(ChatMessage.created_at.asc())
+            )
+            return list(result.scalars().all())
+
         result = await self.session.execute(
             select(ChatMessage)
             .where(ChatMessage.session_id == session_id)
-            .order_by(ChatMessage.created_at.asc())
+            .order_by(ChatMessage.created_at.desc())
+            .limit(limit)
         )
-        return list(result.scalars().all())
-
-    async def list_by_session(self, session_id: str, limit: int | None = None) -> list[ChatMessage]:
-        query = select(ChatMessage).where(
-            ChatMessage.session_id == session_id
-        ).order_by(ChatMessage.created_at.asc())
-
-        if limit:
-            query = query.limit(limit)
-
-        result = await self.session.execute(query)
-        return list(result.scalars().all())
+        messages = list(result.scalars().all())
+        messages.reverse()
+        return messages

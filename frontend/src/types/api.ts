@@ -182,6 +182,7 @@ export type ChatSessionDetail = ChatSessionSummary & {
   messages: ChatMessage[];
   /** IDs of documents pinned as active context for this session. */
   active_context_document_ids?: string[];
+  active_context_documents?: ChatActiveContextDocument[];
 };
 
 export type ChatAskRequest = {

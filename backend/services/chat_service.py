@@ -588,15 +588,22 @@ class ChatService:
         active_context_document_ids = follow_up_document_ids
         try:
             explicit_document_ids = request.document_ids or None
+            retrieval_document_ids = explicit_document_ids
             retrieval_preferred_document_ids = None
-            if follow_up_document_ids and is_follow_up and explicit_document_ids is None:
+            if (
+                requested_active_context_document_ids
+                and is_follow_up
+                and explicit_document_ids is None
+            ):
+                retrieval_document_ids = requested_active_context_document_ids
+            elif follow_up_document_ids and is_follow_up and explicit_document_ids is None:
                 retrieval_preferred_document_ids = follow_up_document_ids
 
             retrieval = await self.retrieval_service.retrieve(
                 question=retrieval_query,
                 auth=auth,
                 top_k=request.top_k,
-                document_ids=explicit_document_ids,
+                document_ids=retrieval_document_ids,
                 preferred_document_ids=retrieval_preferred_document_ids,
             )
             candidate_sources = self._prioritize_sources_for_question(

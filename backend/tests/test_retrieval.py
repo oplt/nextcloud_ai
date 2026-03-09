@@ -259,6 +259,82 @@ async def test_retrieval_boosts_employment_ranges_over_education_for_work_questi
 
 
 @pytest.mark.asyncio
+async def test_retrieval_keeps_same_document_context_for_relative_employment_follow_up() -> None:
+    document = Document(
+        id=uuid4(),
+        connector_id=uuid4(),
+        external_id="doc-1",
+        file_path="/Documents/OzgurPolat_Resume.pdf",
+        file_name="OzgurPolat_Resume.pdf",
+        allowed_user_ids=[],
+        allowed_group_ids=[],
+        is_deleted=False,
+    )
+    first_role_chunk = DocumentChunk(
+        id=uuid4(),
+        document_id=document.id,
+        chunk_index=0,
+        content="Data Analyst Turkish Statistical Office | Turkey | Nov 2004 - Mar 2010",
+    )
+    first_role_chunk.document = document
+    next_role_chunk = DocumentChunk(
+        id=uuid4(),
+        document_id=document.id,
+        chunk_index=1,
+        content="Assistant Professor Ataturk University | Turkey | Apr 2010 - Feb 2014",
+    )
+    next_role_chunk.document = document
+    later_role_chunk = DocumentChunk(
+        id=uuid4(),
+        document_id=document.id,
+        chunk_index=2,
+        content="Data Analyst / Researcher Selahaddin Eyyubi University | Turkey | Mar 2014 - July 2016",
+    )
+    later_role_chunk.document = document
+
+    async def fake_embed_query(question: str) -> list[float]:
+        return [0.1, 0.2]
+
+    async def fake_semantic_search(**kwargs):
+        assert kwargs["document_ids"] == [document.id]
+        return [
+            (first_role_chunk, 0.05),
+            (next_role_chunk, 0.41),
+            (later_role_chunk, 0.46),
+        ]
+
+    async def fake_keyword_search(**kwargs):
+        assert kwargs["document_ids"] == [document.id]
+        return [first_role_chunk]
+
+    service = RetrievalService(
+        session=SimpleNamespace(),
+        embedding_client=SimpleNamespace(embed_query=fake_embed_query),
+    )
+    service.chunk_repo = SimpleNamespace(
+        semantic_search=fake_semantic_search,
+        keyword_search=fake_keyword_search,
+    )
+
+    result = await service.retrieve(
+        question="Where did Ozgur Polat work after Turkish Statistical Office?",
+        auth=AuthContext(
+            user_id="1",
+            auth_provider="nextcloud",
+            external_subject="alice",
+            username="alice",
+        ),
+        top_k=4,
+        preferred_document_ids=[document.id],
+    )
+
+    snippets = [source.snippet for source in result.sources]
+
+    assert any("Turkish Statistical Office" in snippet for snippet in snippets)
+    assert any("Ataturk University" in snippet for snippet in snippets)
+
+
+@pytest.mark.asyncio
 async def test_retrieval_returns_one_source_per_document() -> None:
     handbook = Document(
         id=uuid4(),

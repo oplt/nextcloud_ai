@@ -70,6 +70,8 @@ async def build_retrieval_query(
         "self-contained search query that does not depend on prior context.\n"
         "Rules:\n"
         "- Resolve all pronouns and references using the conversation history.\n"
+        "- For follow-ups about sequence or comparison (after, before, next, previous), "
+        "keep the person, employer, and timeframe explicit in the rewritten query.\n"
         "- Keep the query short (under 60 words).\n"
         "- Output ONLY the rewritten query. No preamble, no quotes, no explanation.\n\n"
         f"CONVERSATION HISTORY:\n{history_text}\n\n"

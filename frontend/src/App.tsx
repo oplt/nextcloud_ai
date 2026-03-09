@@ -445,14 +445,20 @@ function App() {
   );
 
   const handleAsk = useCallback(
-    async (question: string): Promise<ChatAskResponse> => {
+    async (
+      question: string,
+      activeContextDocumentIds: string[] = [],
+    ): Promise<ChatAskResponse> => {
       const requestId = crypto.randomUUID();
       latestChatRequestId.current = requestId;
 
       const sessionId    = selectedSession?.id ?? null;
       const currentMsgs  = activeSessionView?.messages ?? [];
       const parentMsgId  = getLastAssistantMessageId(currentMsgs);
-      const contextDocIds = extractActiveContextDocumentIds(currentMsgs);
+      const contextDocIds = [...new Set([
+        ...activeContextDocumentIds,
+        ...extractActiveContextDocumentIds(currentMsgs),
+      ])];
       const optimistic   = createLocalChatMessage('user', question, sessionId);
 
       setBusy(true);

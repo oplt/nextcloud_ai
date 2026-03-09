@@ -60,9 +60,13 @@ function getSessionContextDocs(
   sources: ChatSource[],
   session: ChatSessionDetail,
 ): ChatActiveContextDocument[] {
-  const sourceBacked = mergeActiveContextDocuments(sources, []);
-  const explicit = resolveContextDocsByIds(session.active_context_document_ids, sourceBacked);
-  return explicit.length > 0 ? explicit : sourceBacked;
+  const explicit = session.active_context_documents ?? [];
+  const known = mergeActiveContextDocuments(sources, explicit);
+  const resolved = resolveContextDocsByIds(session.active_context_document_ids, known);
+
+  if (resolved.length > 0) return resolved;
+  if (known.length > 0) return known;
+  return mergeActiveContextDocuments(sources, []);
 }
 
 function getResponseContextDocs(

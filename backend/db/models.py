@@ -344,6 +344,64 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
                 return normalized_content
         return self.title
 
+    @property
+    def active_context_document_ids(self) -> list[str]:
+        for message in reversed(self.messages):
+            if message.role != "assistant" or not message.citations_json:
+                continue
+
+            document_ids: list[str] = []
+            seen_ids: set[str] = set()
+            for citation in message.citations_json:
+                if not isinstance(citation, dict):
+                    continue
+                raw_document_id = citation.get("document_id")
+                if not raw_document_id:
+                    continue
+                document_id = str(raw_document_id)
+                if document_id in seen_ids:
+                    continue
+                seen_ids.add(document_id)
+                document_ids.append(document_id)
+
+            if document_ids:
+                return document_ids
+
+        return []
+
+    @property
+    def active_context_documents(self) -> list[dict[str, str]]:
+        for message in reversed(self.messages):
+            if message.role != "assistant" or not message.citations_json:
+                continue
+
+            documents: list[dict[str, str]] = []
+            seen_ids: set[str] = set()
+            for citation in message.citations_json:
+                if not isinstance(citation, dict):
+                    continue
+                raw_document_id = citation.get("document_id")
+                raw_file_name = citation.get("file_name")
+                raw_file_path = citation.get("file_path")
+                if not raw_document_id or not raw_file_name or not raw_file_path:
+                    continue
+                document_id = str(raw_document_id)
+                if document_id in seen_ids:
+                    continue
+                seen_ids.add(document_id)
+                documents.append(
+                    {
+                        "document_id": document_id,
+                        "file_name": str(raw_file_name),
+                        "file_path": str(raw_file_path),
+                    }
+                )
+
+            if documents:
+                return documents
+
+        return []
+
 
 class ChatMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "chat_messages"

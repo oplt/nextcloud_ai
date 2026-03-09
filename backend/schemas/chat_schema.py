@@ -48,6 +48,8 @@ class ChatSessionRead(TimestampedSchema):
 
 class ChatSessionDetail(ChatSessionRead):
     messages: list[ChatMessageRead]
+    active_context_document_ids: list[str] = Field(default_factory=list)
+    active_context_documents: list[dict[str, str]] = Field(default_factory=list)
 
 
 class ChatAskResponse(BaseModel):

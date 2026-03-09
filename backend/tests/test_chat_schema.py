@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from uuid import uuid4
 
 from backend.db.models import ChatMessage, ChatSession
-from backend.schemas.chat_schema import ChatAskResponse
+from backend.schemas.chat_schema import ChatAskResponse, ChatSessionDetail
 
 
 def test_chat_response_schema_round_trip() -> None:
@@ -80,3 +80,75 @@ def test_chat_session_subject_uses_latest_message_content() -> None:
     ]
 
     assert session.subject == "Latest answer with extra whitespace"
+
+
+def test_chat_session_detail_exposes_active_context_from_latest_assistant_citations() -> None:
+    session = ChatSession(
+        id=uuid4(),
+        user_id=uuid4(),
+        title="Employment thread",
+        created_at=datetime.now(timezone.utc),
+        updated_at=datetime.now(timezone.utc),
+    )
+    session.messages = [
+        ChatMessage(
+            id=uuid4(),
+            session_id=session.id,
+            role="user",
+            content="Where did Ozgur work in 2009?",
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+        ChatMessage(
+            id=uuid4(),
+            session_id=session.id,
+            role="assistant",
+            content="He worked at Turkish Statistical Office [1].",
+            citations_json=[
+                {
+                    "document_id": str(uuid4()),
+                    "file_name": "old.pdf",
+                    "file_path": "/docs/old.pdf",
+                }
+            ],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+        ChatMessage(
+            id=uuid4(),
+            session_id=session.id,
+            role="assistant",
+            content="After that, he worked at Ataturk University [1][2].",
+            citations_json=[
+                {
+                    "document_id": str(uuid4()),
+                    "file_name": "resume.pdf",
+                    "file_path": "/docs/resume.pdf",
+                },
+                {
+                    "document_id": str(uuid4()),
+                    "file_name": "cv.pdf",
+                    "file_path": "/docs/cv.pdf",
+                },
+            ],
+            created_at=datetime.now(timezone.utc),
+            updated_at=datetime.now(timezone.utc),
+        ),
+    ]
+
+    detail = ChatSessionDetail.model_validate(session)
+
+    assert len(detail.messages) == 3
+    assert len(detail.active_context_document_ids) == 2
+    assert detail.active_context_documents == [
+        {
+            "document_id": detail.active_context_document_ids[0],
+            "file_name": "resume.pdf",
+            "file_path": "/docs/resume.pdf",
+        },
+        {
+            "document_id": detail.active_context_document_ids[1],
+            "file_name": "cv.pdf",
+            "file_path": "/docs/cv.pdf",
+        },
+    ]
