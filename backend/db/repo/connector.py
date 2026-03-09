@@ -27,3 +27,15 @@ class ConnectorRepository(BaseRepository[Connector]):
             .where(Connector.id == connector_id)
         )
         return result.scalar_one_or_none()
+
+    async def get_active_by_base_url_and_username(
+        self, *, base_url: str, username: str
+    ) -> Connector | None:
+        result = await self.session.execute(
+            select(Connector).where(
+                Connector.base_url == base_url.rstrip("/"),
+                Connector.username == username,
+                Connector.is_active.is_(True),
+            )
+        )
+        return result.scalar_one_or_none()

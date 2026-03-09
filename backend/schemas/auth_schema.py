@@ -10,8 +10,16 @@ class LoginRequest(BaseModel):
     password: str
 
 
-class AuthSessionResponse(BaseModel):
+class IssuedAuthSession(BaseModel):
     access_token: str
-    token_type: str = "bearer"
     expires_in: int
     user: UserRead
+
+
+class AuthSessionResponse(BaseModel):
+    expires_in: int
+    user: UserRead
+
+
+class CsrfTokenResponse(BaseModel):
+    csrf_token: str

@@ -26,7 +26,7 @@ class StubGroundedLLMClient:
 class LLMClientFactory:
     @staticmethod
     def create() -> LLMClientProtocol:
-        if settings.LLM_PROVIDER == "ollama":
+        if settings.effective_llm_provider == "ollama":
             return OllamaLLMClient(
                 model=settings.OLLAMA_CHAT_MODEL, base_url=str(settings.OLLAMA_BASE_URL)
             )

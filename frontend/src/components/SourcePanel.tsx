@@ -1,3 +1,4 @@
+import { getDocumentOriginalUrl } from '../api/client';
 import type { ChatActiveContextDocument, ChatSource } from '../types/api';
 
 type SourcePanelProps = {
@@ -49,11 +50,22 @@ function locationLabel(source: ChatSource): string {
 // ─── Sub-components ───────────────────────────────────────────
 function SourceCard({ group }: { group: SourceGroup }) {
   const pct = Math.round(group.maxScore * 100);
+  const sourceUrl = getDocumentOriginalUrl(group.document_id);
+
   return (
-    <article className="source-card">
+    <a
+      className="source-card source-card--interactive"
+      href={sourceUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${group.file_name} in a new window`}
+    >
       <div className="source-card__header">
         <strong className="source-card__name">{group.file_name}</strong>
-        <span className="source-card__score">{pct}%</span>
+        <div className="source-card__meta">
+          <span className="source-card__score">{pct}%</span>
+          <span className="source-card__link">Open original ↗</span>
+        </div>
       </div>
       <span className="source-card__path" title={group.file_path}>
         {group.file_path}
@@ -79,18 +91,29 @@ function SourceCard({ group }: { group: SourceGroup }) {
           );
         })}
       </div>
-    </article>
+    </a>
   );
 }
 
 function ContextCard({ document }: { document: ChatActiveContextDocument }) {
+  const sourceUrl = getDocumentOriginalUrl(document.document_id);
+
   return (
-    <article className="source-card source-card--context">
-      <strong className="source-card__name">{document.file_name}</strong>
+    <a
+      className="source-card source-card--context source-card--interactive"
+      href={sourceUrl}
+      target="_blank"
+      rel="noreferrer"
+      aria-label={`Open ${document.file_name} in a new window`}
+    >
+      <div className="source-card__header">
+        <strong className="source-card__name">{document.file_name}</strong>
+        <span className="source-card__link">Open original ↗</span>
+      </div>
       <span className="source-card__path" title={document.file_path}>
         {document.file_path}
       </span>
-    </article>
+    </a>
   );
 }
 

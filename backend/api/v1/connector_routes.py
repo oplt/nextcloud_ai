@@ -18,12 +18,15 @@ from backend.schemas.connector_schema import (
 from backend.schemas.job_schema import SyncJobRead
 from backend.services.connector_service import ConnectorService
 from backend.services.job_service import JobService
-from backend.workers.indexing_tasks import enqueue_connector_sync_job
+from backend.workers.indexing_tasks import (
+    enqueue_connector_sync_job,
+    should_execute_tasks_locally,
+)
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
-@router.post("/", response_model=ConnectorRead)
+@router.post("", response_model=ConnectorRead)
 async def create_connector(
         payload: ConnectorCreate, session: DbSessionDep, identity: CurrentIdentityDep
 ) -> ConnectorRead:
@@ -33,7 +36,7 @@ async def create_connector(
     return ConnectorRead.model_validate(connector)
 
 
-@router.get("/", response_model=list[ConnectorRead])
+@router.get("", response_model=list[ConnectorRead])
 async def list_connectors(
         session: DbSessionDep, _: CurrentIdentityDep
 ) -> list[ConnectorRead]:
@@ -97,6 +100,17 @@ async def sync_connector(
         identity: CurrentIdentityDep,
 ) -> SyncJobRead:
     job_service = JobService(session)
+    latest_job = await job_service.repo.get_latest_for_connector(connector_id)
+    if latest_job is not None and latest_job.status == "running":
+        return SyncJobRead.model_validate(latest_job)
+    if latest_job is not None and latest_job.status == "queued":
+        if should_execute_tasks_locally():
+            task = enqueue_connector_sync_job(str(latest_job.id))
+            latest_job.worker_task_id = task.id
+            await session.commit()
+            await session.refresh(latest_job)
+        return SyncJobRead.model_validate(latest_job)
+
     job = await job_service.create_sync_job(
         connector_id=connector_id,
         requested_by=identity.user,

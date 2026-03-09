@@ -72,8 +72,6 @@ class Principal(BaseModel):
 
 
 class BridgeExchangeResponse(BaseModel):
-    access_token: str
-    token_type: Literal["bearer"] = "bearer"
     expires_in: int
     principal: Principal
 
@@ -84,5 +82,9 @@ class NextcloudWebhookEvent(BaseModel):
     subject: str | None = None
     path: str | None = None
     actor: str | None = None
+    base_url: str | None = None
+    username: str | None = None
+    file_id: str | None = None
+    is_directory: bool | None = None
     timestamp: datetime | None = None
     raw: dict[str, Any] = Field(default_factory=dict)

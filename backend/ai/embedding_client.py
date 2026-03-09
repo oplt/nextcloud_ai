@@ -35,7 +35,7 @@ class DeterministicEmbeddingClient:
 class EmbeddingClientFactory:
     @staticmethod
     def create() -> EmbeddingClientProtocol:
-        if settings.EMBEDDING_PROVIDER == "ollama":
+        if settings.effective_embedding_provider == "ollama":
             return OllamaEmbeddingClient(
                 model=settings.OLLAMA_EMBEDDING_MODEL,
                 base_url=str(settings.OLLAMA_BASE_URL),

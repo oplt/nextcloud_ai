@@ -6,6 +6,8 @@ import type {
   ChatSessionSummary,
   Connector,
   ConnectorPayload,
+  ConnectorUpdatePayload,
+  CsrfTokenResponse,
   DocumentDetail,
   DocumentSummary,
   SyncJob,
@@ -13,30 +15,69 @@ import type {
 } from '../types/api';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api/v1').replace(/\/$/, '');
-const TOKEN_KEY = 'nc_ai_access_token';
+const CSRF_COOKIE_NAME = 'nc_ai_csrf_token';
+const CSRF_HEADER_NAME = 'X-CSRF-Token';
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
-export function getStoredToken(): string | null {
-  return window.localStorage.getItem(TOKEN_KEY);
+function isSafeMethod(method?: string): boolean {
+  return SAFE_METHODS.has((method ?? 'GET').toUpperCase());
 }
 
-export function storeToken(token: string | null): void {
-  if (token) {
-    window.localStorage.setItem(TOKEN_KEY, token);
-    return;
+function readCookie(name: string): string | null {
+  const prefix = `${name}=`;
+  const cookies = document.cookie ? document.cookie.split('; ') : [];
+  for (const cookie of cookies) {
+    if (!cookie.startsWith(prefix)) {
+      continue;
+    }
+    return decodeURIComponent(cookie.slice(prefix.length));
   }
-  window.localStorage.removeItem(TOKEN_KEY);
+  return null;
+}
+
+async function fetchCsrfToken(): Promise<string> {
+  const response = await fetch(`${API_BASE}/auth/csrf`, {
+    credentials: 'include',
+  });
+
+  if (!response.ok) {
+    const message = await response.text().catch(() => `Request failed with ${response.status}`);
+    throw new Error(message || `Request failed with ${response.status}`);
+  }
+
+  const payload = (await response.json()) as CsrfTokenResponse;
+  if (typeof payload.csrf_token === 'string' && payload.csrf_token) {
+    return payload.csrf_token;
+  }
+
+  const cookieToken = readCookie(CSRF_COOKIE_NAME);
+  if (cookieToken) {
+    return cookieToken;
+  }
+
+  throw new Error('CSRF token was not returned by the server');
+}
+
+export async function ensureCsrfToken(forceRefresh = false): Promise<string> {
+  if (!forceRefresh) {
+    const existing = readCookie(CSRF_COOKIE_NAME);
+    if (existing) {
+      return existing;
+    }
+  }
+  return fetchCsrfToken();
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const headers = new Headers(options.headers ?? {});
-  const token = getStoredToken();
+  const method = (options.method ?? 'GET').toUpperCase();
   const hasFormData = options.body instanceof FormData;
 
-  if (!hasFormData && !headers.has('Content-Type') && options.method && options.method !== 'GET') {
+  if (!hasFormData && !headers.has('Content-Type') && !isSafeMethod(method)) {
     headers.set('Content-Type', 'application/json');
   }
-  if (token) {
-    headers.set('Authorization', `Bearer ${token}`);
+  if (!isSafeMethod(method)) {
+    headers.set(CSRF_HEADER_NAME, await ensureCsrfToken());
   }
 
   const response = await fetch(`${API_BASE}${path}`, {
@@ -76,17 +117,14 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export async function login(email: string, password: string): Promise<AuthSession> {
-  const session = await request<AuthSession>('/auth/login', {
+  return request<AuthSession>('/auth/login', {
     method: 'POST',
     body: JSON.stringify({ email, password }),
   });
-  storeToken(session.access_token);
-  return session;
 }
 
 export async function logout(): Promise<void> {
   await request<void>('/auth/logout', { method: 'POST' });
-  storeToken(null);
 }
 
 export async function getCurrentUser(): Promise<User> {
@@ -100,6 +138,16 @@ export async function listConnectors(): Promise<Connector[]> {
 export async function createConnector(payload: ConnectorPayload): Promise<Connector> {
   return request<Connector>('/connectors', {
     method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateConnector(
+  connectorId: string,
+  payload: ConnectorUpdatePayload,
+): Promise<Connector> {
+  return request<Connector>(`/connectors/${connectorId}`, {
+    method: 'PATCH',
     body: JSON.stringify(payload),
   });
 }
@@ -132,6 +180,10 @@ export async function listDocuments(query?: string): Promise<DocumentSummary[]> 
 
 export async function getDocument(documentId: string): Promise<DocumentDetail> {
   return request<DocumentDetail>(`/documents/${documentId}`);
+}
+
+export function getDocumentOriginalUrl(documentId: string): string {
+  return `${API_BASE}/documents/${documentId}/original`;
 }
 
 export async function reindexDocument(documentId: string): Promise<{ status: string; task_id: string; document_id: string }> {

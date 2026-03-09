@@ -7,11 +7,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
+from backend.api.deps import DbSessionDep
 from backend.connectors.nextcloud.config import (
     NextcloudBridgeSettings,
     get_nextcloud_settings,
 )
 from backend.connectors.nextcloud.schemas import NextcloudWebhookEvent
+from backend.services.nextcloud_automation_service import NextcloudAutomationService
 
 router = APIRouter(prefix="/nextcloud", tags=["nextcloud-webhooks"])
 
@@ -33,6 +35,7 @@ def _verify_secret(raw_body: bytes, signature: str | None, secret: str | None) -
 @router.post("/webhooks")
 async def receive_nextcloud_webhook(
     request: Request,
+    session: DbSessionDep,
     settings: Annotated[NextcloudBridgeSettings, Depends(get_nextcloud_settings)],
     x_webhook_signature: Annotated[
         str | None, Header(alias="X-Webhook-Signature")
@@ -52,13 +55,28 @@ async def receive_nextcloud_webhook(
             detail="Webhook payload must be JSON",
         ) from exc
 
+    connector_payload = payload.get("connector")
+    connector_id = payload.get("connector_id")
+    if connector_id is None and isinstance(connector_payload, dict):
+        connector_id = connector_payload.get("id")
+
     event = NextcloudWebhookEvent(
-        event=str(payload.get("event") or payload.get("type") or "unknown"),
-        connector_id=payload.get("connector_id"),
+        event=str(
+            payload.get("event")
+            or payload.get("type")
+            or payload.get("action")
+            or "unknown"
+        ),
+        connector_id=connector_id,
         subject=payload.get("subject"),
-        path=payload.get("path"),
+        path=payload.get("path") or payload.get("file_path"),
         actor=payload.get("actor"),
+        base_url=payload.get("base_url") or payload.get("nc_base_url"),
+        username=payload.get("username") or payload.get("connector_username"),
+        file_id=payload.get("file_id") or payload.get("id"),
+        is_directory=payload.get("is_directory"),
         timestamp=payload.get("timestamp"),
         raw=payload,
     )
-    return {"accepted": True, "event": event.model_dump(mode="json")}
+    result = await NextcloudAutomationService(session).dispatch_webhook_event(event)
+    return {**result.to_dict(), "event": event.model_dump(mode="json")}

@@ -1,0 +1,45 @@
+Nextcloud AI Server
+
+Version A - More Business-Oriented
+
+Part 1 - Short LinkedIn Project Summary
+
+Nextcloud AI Server is a private knowledge workspace built for teams that rely on internal documents but need faster, more trustworthy access to information. It solves a common enterprise problem: company knowledge is buried in shared files, difficult to search, and often too sensitive to send to public AI tools. The platform connects directly to Nextcloud, syncs and indexes documents, and lets users ask natural-language questions with grounded answers and source citations. It also includes connector management, document review, and job monitoring, which makes it feel like a deployable internal product rather than a demo. The result is a practical AI layer for improving knowledge access, operational efficiency, and trust in internal search.
+
+Part 2 - Technical Highlights
+
+- Full-stack architecture with FastAPI, React, TypeScript, PostgreSQL, pgvector, Redis, Celery, Docker, and Ollama
+- Private document ingestion pipeline for PDF, DOCX, ODT, Markdown, and text files, with chunking and embedding-based indexing
+- Hybrid retrieval approach combining vector similarity and keyword matching to improve answer relevance and citation quality
+- Nextcloud integration with signed SSO handoff, connector management, document sync, reindex workflows, and webhook-driven automation
+- Production-minded engineering details including encrypted connector secrets, audit logging, background workers, and readiness checks for core dependencies
+
+Part 3 - Market Relevance / Value Proposition
+
+- Addresses growing demand for private AI systems that work on internal knowledge without exposing sensitive data to public tools
+- Valuable for knowledge-heavy teams using Nextcloud as a central document hub, including operations, legal, HR, admin, and internal support functions
+- Reduces time lost to manual file hunting by turning static document stores into searchable, source-backed answers
+- Relevant now because companies want AI adoption that is useful, governable, and compatible with existing infrastructure rather than standalone chat experiments
+
+
+Version B - More Technical / Engineering-Oriented
+
+Part 1 - Short LinkedIn Project Summary
+
+Nextcloud AI Server is a full-stack private RAG platform designed to sit directly on top of Nextcloud and turn internal files into a permission-aware AI workspace. The core problem it solves is not just document search, but trusted retrieval over business content where privacy, source traceability, and operational reliability matter. The system syncs documents from Nextcloud, parses and chunks them, stores embeddings in pgvector, and returns grounded answers with citations and session-aware follow-up handling. Around that core, it adds connector lifecycle management, background sync and reindex jobs, webhook automation, and operational health checks. This makes it a credible internal AI product architecture, not a thin chatbot wrapper over a document store.
+
+Part 2 - Technical Highlights
+
+- Modular async backend in Python 3.12, FastAPI, and SQLAlchemy, with separate services for auth, connectors, ingestion, retrieval, chat, health, and job orchestration
+- PostgreSQL + pgvector data model with ANN indexing for embeddings, plus explicit entities for documents, chunks, chat sessions, sync jobs, ACLs, and audit logs
+- Ingestion pipeline parses PDF, DOCX, ODT, Markdown, and text, then chunks content and generates embeddings for retrieval
+- Hybrid retrieval stack merges semantic search with lexical ranking and context-aware source selection, then returns cited answers tied to active document context
+- Celery + Redis handle background sync and reindex tasks with retry behavior, webhook debouncing, fallback scheduling, and development-safe local execution fallback
+- Security model includes encrypted connector credentials, single-use signed Nextcloud bridge tokens, cookie-based JWT auth, CSRF protection, and dependency readiness checks
+
+Part 3 - Market Relevance / Value Proposition
+
+- Fits organizations that need AI over internal knowledge while keeping control over privacy, access rules, and infrastructure choices
+- Strongly relevant for teams that already store operational knowledge in Nextcloud but lack a reliable way to query it conversationally
+- Improves trust and usability by pairing AI responses with source citations instead of opaque generated answers
+- Matches current market demand for deployable, self-hostable AI systems that integrate with existing enterprise workflows instead of requiring a full platform migration

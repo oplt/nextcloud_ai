@@ -7,7 +7,7 @@ from functools import cached_property
 from pathlib import Path
 from typing import Literal, List
 
-from pydantic import AnyHttpUrl, Field, SecretStr, field_validator
+from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from sqlalchemy.engine import make_url
 
@@ -47,19 +47,26 @@ class Settings(BaseSettings):
     AUTH_ISSUER: str = "nextcloud-ai"
     AUTH_AUDIENCE: str = "nextcloud-ai-users"
     AUTH_COOKIE_NAME: str = "nc_ai_access_token"
-    AUTH_COOKIE_SECURE: bool = False
+    AUTH_COOKIE_SECURE: bool | None = None
     AUTH_COOKIE_SAMESITE: Literal["lax", "strict", "none"] = "lax"
     AUTH_COOKIE_DOMAIN: str | None = None
+    CSRF_COOKIE_NAME: str = "nc_ai_csrf_token"
+    CSRF_HEADER_NAME: str = "X-CSRF-Token"
+    CSRF_COOKIE_SECURE: bool | None = None
+    CSRF_COOKIE_SAMESITE: Literal["lax", "strict", "none"] | None = None
 
     FIRST_SUPERUSER_EMAIL: str = "admin@example.com"
     FIRST_SUPERUSER_PASSWORD: str = "ChangeMe123!"
 
     EMBEDDING_DIM: int
-    EMBEDDING_PROVIDER: Literal["deterministic", "ollama"] = "deterministic"
-    LLM_PROVIDER: Literal["stub", "ollama"] = "stub"
+    EMBEDDING_PROVIDER: Literal["deterministic", "ollama"] | None = None
+    LLM_PROVIDER: Literal["stub", "ollama"] | None = None
     OLLAMA_BASE_URL: AnyHttpUrl = Field(default="http://localhost:11434")
     OLLAMA_EMBEDDING_MODEL: str = "bge-m3:latest"
     OLLAMA_CHAT_MODEL: str = "llama3:latest"
+    OLLAMA_READINESS_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=60.0)
+    OLLAMA_PULL_TIMEOUT_SECONDS: float = Field(default=900.0, ge=30.0, le=3600.0)
+    OLLAMA_WARMUP_TIMEOUT_SECONDS: float = Field(default=120.0, ge=5.0, le=900.0)
 
     NEXTCLOUD_BRIDGE_SHARED_SECRET: SecretStr = Field(default=SecretStr("change-me"))
     NEXTCLOUD_BRIDGE_ISSUER: str = "nextcloud-bridge"
@@ -70,6 +77,13 @@ class Settings(BaseSettings):
     NEXTCLOUD_WEBHOOK_SECRET: SecretStr | None = None
     NEXTCLOUD_VERIFY_TLS: bool = True
     NEXTCLOUD_REQUEST_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=120.0)
+    NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS: int = Field(default=30, ge=1, le=3600)
+    NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS: int = Field(
+        default=300, ge=30, le=86400
+    )
+    NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS: int = Field(
+        default=900, ge=60, le=604800
+    )
 
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
@@ -102,6 +116,16 @@ class Settings(BaseSettings):
                 return parsed
 
         return normalized.strip("'\"")
+
+    @field_validator("OLLAMA_CHAT_MODEL", "OLLAMA_EMBEDDING_MODEL", mode="before")
+    @classmethod
+    def normalize_ollama_model_name(cls, value: object) -> object:
+        if not isinstance(value, str):
+            return value
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("Ollama model name cannot be empty")
+        return normalized
 
     @field_validator("FRONTEND_URL", mode="after")
     @classmethod
@@ -139,8 +163,51 @@ class Settings(BaseSettings):
         return self.APP_ENV == "development"
 
     @cached_property
+    def nextcloud_event_redis_url(self) -> str:
+        return self.NEXTCLOUD_BRIDGE_REDIS_URL or self.REDIS_URL
+
+    @cached_property
+    def effective_embedding_provider(self) -> Literal["deterministic", "ollama"]:
+        if self.EMBEDDING_PROVIDER is not None:
+            return self.EMBEDDING_PROVIDER
+        if self.APP_ENV in {"staging", "production"}:
+            return "ollama"
+        return "deterministic"
+
+    @cached_property
+    def effective_llm_provider(self) -> Literal["stub", "ollama"]:
+        if self.LLM_PROVIDER is not None:
+            return self.LLM_PROVIDER
+        if self.APP_ENV in {"staging", "production"}:
+            return "ollama"
+        return "stub"
+
+    @cached_property
+    def ollama_required(self) -> bool:
+        return (
+            self.effective_embedding_provider == "ollama"
+            or self.effective_llm_provider == "ollama"
+        )
+
+    @cached_property
     def auth_cookie_max_age(self) -> int:
         return self.ACCESS_TOKEN_EXPIRE_MINUTES * 60
+
+    @cached_property
+    def auth_cookie_secure(self) -> bool:
+        if self.AUTH_COOKIE_SECURE is not None:
+            return self.AUTH_COOKIE_SECURE
+        return self.APP_ENV in {"staging", "production"}
+
+    @cached_property
+    def csrf_cookie_secure(self) -> bool:
+        if self.CSRF_COOKIE_SECURE is not None:
+            return self.CSRF_COOKIE_SECURE
+        return self.auth_cookie_secure
+
+    @cached_property
+    def csrf_cookie_samesite(self) -> Literal["lax", "strict", "none"]:
+        return self.CSRF_COOKIE_SAMESITE or self.AUTH_COOKIE_SAMESITE
 
     @cached_property
     def vault_fernet_key(self) -> bytes:
@@ -151,6 +218,16 @@ class Settings(BaseSettings):
         )
         digest = hashlib.sha256(raw).digest()
         return base64.urlsafe_b64encode(digest)
+
+    @model_validator(mode="after")
+    def validate_security_settings(self) -> "Settings":
+        if self.APP_ENV in {"staging", "production"} and not self.auth_cookie_secure:
+            raise ValueError("AUTH_COOKIE_SECURE must be enabled outside development/test")
+        if self.AUTH_COOKIE_SAMESITE == "none" and not self.auth_cookie_secure:
+            raise ValueError("AUTH_COOKIE_SAMESITE='none' requires AUTH_COOKIE_SECURE")
+        if self.csrf_cookie_samesite == "none" and not self.csrf_cookie_secure:
+            raise ValueError("CSRF_COOKIE_SAMESITE='none' requires CSRF_COOKIE_SECURE")
+        return self
 
 
 settings = Settings()

@@ -14,7 +14,7 @@ from backend.core.security import (
 )
 from backend.db.models import User
 from backend.db.repo.user import UserRepository
-from backend.schemas.auth_schema import AuthSessionResponse
+from backend.schemas.auth_schema import IssuedAuthSession
 from backend.schemas.user_schema import UserRead
 from backend.services.audit_service import AuditService
 
@@ -27,7 +27,7 @@ class AuthService:
 
     async def login_with_password(
         self, email: str, password: str
-    ) -> AuthSessionResponse:
+    ) -> IssuedAuthSession:
         user = await self.user_repo.get_by_email(email)
         if (
             not user
@@ -77,7 +77,7 @@ class AuthService:
 
     async def sync_nextcloud_principal(
         self, principal: Principal
-    ) -> AuthSessionResponse:
+    ) -> IssuedAuthSession:
         user = await self.user_repo.get_by_external_subject("nextcloud", principal.sub)
         if user is None:
             user = User(
@@ -125,7 +125,7 @@ class AuthService:
         username: str | None = None,
         groups: list[str] | None = None,
         nextcloud_base_url: str | None = None,
-    ) -> AuthSessionResponse:
+    ) -> IssuedAuthSession:
         context = AuthContext(
             user_id=str(user.id),
             auth_provider=auth_provider,  # type: ignore[arg-type]
@@ -139,7 +139,7 @@ class AuthService:
             role_name=user.role.name if user.role else None,
         )
         token, expires_in = app_token_service.issue_access_token(context)
-        return AuthSessionResponse(
+        return IssuedAuthSession(
             access_token=token,
             expires_in=expires_in,
             user=UserRead.model_validate(user),

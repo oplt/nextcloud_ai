@@ -183,9 +183,11 @@ class AsyncNextcloudClient:
             return await self._client.request(method, url, **kwargs)
         except httpx.RequestError as exc:
             base_url = str(self.config.base_url).rstrip("/")
+            reason = str(exc).strip() or exc.__class__.__name__
             raise NextcloudAPIError(
                 f"Could not reach Nextcloud at {base_url}. "
-                "Check the connector base URL and that the server is reachable from the backend."
+                f"Check the connector base URL and that the server is reachable from the backend. "
+                f"upstream_error={reason}"
             ) from exc
 
     @staticmethod

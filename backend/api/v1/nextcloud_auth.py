@@ -8,12 +8,13 @@ from typing import Annotated
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
 from fastapi.responses import HTMLResponse
 
+from backend.api.auth import set_session_cookies
 from backend.connectors.nextcloud import BridgeTokenCodec, get_nextcloud_settings
 from backend.connectors.nextcloud.exceptions import BridgeTokenError
 from backend.connectors.nextcloud.replay_store import RedisReplayStore
 from backend.connectors.nextcloud.schemas import BridgeExchangeRequest, Principal
 from backend.core.config import settings
-from backend.schemas.auth_schema import AuthSessionResponse
+from backend.schemas.auth_schema import AuthSessionResponse, IssuedAuthSession
 from backend.services.auth_service import AuthService
 from backend.api.deps import DbSessionDep
 
@@ -33,7 +34,7 @@ def get_bridge_codec() -> BridgeTokenCodec:
 
 async def _exchange_principal(
     session: DbSessionDep, principal: Principal
-) -> AuthSessionResponse:
+) -> IssuedAuthSession:
     return await AuthService(session).sync_nextcloud_principal(principal)
 
 
@@ -62,17 +63,11 @@ async def exchange_nextcloud_bridge_token(
             nc_base_url=claims.nc_base_url,
         ),
     )
-    response.set_cookie(
-        key=settings.AUTH_COOKIE_NAME,
-        value=auth_session.access_token,
-        max_age=settings.auth_cookie_max_age,
-        httponly=True,
-        secure=settings.AUTH_COOKIE_SECURE,
-        samesite=settings.AUTH_COOKIE_SAMESITE,
-        domain=settings.AUTH_COOKIE_DOMAIN,
-        path="/",
+    set_session_cookies(response, auth_session.access_token)
+    return AuthSessionResponse(
+        expires_in=auth_session.expires_in,
+        user=auth_session.user,
     )
-    return auth_session
 
 
 @router.post("/sso/consume")
@@ -121,14 +116,5 @@ async def consume_nextcloud_bridge_token(
 </html>"""
     response = HTMLResponse(content=html, status_code=status.HTTP_200_OK)
     response.headers["Cache-Control"] = "no-store"
-    response.set_cookie(
-        key=settings.AUTH_COOKIE_NAME,
-        value=auth_session.access_token,
-        max_age=settings.auth_cookie_max_age,
-        httponly=True,
-        secure=settings.AUTH_COOKIE_SECURE,
-        samesite=settings.AUTH_COOKIE_SAMESITE,
-        domain=settings.AUTH_COOKIE_DOMAIN,
-        path="/",
-    )
+    set_session_cookies(response, auth_session.access_token)
     return response

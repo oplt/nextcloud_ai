@@ -1,24 +1,13 @@
 import { useCallback, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
+import SendIcon from '@mui/icons-material/Send';
 
 type ChatInputProps = {
   onSubmit: (question: string) => Promise<void>;
   disabled?: boolean;
 };
 
-function SendIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" aria-hidden="true">
-      <path
-        d="M17.5 2.5L9.5 10.5M17.5 2.5L12 17.5L9.5 10.5M17.5 2.5L2.5 8L9.5 10.5"
-        stroke="currentColor"
-        strokeWidth="1.8"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
-    </svg>
-  );
-}
+
 
 export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
   const [question, setQuestion] = useState('');

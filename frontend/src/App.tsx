@@ -7,16 +7,19 @@ import {
   deleteConnector,
   getChatSession,
   getDocument,
+  listJobs,
   listChatSessions,
   listConnectors,
   listDocuments,
   reindexDocument,
   syncConnector,
   testConnector,
+  updateConnector,
 } from './api/client';
 import { useSession } from './hooks/useSession';
 import { ConnectorsPage } from './pages/ConnectorsPage';
 import { DocumentsPage } from './pages/DocumentsPage';
+import { JobsPage } from './pages/JobsPage';
 import { LoginPage } from './pages/LoginPage';
 import { OverviewPage } from './pages/OverviewPage';
 import type {
@@ -28,10 +31,11 @@ import type {
   ConnectorPayload,
   DocumentDetail,
   DocumentSummary,
+  SyncJob,
 } from './types/api';
 
 // ─── Types ────────────────────────────────────────────────────
-type View = 'overview' | 'connectors' | 'documents';
+type View = 'overview' | 'connectors' | 'documents' | 'jobs';
 
 type NavItem = {
   key: View;
@@ -74,6 +78,17 @@ function DocumentIcon() {
   );
 }
 
+function JobsIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="10" cy="10" r="7" />
+      <path d="M10 6v4l2.5 2.5" />
+      <path d="M6 3.5 4.5 2" />
+      <path d="M14 3.5 15.5 2" />
+    </svg>
+  );
+}
+
 const navItems: NavItem[] = [
   {
     key: 'overview',
@@ -95,6 +110,13 @@ const navItems: NavItem[] = [
     heading: 'Document catalog',
     description: 'Review indexed files, inspect metadata, and requeue document parsing when needed.',
     icon: <DocumentIcon />,
+  },
+  {
+    key: 'jobs',
+    label: 'Jobs',
+    heading: 'Operational job monitor',
+    description: 'Track sync and reindex execution, watch failures, and follow retry activity in real time.',
+    icon: <JobsIcon />,
   },
 ];
 
@@ -152,16 +174,22 @@ function App() {
   // Data
   const [connectors, setConnectors]       = useState<Connector[]>([]);
   const [documents, setDocuments]         = useState<DocumentSummary[]>([]);
+  const [jobs, setJobs]                   = useState<SyncJob[]>([]);
   const [sessions, setSessions]           = useState<ChatSessionSummary[]>([]);
   const [selectedDocument, setSelectedDocument] = useState<DocumentDetail | null>(null);
   const [selectedSession, setSelectedSession]   = useState<ChatSessionDetail | null>(null);
   const [pendingMessages, setPendingMessages]   = useState<ChatMessage[]>([]);
+  const [jobsLoading, setJobsLoading] = useState(false);
+  const [jobsRefreshing, setJobsRefreshing] = useState(false);
+  const [jobsError, setJobsError] = useState<string | null>(null);
+  const [jobsLastUpdatedAt, setJobsLastUpdatedAt] = useState<string | null>(null);
 
   // UI state
   const [busy, setBusy]   = useState(false);
   const [flash, setFlash] = useState<string | null>(null);
 
   const latestChatRequestId = useRef<string | null>(null);
+  const jobsRequestInFlight = useRef(false);
 
   const selectedDocumentId = selectedDocument?.id ?? null;
 
@@ -186,6 +214,62 @@ function App() {
   }, [pendingMessages, selectedSession, user]);
 
   // ── Data loading ────────────────────────────────────────────
+  const loadConnectors = useCallback(async () => {
+    setConnectors(await listConnectors());
+  }, []);
+
+  const loadDocuments = useCallback(async () => {
+    setDocuments(await listDocuments());
+  }, []);
+
+  const loadJobs = useCallback(async (options?: { silent?: boolean }) => {
+    if (jobsRequestInFlight.current) {
+      return;
+    }
+
+    const silent = options?.silent ?? false;
+    jobsRequestInFlight.current = true;
+    if (silent) {
+      setJobsRefreshing(true);
+    } else {
+      setJobsLoading(true);
+    }
+
+    try {
+      const nextJobs = await listJobs();
+      setJobs(nextJobs);
+      setJobsError(null);
+      setJobsLastUpdatedAt(new Date().toISOString());
+    } catch (e) {
+      setJobsError(e instanceof Error ? e.message : 'Failed to load jobs');
+    } finally {
+      jobsRequestInFlight.current = false;
+      if (silent) {
+        setJobsRefreshing(false);
+      } else {
+        setJobsLoading(false);
+      }
+    }
+  }, []);
+
+  const refreshDocumentsView = useCallback(
+    async (options?: { silent?: boolean }) => {
+      try {
+        await Promise.all([
+          loadDocuments(),
+          loadConnectors(),
+          loadJobs({ silent: true }),
+        ]);
+      } catch (e) {
+        if (options?.silent) {
+          return;
+        }
+        setFlash(e instanceof Error ? e.message : 'Failed to load documents');
+      }
+    },
+    [loadConnectors, loadDocuments, loadJobs],
+  );
+
   const loadData = useCallback(async () => {
     const [nc, nd, ns] = await Promise.all([
       listConnectors(),
@@ -203,6 +287,44 @@ function App() {
       setFlash(e instanceof Error ? e.message : 'Failed to load dashboard data');
     });
   }, [user, loadData]);
+
+  useEffect(() => {
+    if (!user || view !== 'jobs') {
+      return;
+    }
+
+    void loadJobs({ silent: jobs.length > 0 });
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      void loadJobs({ silent: true });
+    }, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [jobs.length, loadJobs, user, view]);
+
+  useEffect(() => {
+    if (!user || view !== 'documents') {
+      return;
+    }
+
+    void refreshDocumentsView();
+
+    const intervalId = window.setInterval(() => {
+      if (document.visibilityState === 'hidden') {
+        return;
+      }
+      void refreshDocumentsView({ silent: true });
+    }, 5000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [refreshDocumentsView, user, view]);
 
   // ── Feedback wrapper ────────────────────────────────────────
   const withFeedback = useCallback(
@@ -226,10 +348,10 @@ function App() {
     async (payload: ConnectorPayload) => {
       await withFeedback(async () => {
         await createConnector(payload);
-        await loadData();
+        await loadConnectors();
       }, 'Connector saved');
     },
-    [withFeedback, loadData],
+    [withFeedback, loadConnectors],
   );
 
   const handleDelete = useCallback(
@@ -237,10 +359,40 @@ function App() {
       await withFeedback(async () => {
         await deleteConnector(connectorId);
         if (selectedDocument?.connector_id === connectorId) setSelectedDocument(null);
-        await loadData();
+        await Promise.all([loadConnectors(), loadDocuments()]);
       }, 'Connector deleted');
     },
-    [withFeedback, loadData, selectedDocument],
+    [withFeedback, loadConnectors, loadDocuments, selectedDocument],
+  );
+
+  const handleTestConnector = useCallback(
+    async (connectorId: string) => {
+      await withFeedback(async () => {
+        await testConnector(connectorId);
+        await loadConnectors();
+      }, 'Connector test passed');
+    },
+    [withFeedback, loadConnectors],
+  );
+
+  const handleSyncConnector = useCallback(
+    async (connectorId: string, fullReindex = false) => {
+      await withFeedback(async () => {
+        await syncConnector(connectorId, fullReindex);
+        await Promise.all([loadConnectors(), loadJobs({ silent: true })]);
+      }, fullReindex ? 'Full reindex queued' : 'Sync queued');
+    },
+    [withFeedback, loadConnectors, loadJobs],
+  );
+
+  const handleToggleConnectorActive = useCallback(
+    async (connectorId: string, nextActive: boolean) => {
+      await withFeedback(async () => {
+        await updateConnector(connectorId, { is_active: nextActive });
+        await loadConnectors();
+      }, nextActive ? 'Connector activated' : 'Connector deactivated');
+    },
+    [withFeedback, loadConnectors],
   );
 
   // ── Document handlers ───────────────────────────────────────
@@ -258,10 +410,10 @@ function App() {
     async (documentId: string) => {
       await withFeedback(async () => {
         await reindexDocument(documentId);
-        await loadData();
+        await Promise.all([loadData(), loadJobs({ silent: true })]);
       }, 'Reindex queued');
     },
-    [withFeedback, loadData],
+    [withFeedback, loadData, loadJobs],
   );
 
   // ── Chat handlers ───────────────────────────────────────────
@@ -358,6 +510,32 @@ function App() {
     latestChatRequestId.current = null;
   }, []);
 
+  const handleLogout = useCallback(async () => {
+    setBusy(true);
+    setFlash(null);
+    try {
+      await logout();
+      setView('overview');
+      setConnectors([]);
+      setDocuments([]);
+      setJobs([]);
+      setJobsLoading(false);
+      setJobsRefreshing(false);
+      setSessions([]);
+      setSelectedDocument(null);
+      setSelectedSession(null);
+      setPendingMessages([]);
+      setJobsError(null);
+      setJobsLastUpdatedAt(null);
+      latestChatRequestId.current = null;
+      jobsRequestInFlight.current = false;
+    } catch (e) {
+      setFlash(e instanceof Error ? e.message : 'Sign out failed');
+    } finally {
+      setBusy(false);
+    }
+  }, [logout]);
+
   // ── Derived ─────────────────────────────────────────────────
   const currentView = useMemo(
     () => navItems.find((n) => n.key === view) ?? navItems[0],
@@ -413,7 +591,7 @@ function App() {
             <button type="button" onClick={() => void refresh()}>
               Refresh
             </button>
-            <button type="button" onClick={() => void logout()}>
+            <button type="button" onClick={() => void handleLogout()}>
               Sign out
             </button>
           </div>
@@ -457,8 +635,9 @@ function App() {
               connectors={connectors}
               onCreate={handleCreate}
               onDelete={handleDelete}
-              onTest={testConnector}
-              onSync={syncConnector}
+              onTest={handleTestConnector}
+              onSync={handleSyncConnector}
+              onToggleActive={handleToggleConnectorActive}
             />
           ) : null}
 
@@ -469,6 +648,18 @@ function App() {
               selectedDocumentId={selectedDocumentId}
               onSelect={handleSelectDocument}
               onReindex={handleReindexDocument}
+            />
+          ) : null}
+
+          {view === 'jobs' ? (
+            <JobsPage
+              jobs={jobs}
+              connectors={connectors}
+              loading={jobsLoading}
+              refreshing={jobsRefreshing}
+              error={jobsError}
+              lastUpdatedAt={jobsLastUpdatedAt}
+              onRefresh={() => loadJobs()}
             />
           ) : null}
         </div>

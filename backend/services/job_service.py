@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -11,11 +12,51 @@ from backend.db.repo.sync_job import SyncJobRepository
 from backend.services.job_lifecycle import JobLifecycleService
 
 
+@dataclass(slots=True)
+class SyncJobReservation:
+    job: SyncJob
+    created: bool
+
+
 class JobService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.repo = SyncJobRepository(session)
         self.connector_repo = ConnectorRepository(session)
+
+    async def reserve_sync_job(
+        self,
+        *,
+        connector_id: str,
+        requested_by: User | None,
+        full_reindex: bool,
+        job_key: str | None = None,
+        payload_json: dict | None = None,
+    ) -> SyncJobReservation:
+        connector = await self.connector_repo.get(connector_id)
+        if connector is None:
+            raise NotFoundError("Connector not found")
+        effective_job_key = job_key or f"sync:{connector_id}:{uuid.uuid4()}"
+        existing = await self.repo.get_by_job_key(effective_job_key)
+        if existing is not None:
+            return SyncJobReservation(job=existing, created=False)
+
+        job_payload = {"full_reindex": full_reindex}
+        if payload_json:
+            job_payload.update(payload_json)
+
+        job = SyncJob(
+            connector_id=connector.id,
+            requested_by_id=requested_by.id if requested_by else None,
+            job_key=effective_job_key,
+            job_type="reindex" if full_reindex else "sync",
+            status="queued",
+            payload_json=job_payload,
+        )
+        await self.repo.add(job, flush=True)
+        await self.session.commit()
+        await self.session.refresh(job)
+        return SyncJobReservation(job=job, created=True)
 
     async def create_sync_job(
         self,
@@ -24,26 +65,16 @@ class JobService:
         requested_by: User | None,
         full_reindex: bool,
         job_key: str | None = None,
+        payload_json: dict | None = None,
     ) -> SyncJob:
-        connector = await self.connector_repo.get(connector_id)
-        if connector is None:
-            raise NotFoundError("Connector not found")
-        effective_job_key = job_key or f"sync:{connector_id}:{uuid.uuid4()}"
-        existing = await self.repo.get_by_job_key(effective_job_key)
-        if existing is not None:
-            return existing
-        job = SyncJob(
-            connector_id=connector.id,
-            requested_by_id=requested_by.id if requested_by else None,
-            job_key=effective_job_key,
-            job_type="reindex" if full_reindex else "sync",
-            status="queued",
-            payload_json={"full_reindex": full_reindex},
+        reservation = await self.reserve_sync_job(
+            connector_id=connector_id,
+            requested_by=requested_by,
+            full_reindex=full_reindex,
+            job_key=job_key,
+            payload_json=payload_json,
         )
-        await self.repo.add(job, flush=True)
-        await self.session.commit()
-        await self.session.refresh(job)
-        return job
+        return reservation.job
 
     async def list_jobs(
         self, connector_id: str | None = None, *, limit: int = 100

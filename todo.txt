@@ -1,0 +1,47 @@
+Phase 1 MVP Hardening. This is the minimum backlog before serious demos or internal pilot use.
+1.Secure auth/session handling: remove frontend token storage in localStorage, use HttpOnly cookies only, enable production-safe cookie settings, add CSRF protection.
+2.Real local AI runtime: make Ollama the production default, add model pull/warmup on boot, and fail readiness if chat or embedding models are missing.
+3.Automatic ingestion: make Nextcloud webhooks enqueue sync/reindex jobs instead of only accepting the payload; add Redis-based debounce and a scheduled fallback sync.
+4.Real health checks: validate Postgres, Redis, Celery broker, and Ollama in readiness endpoints instead of returning hardcoded "ok".
+5.Jobs dashboard: add a real Jobs page with polling so operators can see sync, reindex, failures, and retry state.
+6.Deployment basics: add root README.md, .env.example, Makefile, and a proper deployment/ folder with reverse proxy and TLS-ready setup.
+7.Vector search scaling: add pgvector ANN indexing (ivfflat or hnsw) for document_chunks.embedding.
+
+Exit criteria:
+1.A file added in Nextcloud becomes searchable without manual sync.
+2.The app can be started from clean checkout with documented commands.
+3.Health endpoints reflect real dependency state.
+4.Chat uses real Ollama models, not stub/deterministic defaults.
+
+
+previous stesps are accomplished. continue with following steps
+
+Phase 2 Pilot-Ready for the first paying SME.
+1.RBAC and permission boundaries: restrict user, connector, and job routes by role/permission, not just “any authenticated user”.
+2.Admin UX: add user management, role assignment, connector ownership, and audit log browsing.
+3.Deployment package: ship a clean Docker deployment with NGINX/Caddy, backups, persistent volumes, and upgrade instructions.
+4.Observability: add Sentry, Prometheus metrics, basic tracing, and structured request/job IDs.
+5.Ingestion resilience: add retry policies, dead-letter handling, idempotent job keys, and document-level failure diagnostics.
+6.Better retrieval controls: add metadata filters by connector, file type, path, time range, and possibly per-chat document scope.
+7.Test and CI pipeline: make backend/frontend tests runnable in one command and add CI for lint, unit tests, and migrations.
+8.Nextcloud ops polish: document webhook registration, bridge auth setup, secret rotation, and connector credential rotation.
+
+Exit criteria:
+1.An SME admin can install, configure, sync, and monitor the system without touching code.
+2.Access boundaries are enforced and auditable.
+3.A failed connector or worker issue can be diagnosed from logs and job history.
+
+Phase 3 Product Differentiators. This is where the startup brief becomes commercially stronger than “just a private chatbot”.
+1.Email ingestion: IMAP/Exchange connector with thread parsing and attachment ingestion.
+2.Meeting agent: ingest transcripts and produce summaries, decisions, and action items.
+3.Contract agent: extract obligations, deadlines, renewal terms, penalties, and counterparties into structured records.
+4.Compliance agent: compare documents against internal policies or standards like ISO checklists and produce gap reports.
+5.Workflow actions: document classification, triage queues, and task creation hooks.
+6.Knowledge graph/relationships: link documents, projects, people, and entities for richer retrieval.
+7.Multi-tenant SaaS option: only after single-tenant/pilot deployments are stable.
+
+Exit criteria:
+1.The product solves a concrete SME workflow, not just search/chat.
+2.Structured outputs create repeatable operational value.
+3.The system has at least one clear wedge such as contracts, compliance, or meetings.
+

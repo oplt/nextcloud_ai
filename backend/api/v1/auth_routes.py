@@ -1,14 +1,26 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Request, Response, status
 
+from backend.api.auth import clear_session_cookies, set_session_cookies
 from backend.api.deps import CurrentIdentityDep, DbSessionDep
-from backend.core.config import settings
-from backend.schemas.auth_schema import AuthSessionResponse, LoginRequest
+from backend.core.csrf import ensure_csrf_cookie
+from backend.schemas.auth_schema import (
+    AuthSessionResponse,
+    CsrfTokenResponse,
+    LoginRequest,
+)
 from backend.schemas.user_schema import UserRead
 from backend.services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+
+@router.get("/csrf", response_model=CsrfTokenResponse)
+async def issue_csrf_token(request: Request, response: Response) -> CsrfTokenResponse:
+    csrf_token = ensure_csrf_cookie(request, response)
+    response.headers["Cache-Control"] = "no-store"
+    return CsrfTokenResponse(csrf_token=csrf_token)
 
 
 @router.post(
@@ -21,27 +33,23 @@ async def login(
     auth_session = await auth_service.login_with_password(
         payload.email, payload.password
     )
-    response.set_cookie(
-        key=settings.AUTH_COOKIE_NAME,
-        value=auth_session.access_token,
-        max_age=settings.auth_cookie_max_age,
-        httponly=True,
-        secure=settings.AUTH_COOKIE_SECURE,
-        samesite=settings.AUTH_COOKIE_SAMESITE,
-        domain=settings.AUTH_COOKIE_DOMAIN,
-        path="/",
+    set_session_cookies(response, auth_session.access_token)
+    return AuthSessionResponse(
+        expires_in=auth_session.expires_in,
+        user=auth_session.user,
     )
-    return auth_session
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
-async def logout(response: Response) -> Response:
-    response.delete_cookie(
-        key=settings.AUTH_COOKIE_NAME, domain=settings.AUTH_COOKIE_DOMAIN, path="/"
-    )
+async def logout() -> Response:
+    response = Response(status_code=status.HTTP_204_NO_CONTENT)
+    clear_session_cookies(response)
     return response
 
 
 @router.get("/me", response_model=UserRead)
-async def read_me(identity: CurrentIdentityDep) -> UserRead:
+async def read_me(
+    request: Request, response: Response, identity: CurrentIdentityDep
+) -> UserRead:
+    ensure_csrf_cookie(request, response)
     return UserRead.model_validate(identity.user)

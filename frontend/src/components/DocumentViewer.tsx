@@ -1,3 +1,4 @@
+import { getDocumentOriginalUrl } from '../api/client';
 import type { DocumentDetail } from '../types/api';
 import { formatDateTime, formatFileSize, getDocumentTypeLabel } from '../utils/documentDisplay';
 
@@ -24,6 +25,7 @@ function EmptyState() {
 
 export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
   if (!document) return <EmptyState />;
+  const originalUrl = getDocumentOriginalUrl(document.id);
 
   return (
     <div className="card detail-card">
@@ -98,31 +100,21 @@ export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
           <div>
             <h4>Original Preview</h4>
             <p>
-              {document.source_url
-                ? 'Embedded from the original document source.'
-                : 'Preview unavailable for this document.'}
+              Previewed directly from Nextcloud through the configured connector.
             </p>
           </div>
-          {document.source_url ? (
-            <a href={document.source_url} target="_blank" rel="noreferrer">
-              Open original ↗
-            </a>
-          ) : null}
+          <a href={originalUrl} target="_blank" rel="noreferrer">
+            Open original ↗
+          </a>
         </div>
 
-        {document.source_url ? (
-          <iframe
-            key={document.id}
-            className="document-preview__frame"
-            src={document.source_url}
-            title={`Preview of ${document.file_name}`}
-            loading="lazy"
-          />
-        ) : (
-          <div className="empty-state">
-            <span>No source URL available.</span>
-          </div>
-        )}
+        <iframe
+          key={document.id}
+          className="document-preview__frame"
+          src={originalUrl}
+          title={`Preview of ${document.file_name}`}
+          loading="lazy"
+        />
       </section>
     </div>
   );

@@ -9,7 +9,7 @@ from backend.services.job_service import JobService
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 
 
-@router.get("/", response_model=list[SyncJobRead])
+@router.get("", response_model=list[SyncJobRead])
 async def list_jobs(
     session: DbSessionDep,
     _: CurrentIdentityDep,

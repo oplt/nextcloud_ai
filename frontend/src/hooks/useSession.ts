@@ -1,6 +1,11 @@
 import { useCallback, useEffect, useState } from 'react';
 
-import { getCurrentUser, getStoredToken, login as apiLogin, logout as apiLogout, storeToken } from '../api/client';
+import {
+  ensureCsrfToken,
+  getCurrentUser,
+  login as apiLogin,
+  logout as apiLogout,
+} from '../api/client';
 import type { User } from '../types/api';
 
 type SessionState = {
@@ -15,18 +20,20 @@ export function useSession() {
   const refresh = useCallback(async () => {
     setState((current) => ({ ...current, loading: true, error: null }));
 
-    // Check if token exists before making the request
-    const token = getStoredToken();
-    if (!token) {
-      setState({ user: null, loading: false, error: null });
-      return;
+    try {
+      await ensureCsrfToken();
+    } catch {
+      // Best effort: the app can still render the login screen without a CSRF cookie.
     }
 
     try {
       const user = await getCurrentUser();
       setState({ user, loading: false, error: null });
     } catch (error) {
-      storeToken(null);
+      if (error instanceof Error && error.message === 'UNAUTHORIZED') {
+        setState({ user: null, loading: false, error: null });
+        return;
+      }
       setState({
         user: null,
         loading: false,
@@ -40,6 +47,7 @@ export function useSession() {
   }, [refresh]);
 
   const login = useCallback(async (email: string, password: string) => {
+    await ensureCsrfToken();
     const session = await apiLogin(email, password);
     setState({ user: session.user, loading: false, error: null });
   }, []);

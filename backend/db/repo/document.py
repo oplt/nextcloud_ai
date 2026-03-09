@@ -27,6 +27,17 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return result.scalar_one_or_none()
 
+    async def get_by_connector_and_file_path(
+            self, connector_id: UUID | str, file_path: str
+    ) -> Document | None:
+        result = await self.session.execute(
+            select(Document).where(
+                Document.connector_id == connector_id,
+                Document.file_path == file_path,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def get_with_chunks(self, document_id: UUID | str) -> Document | None:
         result = await self.session.execute(
             select(Document)

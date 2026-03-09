@@ -20,10 +20,12 @@ export type User = {
 };
 
 export type AuthSession = {
-  access_token: string;
-  token_type: string;
   expires_in: number;
   user: User;
+};
+
+export type CsrfTokenResponse = {
+  csrf_token: string;
 };
 
 export type Connector = {
@@ -48,6 +50,16 @@ export type ConnectorPayload = {
   username: string;
   secret: string;
   root_path: string;
+  verify_tls?: boolean;
+};
+
+export type ConnectorUpdatePayload = {
+  display_name?: string;
+  username?: string;
+  secret?: string;
+  root_path?: string;
+  is_active?: boolean;
+  status?: string;
   verify_tls?: boolean;
 };
 

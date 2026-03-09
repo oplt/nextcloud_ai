@@ -12,7 +12,7 @@ from backend.connectors.nextcloud.auth import BridgeTokenCodec
 from backend.connectors.nextcloud.config import NextcloudBridgeSettings
 from backend.connectors.nextcloud.exceptions import BridgeTokenError
 from backend.core.config import settings
-from backend.schemas.auth_schema import AuthSessionResponse
+from backend.schemas.auth_schema import IssuedAuthSession
 from backend.schemas.user_schema import UserRead
 
 
@@ -55,9 +55,9 @@ async def test_bridge_token_is_single_use() -> None:
 
 @pytest.mark.asyncio
 async def test_sso_consume_returns_html_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
-    async def fake_exchange_principal(session, principal: object) -> AuthSessionResponse:
+    async def fake_exchange_principal(session, principal: object) -> IssuedAuthSession:
         now = datetime.now(timezone.utc)
-        return AuthSessionResponse(
+        return IssuedAuthSession(
             access_token="bridge-session-token",
             expires_in=3600,
             user=UserRead(
@@ -97,8 +97,14 @@ async def test_sso_consume_returns_html_redirect(monkeypatch: pytest.MonkeyPatch
     )
 
     body = response.body.decode("utf-8")
+    set_cookie_headers = [
+        value.decode("utf-8")
+        for key, value in response.raw_headers
+        if key == b"set-cookie"
+    ]
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-store"
-    assert settings.AUTH_COOKIE_NAME in response.headers["set-cookie"]
+    assert any(settings.AUTH_COOKIE_NAME in header for header in set_cookie_headers)
+    assert any(settings.CSRF_COOKIE_NAME in header for header in set_cookie_headers)
     assert settings.frontend_redirect_url in body
     assert "window.location.replace" in body

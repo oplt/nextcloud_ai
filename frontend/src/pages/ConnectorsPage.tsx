@@ -1,25 +1,17 @@
 import type { Connector, ConnectorPayload } from '../types/api';
 import { NextcloudConnectorForm } from '../components/NextcloudConnectorForm';
+import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined';
 
 type ConnectorsPageProps = {
   connectors: Connector[];
   onCreate: (payload: ConnectorPayload) => Promise<void>;
   onDelete: (connectorId: string) => Promise<void>;
-  onTest: (connectorId: string) => Promise<unknown>;
-  onSync: (connectorId: string, fullReindex?: boolean) => Promise<unknown>;
+  onTest: (connectorId: string) => Promise<void>;
+  onSync: (connectorId: string, fullReindex?: boolean) => Promise<void>;
+  onToggleActive: (connectorId: string, nextActive: boolean) => Promise<void>;
 };
 
-// ─── Icons ────────────────────────────────────────────────────
-function TrashIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <polyline points="3 5 5 5 17 5" />
-      <path d="M16 5l-.9 11a1 1 0 0 1-1 .9H5.9a1 1 0 0 1-1-.9L4 5" />
-      <path d="M8 9v5M12 9v5" />
-      <path d="M7.5 5V3.5A.5.5 0 0 1 8 3h4a.5.5 0 0 1 .5.5V5" />
-    </svg>
-  );
-}
+
 
 // ─── Empty state ─────────────────────────────────────────────
 function EmptyConnectors() {
@@ -46,6 +38,7 @@ export function ConnectorsPage({
   onDelete,
   onTest,
   onSync,
+  onToggleActive,
 }: ConnectorsPageProps) {
   const handleDelete = async (id: string, name: string) => {
     if (!window.confirm(`Delete "${name}" and all its synced documents?`)) return;
@@ -74,9 +67,18 @@ export function ConnectorsPage({
                 </div>
 
                 <div className="connector-actions">
+                  <span className={`pill pill--${connector.is_active ? 'active' : 'inactive'}`}>
+                    {connector.is_active ? 'active' : 'inactive'}
+                  </span>
                   <span className={`pill pill--${connector.status}`}>
                     {connector.status}
                   </span>
+                  <button
+                    type="button"
+                    onClick={() => void onToggleActive(connector.id, !connector.is_active)}
+                  >
+                    {connector.is_active ? 'Deactivate' : 'Activate'}
+                  </button>
                   <button type="button" onClick={() => void onTest(connector.id)}>
                     Test
                   </button>
@@ -93,7 +95,7 @@ export function ConnectorsPage({
                     aria-label={`Delete ${connector.display_name}`}
                     title="Delete connector"
                   >
-                    <TrashIcon />
+                    <DeleteOutlineOutlinedIcon />
                   </button>
                 </div>
               </article>

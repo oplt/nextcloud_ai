@@ -1,7 +1,12 @@
 from __future__ import annotations
 
-from celery import Celery
+import asyncio
+import logging
 
+from celery import Celery
+from celery.signals import worker_ready
+
+from backend.ai.ollama_runtime import OllamaRuntimeService
 from backend.core.config import settings
 
 celery_app = Celery(
@@ -20,4 +25,31 @@ celery_app.conf.update(
     enable_utc=True,
     task_always_eager=settings.celery_task_always_eager,
     task_store_eager_result=settings.celery_task_always_eager,
+    beat_schedule={
+        "nextcloud-fallback-sync": {
+            "task": "backend.workers.indexing_tasks.enqueue_stale_connector_syncs",
+            "schedule": settings.NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS,
+        }
+    },
 )
+
+logger = logging.getLogger(__name__)
+
+
+@worker_ready.connect
+def warm_ollama_models_on_worker_boot(**_: object) -> None:
+    if not settings.ollama_required:
+        return
+
+    status = asyncio.run(OllamaRuntimeService().ensure_models_ready())
+    if status.ready:
+        logger.info(
+            "Celery worker warmed Ollama models: %s",
+            ", ".join(status.required_models.values()),
+        )
+        return
+
+    logger.warning(
+        "Celery worker could not prepare Ollama models: %s",
+        status.error or ", ".join(status.missing_models),
+    )

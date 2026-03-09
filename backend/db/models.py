@@ -5,7 +5,6 @@ from datetime import datetime
 
 from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
-    ARRAY,
     Boolean,
     DateTime,
     ForeignKey,
@@ -16,8 +15,9 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     func,
+    text,
 )
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import (
     DeclarativeBase,
     Mapped,
@@ -239,6 +239,14 @@ class DocumentChunk(UUIDPrimaryKeyMixin, TimestampMixin, Base):
             "document_id", "chunk_index", name="uq_document_chunks_doc_chunk_index"
         ),
         Index("ix_document_chunks_document_page", "document_id", "page_number"),
+        Index(
+            "ix_document_chunks_embedding_ann",
+            "embedding",
+            postgresql_using="ivfflat",
+            postgresql_ops={"embedding": "vector_cosine_ops"},
+            postgresql_with={"lists": 100},
+            postgresql_where=text("embedding IS NOT NULL"),
+        ),
     )
 
     document_id: Mapped[uuid.UUID] = mapped_column(

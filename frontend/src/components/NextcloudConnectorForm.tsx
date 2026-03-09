@@ -8,7 +8,7 @@ type NextcloudConnectorFormProps = {
 
 const INITIAL: ConnectorPayload = {
   display_name: 'Primary Nextcloud',
-  base_url:     'https://nextcloud.local',
+  base_url:     '',
   username:     '',
   secret:       '',
   root_path:    '/',
@@ -87,9 +87,10 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
             type="url"
             value={form.base_url}
             onChange={(e) => update('base_url', e.target.value)}
-            placeholder="https://nextcloud.example.com"
+            placeholder="http://localhost or https://cloud.example.com"
             autoComplete="off"
           />
+          <small>Use the full Nextcloud origin. Local HTTP installs usually look like `http://localhost`.</small>
         </label>
 
         <label htmlFor="nc-username">

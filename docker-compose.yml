@@ -73,6 +73,30 @@ services:
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
         celery -A backend.workers.celery_app.celery_app worker --loglevel=INFO
 
+  scheduler:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ./backend/.env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    working_dir: /app/backend
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
+        celery -A backend.workers.celery_app.celery_app beat --loglevel=INFO
+
   frontend:
     build:
       context: ./frontend
