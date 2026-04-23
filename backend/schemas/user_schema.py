@@ -15,6 +15,13 @@ class RoleRead(ORMBaseSchema):
     is_system: bool
 
 
+class UserSummaryRead(ORMBaseSchema):
+    id: UUID
+    username: str
+    email: EmailStr | None = None
+    full_name: str | None = None
+
+
 class UserBase(BaseModel):
     email: EmailStr | None = None
     full_name: str | None = Field(default=None, max_length=255)

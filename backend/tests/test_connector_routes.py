@@ -48,7 +48,15 @@ async def test_sync_connector_reuses_active_job(monkeypatch: pytest.MonkeyPatch)
             create_calls.append(kwargs)
             return existing_job
 
+    class FakeConnectorService:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_connector_for_actor(self, *_args, **_kwargs):
+            return SimpleNamespace(id=existing_job.connector_id)
+
     monkeypatch.setattr(connector_routes, "JobService", FakeJobService)
+    monkeypatch.setattr(connector_routes, "ConnectorService", FakeConnectorService)
     monkeypatch.setattr(connector_routes, "should_execute_tasks_locally", lambda: False)
     monkeypatch.setattr(
         connector_routes,
@@ -96,7 +104,15 @@ async def test_sync_connector_executes_existing_queued_job_locally_when_no_worke
             create_calls.append(kwargs)
             return existing_job
 
+    class FakeConnectorService:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_connector_for_actor(self, *_args, **_kwargs):
+            return SimpleNamespace(id=existing_job.connector_id)
+
     monkeypatch.setattr(connector_routes, "JobService", FakeJobService)
+    monkeypatch.setattr(connector_routes, "ConnectorService", FakeConnectorService)
     monkeypatch.setattr(connector_routes, "should_execute_tasks_locally", lambda: True)
     monkeypatch.setattr(
         connector_routes,

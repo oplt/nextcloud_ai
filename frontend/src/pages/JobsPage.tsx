@@ -1,5 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import ScheduleOutlinedIcon from '@mui/icons-material/ScheduleOutlined';
 
+import { AppButton } from '../components/ui/AppButton';
+import { AppCard } from '../components/ui/AppCard';
+import { AppSelectField } from '../components/ui/AppSelectField';
 import type { Connector, SyncJob } from '../types/api';
 
 type JobsPageProps = {
@@ -10,6 +15,7 @@ type JobsPageProps = {
   error: string | null;
   lastUpdatedAt: string | null;
   onRefresh: () => Promise<void>;
+  onRetry: (jobId: string) => Promise<void>;
 };
 
 type JobFilter = 'all' | 'active' | 'failed' | 'completed';
@@ -19,11 +25,11 @@ function isActiveJob(job: SyncJob): boolean {
 }
 
 function isFailedJob(job: SyncJob): boolean {
-  return ['failed', 'error'].includes(job.status);
+  return ['failed', 'error', 'dead_lettered'].includes(job.status);
 }
 
 function isCompletedJob(job: SyncJob): boolean {
-  return ['done', 'completed'].includes(job.status);
+  return ['done', 'completed', 'succeeded'].includes(job.status);
 }
 
 function formatTimestamp(value: string | null): string {
@@ -61,6 +67,11 @@ function getProgressPercent(job: SyncJob): number {
   return Math.min(100, Math.round((completed / total) * 100));
 }
 
+function extractFailureRows(job: SyncJob): Array<Record<string, unknown>> {
+  const failures = job.result_json?.failures;
+  return Array.isArray(failures) ? (failures as Array<Record<string, unknown>>) : [];
+}
+
 function JobProgressBar({ job }: { job: SyncJob }) {
   const pct = getProgressPercent(job);
   const fillClass =
@@ -88,10 +99,7 @@ function EmptyJobs() {
   return (
     <div className="empty-state jobs-empty-state">
       <div className="empty-state-icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <circle cx="10" cy="10" r="8" strokeLinecap="round" />
-          <path d="M10 6v4l2.5 2.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ScheduleOutlinedIcon fontSize="medium" />
       </div>
       <span>No jobs available for the current filters.</span>
     </div>
@@ -100,10 +108,10 @@ function EmptyJobs() {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <article className="card stat-card">
+    <AppCard className="card stat-card">
       <span className="stat-card__label">{label}</span>
       <strong className="stat-card__value">{value}</strong>
-    </article>
+    </AppCard>
   );
 }
 
@@ -115,9 +123,18 @@ export function JobsPage({
   error,
   lastUpdatedAt,
   onRefresh,
+  onRetry,
 }: JobsPageProps) {
+  const [searchParams] = useSearchParams();
   const [statusFilter, setStatusFilter] = useState<JobFilter>('all');
   const [connectorFilter, setConnectorFilter] = useState<string>('all');
+
+  useEffect(() => {
+    const raw = (searchParams.get('status') ?? '').toLowerCase();
+    if (raw === 'failed' || raw === 'active' || raw === 'completed' || raw === 'all') {
+      setStatusFilter(raw as JobFilter);
+    }
+  }, [searchParams]);
 
   const connectorNameById = useMemo(
     () => new Map(connectors.map((connector) => [connector.id, connector.display_name])),
@@ -155,7 +172,7 @@ export function JobsPage({
         <StatCard label="Completed" value={completedJobs.toString()} />
       </section>
 
-      <section className="card jobs-board">
+      <AppCard component="section" className="card jobs-board">
         <header className="panel-header jobs-board__header">
           <div>
             <h3>Background jobs</h3>
@@ -165,35 +182,29 @@ export function JobsPage({
             </p>
           </div>
           <div className="jobs-board__actions">
-            <label className="jobs-filter">
-              <span>Status</span>
-              <select
-                value={statusFilter}
-                onChange={(event) => setStatusFilter(event.target.value as JobFilter)}
-              >
-                <option value="all">All</option>
-                <option value="active">Active</option>
-                <option value="failed">Failed</option>
-                <option value="completed">Completed</option>
-              </select>
-            </label>
-            <label className="jobs-filter">
-              <span>Connector</span>
-              <select
-                value={connectorFilter}
-                onChange={(event) => setConnectorFilter(event.target.value)}
-              >
-                <option value="all">All connectors</option>
-                {connectors.map((connector) => (
-                  <option key={connector.id} value={connector.id}>
-                    {connector.display_name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <button type="button" onClick={() => void onRefresh()} disabled={loading}>
+            <AppSelectField
+              label="Status"
+              value={statusFilter}
+              onChange={(event) => setStatusFilter(event.target.value as JobFilter)}
+              options={[
+                { label: 'All', value: 'all' },
+                { label: 'Active', value: 'active' },
+                { label: 'Failed', value: 'failed' },
+                { label: 'Completed', value: 'completed' },
+              ]}
+            />
+            <AppSelectField
+              label="Connector"
+              value={connectorFilter}
+              onChange={(event) => setConnectorFilter(event.target.value)}
+              options={[
+                { label: 'All connectors', value: 'all' },
+                ...connectors.map((connector) => ({ label: connector.display_name, value: connector.id })),
+              ]}
+            />
+            <AppButton type="button" variant="outlined" onClick={() => void onRefresh()} disabled={loading}>
               {loading ? 'Refreshing…' : 'Refresh now'}
-            </button>
+            </AppButton>
           </div>
         </header>
 
@@ -212,7 +223,11 @@ export function JobsPage({
         ) : (
           <div className="job-list jobs-page__list">
             {filteredJobs.map((job) => {
-              const connectorName = connectorNameById.get(job.connector_id) ?? job.connector_id;
+              const connectorName =
+                job.connector?.display_name ??
+                connectorNameById.get(job.connector_id) ??
+                job.connector_id;
+              const failures = extractFailureRows(job);
               return (
                 <article key={job.id} className="job-card jobs-page__card">
                   <div className="job-card__info jobs-page__info">
@@ -247,18 +262,36 @@ export function JobsPage({
                     {job.error_message ? (
                       <p className="jobs-page__error">{job.error_message}</p>
                     ) : null}
+                    {failures.length > 0 ? (
+                      <div className="jobs-page__failures">
+                        <strong>Failed documents</strong>
+                        <ul>
+                          {failures.slice(0, 3).map((failure, index) => (
+                            <li key={`${job.id}-failure-${index}`}>
+                              <span>{String(failure.file_path ?? failure.external_id ?? 'unknown document')}</span>
+                              <small>{String(failure.error ?? 'Unknown error')}</small>
+                            </li>
+                          ))}
+                        </ul>
+                      </div>
+                    ) : null}
                   </div>
 
                   <div className="job-card__status jobs-page__status">
                     <span className="job-card__progress-label">{getProgressLabel(job)}</span>
                     <JobProgressBar job={job} />
+                    {isFailedJob(job) ? (
+                      <AppButton type="button" variant="outlined" onClick={() => void onRetry(job.id)}>
+                        Retry job
+                      </AppButton>
+                    ) : null}
                   </div>
                 </article>
               );
             })}
           </div>
         )}
-      </section>
+      </AppCard>
     </section>
   );
 }

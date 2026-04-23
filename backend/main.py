@@ -12,6 +12,11 @@ from backend.ai.ollama_runtime import OllamaRuntimeService
 from backend.api.router import api_router
 from backend.core.config import settings
 from backend.core.csrf import validate_csrf_request
+from backend.core.observability import (
+    configure_sentry,
+    install_metrics_route,
+    observe_http_request,
+)
 from backend.db.session import dispose_db
 
 
@@ -29,6 +34,7 @@ def configure_logging() -> None:
 
 
 configure_logging()
+configure_sentry()
 logger = logging.getLogger(__name__)
 
 
@@ -56,6 +62,11 @@ app = FastAPI(title=settings.APP_NAME, debug=settings.DEBUG, lifespan=lifespan)
 
 
 @app.middleware("http")
+async def observability_middleware(request: Request, call_next):
+    return await observe_http_request(request, call_next)
+
+
+@app.middleware("http")
 async def csrf_protection_middleware(request: Request, call_next):
     csrf_error = validate_csrf_request(request)
     if csrf_error is not None:
@@ -70,6 +81,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_metrics_route(app)
 app.include_router(api_router, prefix=settings.API_V1_PREFIX)
 
 

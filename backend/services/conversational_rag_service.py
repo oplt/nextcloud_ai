@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Iterable, Protocol
-from uuid import uuid4
+from uuid import UUID, uuid4
 
+from backend.ai.prompt_builder import GROUNDED_PROMPT_VERSION
 from backend.schemas.chat_schema import (
     ChatAskRequest,
     ChatAskResponse,
@@ -140,11 +141,13 @@ class ConversationalRagService:
             for source in self._dedupe_sources_by_document(cited_sources)
         ]
 
+        trace_id = request.request_id or str(uuid4())
+        session_uuid = session_id if isinstance(session_id, UUID) else UUID(str(session_id))
         return ChatAskResponse(
-            session_id=session_id,
+            session_id=session_uuid,
             answer=answer_text,
-            user_message_id=str(uuid4()),
-            assistant_message_id=str(uuid4()),
+            user_message_id=uuid4(),
+            assistant_message_id=uuid4(),
             parent_message_id=request.parent_message_id,
             request_id=request.request_id,
             sources=[candidate.chunk.as_source() for candidate in candidates],
@@ -152,6 +155,12 @@ class ConversationalRagService:
             active_context_document_ids=new_state.active_document_ids,
             active_context_documents=active_context_documents,
             conversation_query=conversation_query,
+            generation_trace_id=trace_id,
+            llm_provider='conversational_rag',
+            llm_model_id='local',
+            grounded_prompt_version=GROUNDED_PROMPT_VERSION,
+            retrieval_settings={'pipeline': 'conversational_rag', 'top_k': self.config.top_k},
+            verification=None,
         )
 
     def _retrieve_candidates(

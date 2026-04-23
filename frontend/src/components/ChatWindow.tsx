@@ -1,4 +1,5 @@
 import { useEffect, useRef } from 'react';
+import ChatBubbleOutlineOutlinedIcon from '@mui/icons-material/ChatBubbleOutlineOutlined';
 import type { ChatMessage } from '../types/api';
 import { MessageBubble } from './MessageBubble';
 
@@ -44,9 +45,7 @@ export function ChatWindow({
         {messages.length === 0 && !loading ? (
           <div className="empty-state">
             <div className="empty-state-icon" aria-hidden="true">
-              <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-                <path d="M17 13a2 2 0 0 1-2 2H6l-3 3V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8z" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
+              <ChatBubbleOutlineOutlinedIcon fontSize="medium" />
             </div>
             <span>No messages yet — ask a question below.</span>
           </div>

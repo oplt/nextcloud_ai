@@ -1,0 +1,3 @@
+{"id": "g1", "question": "What vacation carry-over policy applies in 2024?", "expected_document_ids": [], "notes": "Populate UUIDs from your corpus for offline precision@k."}
+{"id": "g2", "question": "Compare revenue recognition before and after ASC 606.", "expected_document_ids": [], "notes": "Multi-evidence template."}
+{"id": "g3", "question": "Wer hat 2023 die ISO-Zertifizierung unterschrieben?", "expected_document_ids": [], "notes": "Multilingual keyword recall probe."}

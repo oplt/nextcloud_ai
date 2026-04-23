@@ -33,7 +33,7 @@ class NextcloudConnectorSyncService:
             job: SyncJob | None = None,
     ) -> dict[str, int]:
         now = datetime.now(timezone.utc)
-        config = self.connector_service.build_config(connector)
+        config = self.connector_service.build_nextcloud_config(connector)
         client = AsyncNextcloudClient(config)
         permissions = NextcloudPermissionService(client)
         sync_service = NextcloudSyncService(client, permissions)
@@ -41,6 +41,7 @@ class NextcloudConnectorSyncService:
         discovered = 0
         indexed = 0
         failed = 0
+        failure_details: list[dict[str, str]] = []
         seen_external_ids: list[str] = []
 
         if job is not None:
@@ -54,22 +55,48 @@ class NextcloudConnectorSyncService:
 
             for item in items:
                 discovered += 1
-                seen_external_ids.append(item.node.file_id or item.node.path)
-                document, previous_version_tag = await self._upsert_document(
-                    connector, item
-                )
-                should_reindex = full_reindex or self._document_needs_reindex(
-                    document, previous_version_tag, item.node.etag
-                )
-                if should_reindex:
-                    try:
-                        payload = await sync_service.fetch_file_bytes(item.node.path)
-                        await self.ingestion.ingest_document_bytes(document, payload)
-                        indexed += 1
-                    except Exception as exc:
-                        failed += 1
-                        document.parse_status = "failed"
-                        document.parse_error = str(exc)
+                external_id = item.node.file_id or item.node.path
+                seen_external_ids.append(external_id)
+                try:
+                    document, previous_version_tag = await self._upsert_document(
+                        connector, item
+                    )
+                    should_reindex = full_reindex or self._document_needs_reindex(
+                        document, previous_version_tag, item.node.etag
+                    )
+                    if should_reindex:
+                        try:
+                            payload = await sync_service.fetch_file_bytes(item.node.path)
+                            await self.ingestion.ingest_document_bytes(document, payload)
+                            indexed += 1
+                            document.sync_status = "synced"
+                            document.sync_error = None
+                        except Exception as exc:
+                            failed += 1
+                            error_message = str(exc)
+                            document.sync_status = "error"
+                            document.sync_error = error_message
+                            document.parse_status = "failed"
+                            document.parse_error = error_message
+                            failure_details.append(
+                                {
+                                    "document_id": str(document.id),
+                                    "external_id": external_id,
+                                    "file_path": item.node.path,
+                                    "stage": "ingest",
+                                    "error": error_message,
+                                }
+                            )
+                except Exception as exc:
+                    failed += 1
+                    failure_details.append(
+                        {
+                            "external_id": external_id,
+                            "file_path": item.node.path,
+                            "stage": "upsert",
+                            "error": str(exc),
+                        }
+                    )
                 if job is not None:
                     JobLifecycleService.advance(job, discovered)
                 await self.session.flush()
@@ -89,6 +116,7 @@ class NextcloudConnectorSyncService:
                         "indexed": indexed,
                         "failed": failed,
                         "deleted": deleted,
+                        "failures": failure_details[:25],
                     },
                 )
             await self.session.commit()
@@ -102,7 +130,16 @@ class NextcloudConnectorSyncService:
             connector.status = "error"
             connector.last_error = str(exc)
             if job is not None:
-                JobLifecycleService.mark_failed(job, str(exc))
+                JobLifecycleService.mark_failed(
+                    job,
+                    str(exc),
+                    result={
+                        "discovered": discovered,
+                        "indexed": indexed,
+                        "failed": failed,
+                        "failures": failure_details[:25],
+                    },
+                )
             await self.session.commit()
             raise
         finally:

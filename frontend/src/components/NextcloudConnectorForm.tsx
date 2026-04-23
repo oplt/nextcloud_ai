@@ -1,51 +1,64 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import IconButton from '@mui/material/IconButton';
+import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined';
+import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
+
+import { AppButton } from './ui/AppButton';
+import { AppCard } from './ui/AppCard';
+import { AppCheckbox } from './ui/AppCheckbox';
+import { AppSelectField } from './ui/AppSelectField';
+import { AppTextField } from './ui/AppTextField';
 import type { ConnectorPayload } from '../types/api';
 
 type NextcloudConnectorFormProps = {
   onSubmit: (payload: ConnectorPayload) => Promise<void>;
 };
 
-const INITIAL: ConnectorPayload = {
-  display_name: 'Primary Nextcloud',
-  base_url:     '',
-  username:     '',
-  secret:       '',
-  root_path:    '/',
-  verify_tls:   true,
-};
-
-function EyeOpenIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-      <path d="M1.5 10S4.5 4 10 4s8.5 6 8.5 6-3 6-8.5 6S1.5 10 1.5 10z" strokeLinecap="round" strokeLinejoin="round" />
-      <circle cx="10" cy="10" r="2.5" strokeLinecap="round" />
-    </svg>
-  );
-}
-
-function EyeClosedIcon() {
-  return (
-    <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true">
-      <path d="M14.5 14.5A9 9 0 0 1 10 16c-5.5 0-8.5-6-8.5-6a15 15 0 0 1 4.1-4.8M7.5 4.2A9 9 0 0 1 10 4c5.5 0 8.5 6 8.5 6a15 15 0 0 1-1.8 2.6M3 3l14 14" strokeLinecap="round" strokeLinejoin="round" />
-    </svg>
-  );
+function createInitialForm(connectorType: 'nextcloud' | 'imap' = 'nextcloud'): ConnectorPayload {
+  if (connectorType === 'imap') {
+    return {
+      connector_type: 'imap',
+      display_name: 'Shared Mailbox',
+      base_url: '',
+      username: '',
+      secret: '',
+      root_path: 'INBOX',
+      verify_tls: true,
+      use_ssl: true,
+      port: 993,
+      search_criteria: 'ALL',
+    };
+  }
+  return {
+    connector_type: 'nextcloud',
+    display_name: 'Primary Nextcloud',
+    base_url: '',
+    username: '',
+    secret: '',
+    root_path: '/',
+    verify_tls: true,
+  };
 }
 
 export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps) {
-  const [form, setForm]           = useState<ConnectorPayload>(INITIAL);
+  const [form, setForm]           = useState<ConnectorPayload>(createInitialForm());
   const [showSecret, setShowSecret] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
-  const update = (key: keyof ConnectorPayload, value: string | boolean) => {
+  const update = (key: keyof ConnectorPayload, value: string | boolean | number | null) => {
     setForm((f) => ({ ...f, [key]: value }));
   };
+
+  const connectorType = form.connector_type ?? 'nextcloud';
+  const isImap = connectorType === 'imap';
 
   const isValid =
     form.display_name.trim() &&
     form.base_url.trim() &&
     form.username.trim() &&
-    form.secret;
+    form.secret &&
+    form.root_path.trim();
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
     e.preventDefault();
@@ -53,104 +66,150 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
     setSubmitting(true);
     try {
       await onSubmit(form);
-      setForm((f) => ({ ...f, secret: '' }));
+      setForm((f) => ({ ...createInitialForm(connectorType), ...f, secret: '' }));
       setShowSecret(false);
     } finally {
       setSubmitting(false);
     }
   };
 
-  const eyeLabel = showSecret ? 'Hide app password' : 'Show app password';
+  const eyeLabel = showSecret ? 'Hide secret' : 'Show secret';
 
   return (
-    <form className="card form-card" onSubmit={handleSubmit} aria-label="New Nextcloud connector">
-      <header className="panel-header">
-        <h3>New Nextcloud Connector</h3>
-      </header>
+    <form onSubmit={handleSubmit} aria-label="New connector">
+      <AppCard className="card form-card">
+        <header className="panel-header">
+          <h3>New Connector</h3>
+        </header>
 
-      <div>
-        <label htmlFor="nc-display-name">
-          <span>Display Name</span>
-          <input
-            id="nc-display-name"
-            value={form.display_name}
-            onChange={(e) => update('display_name', e.target.value)}
-            placeholder="My Nextcloud"
-            autoComplete="off"
-          />
-        </label>
+        <div>
+        <AppSelectField
+          id="connector-type"
+          label="Connector Type"
+          value={connectorType}
+          onChange={(event) => {
+            const nextType = event.target.value as 'nextcloud' | 'imap';
+            setForm(createInitialForm(nextType));
+          }}
+          options={[
+            { label: 'Nextcloud files', value: 'nextcloud' },
+            { label: 'IMAP email / Exchange inbox', value: 'imap' },
+          ]}
+        />
+
+        <AppTextField
+          id="nc-display-name"
+          label="Display Name"
+          value={form.display_name}
+          onChange={(e) => update('display_name', e.target.value)}
+          placeholder="My Nextcloud"
+          autoComplete="off"
+        />
 
         <label htmlFor="nc-base-url">
-          <span>Base URL</span>
-          <input
+          <AppTextField
             id="nc-base-url"
-            type="url"
+            type={isImap ? 'text' : 'url'}
+            label={isImap ? 'IMAP Host' : 'Base URL'}
             value={form.base_url}
             onChange={(e) => update('base_url', e.target.value)}
-            placeholder="http://localhost or https://cloud.example.com"
+            placeholder={isImap ? 'imap.example.com or imaps://outlook.office365.com' : 'http://localhost or https://cloud.example.com'}
             autoComplete="off"
           />
-          <small>Use the full Nextcloud origin. Local HTTP installs usually look like `http://localhost`.</small>
+          <small>
+            {isImap
+              ? 'Use the IMAP host for the shared mailbox. Exchange Online usually exposes `outlook.office365.com` over IMAP.'
+              : 'Use the full Nextcloud origin. Local HTTP installs usually look like `http://localhost`.'}
+          </small>
         </label>
 
-        <label htmlFor="nc-username">
-          <span>Username</span>
-          <input
-            id="nc-username"
-            value={form.username}
-            onChange={(e) => update('username', e.target.value)}
-            placeholder="admin"
-            autoComplete="username"
-          />
-        </label>
+        <AppTextField
+          id="nc-username"
+          label={isImap ? 'Mailbox Login' : 'Username'}
+          value={form.username}
+          onChange={(e) => update('username', e.target.value)}
+          placeholder={isImap ? 'shared-mailbox@example.com' : 'admin'}
+          autoComplete="username"
+        />
 
         <label htmlFor="nc-secret">
-          <span>App Password</span>
+          <AppTextField
+            id="nc-secret"
+            type={showSecret ? 'text' : 'password'}
+            label={isImap ? 'Mailbox Secret' : 'App Password'}
+            value={form.secret}
+            onChange={(e) => update('secret', e.target.value)}
+            placeholder={isImap ? 'mailbox password or app password' : 'xxxx-xxxx-xxxx-xxxx'}
+            autoComplete="current-password"
+          />
           <div className="input-with-action">
-            <input
-              id="nc-secret"
-              type={showSecret ? 'text' : 'password'}
-              value={form.secret}
-              onChange={(e) => update('secret', e.target.value)}
-              placeholder="xxxx-xxxx-xxxx-xxxx"
-              autoComplete="current-password"
-            />
-            <button
+            <IconButton
               type="button"
               className="input-action-button"
               aria-label={eyeLabel}
               title={eyeLabel}
               onClick={() => setShowSecret((s) => !s)}
             >
-              {showSecret ? <EyeClosedIcon /> : <EyeOpenIcon />}
-            </button>
+              {showSecret ? <VisibilityOffOutlinedIcon fontSize="small" /> : <VisibilityOutlinedIcon fontSize="small" />}
+            </IconButton>
           </div>
         </label>
 
-        <label htmlFor="nc-root-path">
-          <span>Root Path</span>
-          <input
-            id="nc-root-path"
-            value={form.root_path}
-            onChange={(e) => update('root_path', e.target.value)}
-            placeholder="/"
-          />
-        </label>
+        <AppTextField
+          id="nc-root-path"
+          label={isImap ? 'Mailbox' : 'Root Path'}
+          value={form.root_path}
+          onChange={(e) => update('root_path', e.target.value)}
+          placeholder={isImap ? 'INBOX' : '/'}
+        />
+
+        {isImap ? (
+          <>
+            <AppTextField
+              id="imap-port"
+              type="number"
+              label="Port"
+              value={String(form.port ?? 993)}
+              onChange={(e) => update('port', Number(e.target.value))}
+              inputProps={{ min: 1, max: 65535 }}
+            />
+
+            <label htmlFor="imap-search">
+              <AppTextField
+                id="imap-search"
+                label="Search Criteria"
+                value={form.search_criteria ?? 'ALL'}
+                onChange={(e) => update('search_criteria', e.target.value)}
+                placeholder="ALL"
+              />
+              <small>Examples: `ALL`, `UNSEEN`, `SINCE 1-Apr-2026`.</small>
+            </label>
+
+            <label className="checkbox-row" htmlFor="imap-use-ssl">
+              <AppCheckbox
+                id="imap-use-ssl"
+                checked={Boolean(form.use_ssl)}
+                onChange={(e) => update('use_ssl', e.target.checked)}
+              />
+              <span>Use SSL/TLS</span>
+            </label>
+          </>
+        ) : null}
 
         <label className="checkbox-row" htmlFor="nc-verify-tls">
-          <input
+          <AppCheckbox
             id="nc-verify-tls"
-            type="checkbox"
             checked={Boolean(form.verify_tls)}
             onChange={(e) => update('verify_tls', e.target.checked)}
           />
           <span>Verify TLS certificate</span>
         </label>
 
-        <button type="submit" disabled={submitting || !isValid}>
-          {submitting ? 'Saving…' : 'Save Connector'}
-        </button>
-      </div>
+          <AppButton type="submit" disabled={submitting || !isValid}>
+            {submitting ? 'Saving…' : 'Save Connector'}
+          </AppButton>
+        </div>
+      </AppCard>
     </form>
   );
 }

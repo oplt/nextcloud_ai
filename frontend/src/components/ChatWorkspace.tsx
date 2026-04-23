@@ -1,5 +1,12 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useMemo, useState } from 'react';
+import ButtonBase from '@mui/material/ButtonBase';
+import ChatBubbleOutlineOutlinedIcon from '@mui/icons-material/ChatBubbleOutlineOutlined';
+import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
 
+import { AppButton } from './ui/AppButton';
+import { AppCard } from './ui/AppCard';
+import { AppCheckbox } from './ui/AppCheckbox';
 import type {
   ChatActiveContextDocument,
   ChatAskResponse,
@@ -18,8 +25,8 @@ import {
 import { ChatInput } from './ChatInput';
 import { ChatWindow } from './ChatWindow';
 import { SourcePanel } from './SourcePanel';
+import { ConfirmDialog } from './ui/ConfirmDialog';
 
-// ─── Types ────────────────────────────────────────────────────
 type ChatWorkspaceProps = {
   sessions: ChatSessionSummary[];
   activeSession: ChatSessionDetail | null;
@@ -30,9 +37,8 @@ type ChatWorkspaceProps = {
   onNewChat?: () => void;
 };
 
-// ─── Helpers ─────────────────────────────────────────────────
-function truncate(s: string, max = 22): string {
-  return s.length <= max ? s : s.slice(0, max).trimEnd() + '…';
+function truncate(value: string, max = 22): string {
+  return value.length <= max ? value : `${value.slice(0, max).trimEnd()}…`;
 }
 
 function getResponseSources(response: ChatAskResponse): ChatSource[] {
@@ -47,13 +53,10 @@ function resolveContextDocsByIds(
   candidates: ChatActiveContextDocument[],
 ): ChatActiveContextDocument[] {
   if (!Array.isArray(ids) || ids.length === 0) return [];
-  const map = new Map(candidates.map((d) => [d.document_id, d]));
+  const map = new Map(candidates.map((document) => [document.document_id, document]));
   return ids
     .filter(Boolean)
-    .map(
-      (id) =>
-        map.get(id) ?? { document_id: id, file_name: id, file_path: id },
-    );
+    .map((id) => map.get(id) ?? { document_id: id, file_name: id, file_path: id });
 }
 
 function getSessionContextDocs(
@@ -75,29 +78,25 @@ function getResponseContextDocs(
   fallback: ChatActiveContextDocument[],
 ): ChatActiveContextDocument[] {
   const explicit = response.active_context_documents ?? [];
-  const known    = mergeActiveContextDocuments(sources, [...fallback, ...explicit]);
+  const known = mergeActiveContextDocuments(sources, [...fallback, ...explicit]);
   const resolved = resolveContextDocsByIds(response.active_context_document_ids, known);
 
-  if (resolved.length > 0)      return resolved;
+  if (resolved.length > 0) return resolved;
   if (sources.length === 0 && explicit.length === 0) return fallback;
   return mergeActiveContextDocuments(sources, explicit);
 }
 
-// ─── Empty state ──────────────────────────────────────────────
 function EmptySessions() {
   return (
     <div className="empty-state">
       <div className="empty-state-icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M17 13a2 2 0 0 1-2 2H6l-3 3V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v8z" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ChatBubbleOutlineOutlinedIcon fontSize="medium" />
       </div>
       <span>No previous chats yet. Saved conversations will appear here.</span>
     </div>
   );
 }
 
-// ─── ChatWorkspace ────────────────────────────────────────────
 export function ChatWorkspace({
   sessions,
   activeSession,
@@ -107,129 +106,168 @@ export function ChatWorkspace({
   onAsk,
   onNewChat,
 }: ChatWorkspaceProps) {
-  const [sourcesByMessageId, setSourcesByMessageId] = useState<SourcesByMessageId>({});
-  const [activeMessageId, setActiveMessageId]       = useState<string | null>(null);
-  const [activeContextDocs, setActiveContextDocs]   = useState<ChatActiveContextDocument[]>([]);
-  const [selectionMode, setSelectionMode]           = useState(false);
-  const [selectedIds, setSelectedIds]               = useState<string[]>([]);
+  const activeSessionId = activeSession?.id ?? null;
+  const baseSourcesByMessageId = useMemo(
+    () => buildSourcesByMessageId(activeSession?.messages ?? []),
+    [activeSession?.messages],
+  );
+  const [sourceOverrides, setSourceOverrides] = useState<{ sessionId: string | null; data: SourcesByMessageId }>({
+    sessionId: null,
+    data: {},
+  });
+  const [activeMessageState, setActiveMessageState] = useState<{ sessionId: string | null; messageId: string | null }>({
+    sessionId: null,
+    messageId: null,
+  });
+  const [contextState, setContextState] = useState<{ sessionId: string | null; docs: ChatActiveContextDocument[] | null }>({
+    sessionId: null,
+    docs: null,
+  });
+  const [selectionMode, setSelectionMode] = useState(false);
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
 
-  // Hydrate sources from active session
-  useEffect(() => {
-    if (!activeSession) {
-      setSourcesByMessageId({});
-      setActiveMessageId(null);
-      setActiveContextDocs([]);
-      return;
+  const activeSources = useMemo(
+    () => (sourceOverrides.sessionId === activeSessionId ? sourceOverrides.data : {}),
+    [activeSessionId, sourceOverrides.data, sourceOverrides.sessionId],
+  );
+  const sourcesByMessageId = useMemo(
+    () => ({ ...baseSourcesByMessageId, ...activeSources }),
+    [activeSources, baseSourcesByMessageId],
+  );
+  const fallbackActiveMessageId = useMemo(
+    () => getLastAssistantMessageId(activeSession?.messages ?? []),
+    [activeSession?.messages],
+  );
+  const activeMessageId =
+    activeMessageState.sessionId === activeSessionId
+      ? activeMessageState.messageId
+      : fallbackActiveMessageId;
+  const panelSources = useMemo(
+    () => getPanelSources(sourcesByMessageId, activeMessageId),
+    [activeMessageId, sourcesByMessageId],
+  );
+  const activeContextDocs = useMemo(() => {
+    if (contextState.sessionId === activeSessionId && contextState.docs) {
+      return contextState.docs;
     }
+    if (!activeSession) {
+      return [];
+    }
+    return getSessionContextDocs(panelSources, activeSession);
+  }, [activeSession, activeSessionId, contextState.docs, contextState.sessionId, panelSources]);
+  const allIds = useMemo(() => sessions.map((session) => session.id), [sessions]);
+  const availableIds = useMemo(() => new Set(allIds), [allIds]);
+  const safeSelectedIds = useMemo(
+    () => selectedIds.filter((id) => availableIds.has(id)),
+    [availableIds, selectedIds],
+  );
+  const allSelected = sessions.length > 0 && safeSelectedIds.length === sessions.length;
+  const hasSelected = safeSelectedIds.length > 0;
 
-    const msgs    = activeSession.messages ?? [];
-    const sources = buildSourcesByMessageId(msgs);
-    const lastId  = getLastAssistantMessageId(msgs);
-    const panel   = getPanelSources(sources, lastId);
-
-    setSourcesByMessageId(sources);
-    setActiveMessageId(lastId);
-    setActiveContextDocs(getSessionContextDocs(panel, activeSession));
-  }, [activeSession]);
-
-  // Prune deleted sessions from selection
-  useEffect(() => {
-    const available = new Set(sessions.map((s) => s.id));
-    setSelectedIds((cur) => cur.filter((id) => available.has(id)));
-    if (sessions.length === 0) setSelectionMode(false);
-  }, [sessions]);
-
-  const panelSources  = useMemo(() => getPanelSources(sourcesByMessageId, activeMessageId), [sourcesByMessageId, activeMessageId]);
-  const allIds        = useMemo(() => sessions.map((s) => s.id), [sessions]);
-  const allSelected   = sessions.length > 0 && selectedIds.length === sessions.length;
-  const hasSelected   = selectedIds.length > 0;
-
-  // ── Selection handlers ───────────────────────────────────────
   const toggleSelectionMode = useCallback(() => {
-    setSelectionMode((on) => { if (on) setSelectedIds([]); return !on; });
+    setSelectionMode((enabled) => {
+      if (enabled) {
+        setSelectedIds([]);
+      }
+      return !enabled;
+    });
   }, []);
 
   const toggleSession = useCallback((id: string) => {
-    setSelectedIds((cur) =>
-      cur.includes(id) ? cur.filter((x) => x !== id) : [...cur, id],
+    setSelectedIds((current) =>
+      current.includes(id) ? current.filter((value) => value !== id) : [...current, id],
     );
   }, []);
 
   const toggleAll = useCallback(() => {
-    setSelectedIds((cur) => (cur.length === allIds.length ? [] : allIds));
+    setSelectedIds((current) => (current.length === allIds.length ? [] : allIds));
   }, [allIds]);
 
-  const handleDeleteSelected = useCallback(async () => {
+  const confirmDeleteSelected = useCallback(async () => {
     if (!onDeleteSessions || !hasSelected) return;
-    const msg =
-      selectedIds.length === 1
-        ? 'Delete this chat session?'
-        : `Delete ${selectedIds.length} chat sessions?`;
-    if (!window.confirm(msg)) return;
     try {
-      await onDeleteSessions(selectedIds);
+      await onDeleteSessions(safeSelectedIds);
       setSelectedIds([]);
       setSelectionMode(false);
+      setDeleteDialogOpen(false);
     } catch {
-      // keep selection for retry
+      setDeleteDialogOpen(false);
     }
-  }, [onDeleteSessions, hasSelected, selectedIds]);
+  }, [hasSelected, onDeleteSessions, safeSelectedIds]);
 
-  // ── Ask ──────────────────────────────────────────────────────
   const handleAsk = useCallback(
     async (question: string): Promise<void> => {
-      const response     = await onAsk(question, activeContextDocs.map((d) => d.document_id));
-      const sources      = getResponseSources(response);
+      const response = await onAsk(question, activeContextDocs.map((document) => document.document_id));
+      const sources = getResponseSources(response);
 
-      setSourcesByMessageId((cur) => ({ ...cur, [response.assistant_message_id]: sources }));
-      setActiveMessageId(response.assistant_message_id);
-      setActiveContextDocs((cur) => getResponseContextDocs(response, sources, cur));
+      setSourceOverrides((current) => ({
+        sessionId: response.session_id,
+        data:
+          current.sessionId === response.session_id
+            ? { ...current.data, [response.assistant_message_id]: sources }
+            : { [response.assistant_message_id]: sources },
+      }));
+      setActiveMessageState({
+        sessionId: response.session_id,
+        messageId: response.assistant_message_id,
+      });
+      setContextState((current) => ({
+        sessionId: response.session_id,
+        docs: getResponseContextDocs(
+          response,
+          sources,
+          current.sessionId === response.session_id ? current.docs ?? [] : [],
+        ),
+      }));
     },
-    [onAsk, activeContextDocs],
+    [activeContextDocs, onAsk],
   );
 
   const messages: ChatMessage[] = activeSession?.messages ?? [];
 
   return (
     <section className="chat-layout">
-      {/* ── Session sidebar ── */}
-      <aside className="card session-list">
+      <AppCard component="aside" className="card session-list">
         <header className="panel-header">
           <div className="session-list__heading">
             <h3>Chats</h3>
             {sessions.length > 0 && onDeleteSessions ? (
-              <button
+              <AppButton
                 type="button"
+                variant="outlined"
                 className="session-list__select-toggle"
                 onClick={toggleSelectionMode}
                 disabled={loading}
               >
                 {selectionMode ? 'Cancel' : 'Select'}
-              </button>
+              </AppButton>
             ) : null}
           </div>
 
           <div className="session-list__actions">
             {sessions.length > 0 ? <span>{sessions.length}</span> : null}
             {selectionMode && onDeleteSessions ? (
-              <button
+              <AppButton
                 type="button"
+                variant="outlined"
+                danger
                 className="session-list__delete"
-                onClick={() => void handleDeleteSelected()}
+                onClick={() => setDeleteDialogOpen(true)}
                 disabled={loading || !hasSelected}
               >
                 Delete
-              </button>
+              </AppButton>
             ) : null}
             {onNewChat ? (
-              <button
+              <AppButton
                 type="button"
                 className="session-list__new"
                 onClick={onNewChat}
                 disabled={loading}
               >
                 + New
-              </button>
+              </AppButton>
             ) : null}
           </div>
         </header>
@@ -237,17 +275,16 @@ export function ChatWorkspace({
         {selectionMode && sessions.length > 0 ? (
           <div className="session-list__bulk-actions">
             <label className="session-list__select-all">
-              <input
-                type="checkbox"
+              <AppCheckbox
                 checked={allSelected}
                 onChange={toggleAll}
                 disabled={loading}
               />
               <span>Select all</span>
             </label>
-            <small>
-              {hasSelected ? `${selectedIds.length} selected` : 'Choose chats to delete'}
-            </small>
+            <Typography component="small">
+              {hasSelected ? `${safeSelectedIds.length} selected` : 'Choose chats to delete'}
+            </Typography>
           </div>
         ) : null}
 
@@ -255,45 +292,66 @@ export function ChatWorkspace({
           {sessions.length === 0 ? (
             <EmptySessions />
           ) : (
-            sessions.map((s) => (
-              <div key={s.id} className="session-row">
+            sessions.map((session) => (
+              <div key={session.id} className="session-row">
                 {selectionMode ? (
-                  <label className="session-row__checkbox" aria-label={`Select ${s.title}`}>
-                    <input
-                      type="checkbox"
-                      checked={selectedIds.includes(s.id)}
-                      onChange={() => toggleSession(s.id)}
+                  <label className="session-row__checkbox" aria-label={`Select ${session.title}`}>
+                    <AppCheckbox
+                      checked={safeSelectedIds.includes(session.id)}
+                      onChange={() => toggleSession(session.id)}
                       disabled={loading}
                     />
                   </label>
                 ) : null}
-                <button
+                <ButtonBase
                   type="button"
-                  className={`session-button${s.id === activeSession?.id ? ' session-button--active' : ''}`}
-                  onClick={() => void onSelectSession(s.id)}
+                  className={`session-button${session.id === activeSession?.id ? ' session-button--active' : ''}`}
+                  onClick={() => void onSelectSession(session.id)}
                 >
-                  <strong>{truncate(s.title)}</strong>
-                  <small>{new Date(s.updated_at).toLocaleString()}</small>
-                </button>
+                  <strong>{truncate(session.title)}</strong>
+                  <small>{new Date(session.updated_at).toLocaleString()}</small>
+                </ButtonBase>
               </div>
             ))
           )}
         </div>
-      </aside>
+      </AppCard>
 
-      {/* ── Chat main ── */}
       <div className="chat-main">
         <ChatWindow
           messages={messages}
           loading={loading}
           activeAssistantMessageId={activeMessageId}
-          onSelectAssistantMessage={setActiveMessageId}
+          onSelectAssistantMessage={(messageId) =>
+            setActiveMessageState({ sessionId: activeSessionId, messageId })
+          }
         />
         <ChatInput onSubmit={handleAsk} disabled={loading} />
       </div>
 
-      {/* ── Sources ── */}
       <SourcePanel sources={panelSources} activeContextDocuments={activeContextDocs} />
+
+      <ConfirmDialog
+        open={deleteDialogOpen}
+        title={
+          safeSelectedIds.length === 1 ? 'Delete this chat?' : `Delete ${safeSelectedIds.length} chats?`
+        }
+        description={
+          <Stack gap={1}>
+            <Typography component="p">
+              {safeSelectedIds.length === 1
+                ? 'This permanently removes the conversation and its messages.'
+                : 'This permanently removes the selected conversations and their messages.'}
+            </Typography>
+            <Typography component="p" className="dialog__note">This cannot be undone.</Typography>
+          </Stack>
+        }
+        confirmLabel="Delete"
+        cancelLabel="Cancel"
+        variant="danger"
+        onCancel={() => setDeleteDialogOpen(false)}
+        onConfirm={() => void confirmDeleteSelected()}
+      />
     </section>
   );
 }

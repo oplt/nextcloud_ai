@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import time
 import uuid
 from dataclasses import dataclass
 
 from backend.db.session import AsyncSessionLocal
 from backend.core.config import settings
+from backend.core.observability import record_job_transition
+from backend.services.email_sync_service import EmailConnectorSyncService
 from backend.services.indexing_service import DocumentIngestionService
 from backend.services.job_lifecycle import JobLifecycleService
 from backend.services.nextcloud_automation_service import NextcloudAutomationService
@@ -31,19 +34,37 @@ async def _run_logged_background_task(coro, *, label: str) -> None:
         logger.exception("Background task %s failed", label)
 
 
-@celery_app.task(
-    bind=True,
-    autoretry_for=(Exception,),
-    retry_backoff=True,
-    retry_jitter=True,
-    max_retries=3,
-)
+@celery_app.task(bind=True, max_retries=3)
 def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
-    return asyncio.run(_run_connector_sync_job(job_id=job_id, task_id=self.request.id))
+    retry_attempt = int(getattr(self.request, "retries", 0))
+    try:
+        return asyncio.run(
+            _run_connector_sync_job(
+                job_id=job_id,
+                task_id=self.request.id,
+                retry_count=retry_attempt,
+            )
+        )
+    except Exception as exc:
+        will_retry = retry_attempt < int(self.max_retries)
+        asyncio.run(
+            _update_failed_job_state(
+                job_id=job_id,
+                task_id=self.request.id,
+                error_message=str(exc),
+                retry_count=retry_attempt + 1 if will_retry else retry_attempt,
+                dead_lettered=not will_retry,
+            )
+        )
+        if not will_retry:
+            raise
+
+        countdown = min(300, (2**retry_attempt) * 15) + random.randint(0, 5)
+        raise self.retry(exc=exc, countdown=countdown)
 
 
 async def _run_connector_sync_job(
-    *, job_id: str, task_id: str | None
+    *, job_id: str, task_id: str | None, retry_count: int = 0
 ) -> dict[str, int]:
     async with AsyncSessionLocal() as session:
         from backend.db.repo.sync_job import SyncJobRepository
@@ -52,19 +73,74 @@ async def _run_connector_sync_job(
         job = await job_repo.get(job_id)
         if job is None:
             raise ValueError(f"Sync job {job_id} not found")
-        JobLifecycleService.mark_running(job, task_id=task_id)
+        JobLifecycleService.mark_running(job, task_id=task_id, retry_count=retry_count)
         await session.commit()
 
         service = NextcloudConnectorSyncService(session)
         connector = await service.connector_repo.get(job.connector_id)
         if connector is None:
             raise ValueError(f"Connector {job.connector_id} not found")
-        result = await service.sync_connector(
-            connector,
-            full_reindex=bool((job.payload_json or {}).get("full_reindex", False)),
-            job=job,
-        )
+        if connector.connector_type == "imap":
+            result = await EmailConnectorSyncService(session).sync_connector(
+                connector,
+                full_reindex=bool((job.payload_json or {}).get("full_reindex", False)),
+                job=job,
+            )
+        else:
+            result = await service.sync_connector(
+                connector,
+                full_reindex=bool((job.payload_json or {}).get("full_reindex", False)),
+                job=job,
+            )
+        record_job_transition(job_type=job.job_type, status="succeeded")
         return result
+
+
+async def _update_failed_job_state(
+    *,
+    job_id: str,
+    task_id: str | None,
+    error_message: str,
+    retry_count: int,
+    dead_lettered: bool,
+) -> None:
+    async with AsyncSessionLocal() as session:
+        from backend.db.repo.sync_job import SyncJobRepository
+
+        job = await SyncJobRepository(session).get(job_id)
+        if job is None:
+            logger.error("Failed to update retry state; sync job %s not found", job_id)
+            return
+
+        if dead_lettered:
+            JobLifecycleService.mark_failed(
+                job,
+                error_message,
+                result={
+                    **dict(job.result_json or {}),
+                    "dead_lettered": True,
+                    "last_error": error_message,
+                },
+                dead_lettered=True,
+            )
+            record_job_transition(job_type=job.job_type, status="dead_lettered")
+            logger.error(
+                "Connector sync job dead-lettered",
+                extra={"job_id": job_id, "task_id": task_id, "retry_count": retry_count},
+            )
+        else:
+            JobLifecycleService.mark_retrying(
+                job,
+                error_message,
+                retry_count=retry_count,
+                task_id=task_id,
+            )
+            record_job_transition(job_type=job.job_type, status="retrying")
+            logger.warning(
+                "Connector sync job scheduled for retry",
+                extra={"job_id": job_id, "task_id": task_id, "retry_count": retry_count},
+            )
+        await session.commit()
 
 
 @celery_app.task(
@@ -174,3 +250,49 @@ def enqueue_document_reindex(document_id: str):
             label=f"document_reindex:{document_id}",
         )
     return run_document_reindex_task.delay(document_id)
+
+
+@celery_app.task(
+    bind=True,
+    autoretry_for=(Exception,),
+    retry_backoff=True,
+    retry_jitter=True,
+    max_retries=3,
+)
+def run_document_intelligence_extraction_task(self, document_id: str) -> str:
+    return asyncio.run(
+        _run_document_intelligence_extraction_task(document_id=document_id)
+    )
+
+
+async def _run_document_intelligence_extraction_task(*, document_id: str) -> str:
+    if not settings.PRODUCT_INTELLIGENCE_ENABLED:
+        return document_id
+    async with AsyncSessionLocal() as session:
+        service = DocumentIngestionService(session)
+        try:
+            await service.recompute_product_intelligence(document_id)
+            await session.commit()
+        except Exception:
+            logger.exception(
+                "Intelligence extraction task failed document_id=%s", document_id
+            )
+            await session.rollback()
+            raise
+    return document_id
+
+
+def enqueue_document_intelligence(document_id: str) -> EnqueuedTaskHandle:
+    if should_execute_tasks_locally():
+        if not celery_app.conf.task_always_eager:
+            logger.warning(
+                "No Celery worker detected in development; running intelligence extraction locally"
+            )
+        return _enqueue_eager_task(
+            _run_document_intelligence_extraction_task(document_id=document_id),
+            label=f"document_intelligence:{document_id}",
+        )
+    async_result = run_document_intelligence_extraction_task.apply_async(
+        args=[document_id], countdown=1
+    )
+    return EnqueuedTaskHandle(id=str(async_result.id))

@@ -45,6 +45,12 @@ def test_chat_response_schema_round_trip() -> None:
         active_context_document_ids=[],
         active_context_documents=[],
         conversation_query="employees leave handbook",
+        generation_trace_id="trace-test",
+        llm_provider="stub",
+        llm_model_id="stub",
+        grounded_prompt_version="1",
+        retrieval_settings={"top_k": 6},
+        verification={"result": "passed"},
     )
 
     payload = response.model_dump(mode="json")

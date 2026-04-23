@@ -1,6 +1,9 @@
 import { useCallback, useState } from 'react';
 import type { FormEvent, KeyboardEvent } from 'react';
 import SendIcon from '@mui/icons-material/Send';
+import IconButton from '@mui/material/IconButton';
+
+import { AppTextField } from './ui/AppTextField';
 
 type ChatInputProps = {
   onSubmit: (question: string) => Promise<void>;
@@ -28,7 +31,7 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
   );
 
   const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    (e: KeyboardEvent<HTMLDivElement>) => {
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
         e.preventDefault();
         void handleSubmit();
@@ -41,24 +44,34 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
 
   return (
     <form className="chat-input" onSubmit={handleSubmit} aria-label="Chat message form">
-      <textarea
+      <AppTextField
+        multiline
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
         onKeyDown={handleKeyDown}
         placeholder="Ask a question about your company knowledge… (⌘↵ to send)"
-        rows={3}
+        rows={2}
         disabled={disabled}
         aria-label="Message input"
+        InputProps={{
+          sx: {
+            alignItems: 'stretch',
+            textarea: {
+              minHeight: '2rem !important',
+            },
+          },
+        }}
       />
-      <button
+      <IconButton
         type="submit"
         className="chat-input-send"
         disabled={!canSend}
         aria-label="Send message"
         title="Send (⌘↵)"
+        color="primary"
       >
         <SendIcon />
-      </button>
+      </IconButton>
     </form>
   );
 }

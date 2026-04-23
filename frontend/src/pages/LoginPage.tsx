@@ -1,12 +1,18 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
+
+import { AppButton } from '../components/ui/AppButton';
+import { AppTextField } from '../components/ui/AppTextField';
 
 type LoginPageProps = {
   onLogin: (email: string, password: string) => Promise<void>;
   error: string | null;
+  onDismissError?: () => void;
 };
 
-export function LoginPage({ onLogin, error }: LoginPageProps) {
+export function LoginPage({ onLogin, error, onDismissError }: LoginPageProps) {
   const [email, setEmail]         = useState('');
   const [password, setPassword]   = useState('');
   const [submitting, setSubmitting] = useState(false);
@@ -31,10 +37,10 @@ export function LoginPage({ onLogin, error }: LoginPageProps) {
 
         <span className="eyebrow">Private RAG Workspace</span>
         <h1>Nextcloud AI Server</h1>
-        <p>
+        <Typography component="p">
           Sign in with a local admin account or arrive here via the Nextcloud
           bridge flow.
-        </p>
+        </Typography>
 
         <div className="login-help" role="note">
           First login: run{' '}
@@ -47,33 +53,37 @@ export function LoginPage({ onLogin, error }: LoginPageProps) {
         </div>
 
         <form onSubmit={handleSubmit} className="login-form" noValidate>
-          <label htmlFor="login-email">
-            <span>Email address</span>
-            <input
+          <Stack gap={1.5}>
+            <AppTextField
               id="login-email"
               type="email"
+              label="Email address"
               value={email}
-              onChange={(e) => setEmail(e.target.value)}
+              onChange={(e) => {
+                setEmail(e.target.value);
+                onDismissError?.();
+              }}
               placeholder="admin@example.com"
               autoComplete="username"
               inputMode="email"
               autoFocus
               disabled={submitting}
             />
-          </label>
 
-          <label htmlFor="login-password">
-            <span>Password</span>
-            <input
+            <AppTextField
               id="login-password"
               type="password"
+              label="Password"
               value={password}
-              onChange={(e) => setPassword(e.target.value)}
+              onChange={(e) => {
+                setPassword(e.target.value);
+                onDismissError?.();
+              }}
               placeholder="Your password"
               autoComplete="current-password"
               disabled={submitting}
             />
-          </label>
+          </Stack>
 
           {error ? (
             <p className="error-banner" role="alert">
@@ -81,9 +91,9 @@ export function LoginPage({ onLogin, error }: LoginPageProps) {
             </p>
           ) : null}
 
-          <button type="submit" disabled={isDisabled}>
+          <AppButton type="submit" disabled={isDisabled}>
             {submitting ? 'Signing in…' : 'Sign in'}
-          </button>
+          </AppButton>
         </form>
       </section>
     </main>

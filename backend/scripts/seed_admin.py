@@ -7,11 +7,13 @@ from backend.core.security import get_password_hash
 from backend.db.models import User
 from backend.db.repo.user import UserRepository
 from backend.db.session import AsyncSessionLocal
+from backend.services.role_bootstrap_service import RoleBootstrapService
 
 
 async def main() -> None:
     async with AsyncSessionLocal() as session:
         repo = UserRepository(session)
+        roles = await RoleBootstrapService(session).ensure_system_roles()
         existing = await repo.get_by_email(settings.FIRST_SUPERUSER_EMAIL)
         if existing:
             print("Admin already exists")
@@ -25,6 +27,7 @@ async def main() -> None:
             full_name="System Admin",
             is_active=True,
             is_superuser=True,
+            role_id=roles["admin"].id,
         )
         await repo.add(user)
         await session.commit()

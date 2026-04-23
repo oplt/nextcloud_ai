@@ -13,6 +13,7 @@ from backend.core.security import AuthContext, app_token_service
 from backend.db.models import User
 from backend.db.repo.user import UserRepository
 from backend.db.session import get_db_session
+from backend.services.authorization_service import ensure_permission
 
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]
@@ -38,6 +39,8 @@ async def get_current_identity(
     user = await UserRepository(session).get(auth.user_id)
     if user is None or not user.is_active:
         raise AuthenticationError("User is inactive or missing")
+    auth.is_superuser = user.is_superuser
+    auth.role_name = user.role.name if user.role else auth.role_name
     return AuthenticatedUser(user=user, auth=auth)
 
 
@@ -58,3 +61,11 @@ async def get_current_superuser(identity: CurrentIdentityDep) -> AuthenticatedUs
 
 
 SuperUserDep = Annotated[AuthenticatedUser, Depends(get_current_superuser)]
+
+
+def permission_required(permission: str):
+    async def dependency(identity: CurrentIdentityDep) -> AuthenticatedUser:
+        ensure_permission(permission, auth=identity.auth, user=identity.user)
+        return identity
+
+    return dependency

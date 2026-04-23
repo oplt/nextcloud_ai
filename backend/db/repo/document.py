@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import Select, and_, delete, func, or_, select, update
@@ -71,18 +72,47 @@ class DocumentRepository(BaseRepository[Document]):
             auth: AuthContext | None = None,
             query: str | None = None,
             connector_id: UUID | None = None,
+            connector_ids: Sequence[UUID | str] | None = None,
             mime_type: str | None = None,
+            mime_types: Sequence[str] | None = None,
+            path_prefixes: Sequence[str] | None = None,
+            modified_after: datetime | None = None,
+            modified_before: datetime | None = None,
             parse_status: str | None = None,
             include_deleted: bool = False,
+            include_intelligence: bool = False,
             offset: int = 0,
             limit: int = 50,
     ) -> list[Document]:
         stmt: Select[tuple[Document]] = select(Document)
+        if include_intelligence:
+            stmt = stmt.options(
+                selectinload(Document.insights),
+                selectinload(Document.workflow_tasks),
+            )
         filters = []
         if connector_id:
             filters.append(Document.connector_id == connector_id)
+        if connector_ids:
+            filters.append(Document.connector_id.in_(list(connector_ids)))
         if mime_type:
             filters.append(Document.mime_type == mime_type)
+        if mime_types:
+            filters.append(Document.mime_type.in_(list(mime_types)))
+        if path_prefixes:
+            filters.append(
+                or_(
+                    *[
+                        Document.file_path.ilike(f"{path_prefix.rstrip('%')}%")
+                        for path_prefix in path_prefixes
+                        if path_prefix
+                    ]
+                )
+            )
+        if modified_after is not None:
+            filters.append(Document.modified_at >= modified_after)
+        if modified_before is not None:
+            filters.append(Document.modified_at <= modified_before)
         if parse_status:
             filters.append(Document.parse_status == parse_status)
         if not include_deleted:
@@ -129,11 +159,11 @@ class DocumentRepository(BaseRepository[Document]):
         if auth.is_superuser:
             return Document.is_deleted.is_(False)
         visibility = [Document.public_link_enabled.is_(True)]
+        user_identifiers = [auth.user_id]
         if auth.external_subject:
+            user_identifiers.append(auth.external_subject)
             visibility.append(Document.owner_external_id == auth.external_subject)
-            visibility.append(
-                Document.allowed_user_ids.overlap([auth.external_subject])
-            )
+        visibility.append(Document.allowed_user_ids.overlap(user_identifiers))
         if auth.groups:
             visibility.append(Document.allowed_group_ids.overlap(auth.groups))
         return and_(Document.is_deleted.is_(False), or_(*visibility))
@@ -180,6 +210,11 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             auth: AuthContext,
             limit: int = 8,
             document_ids: Sequence[UUID] | None = None,
+            connector_ids: Sequence[UUID | str] | None = None,
+            mime_types: Sequence[str] | None = None,
+            path_prefixes: Sequence[str] | None = None,
+            modified_after: datetime | None = None,
+            modified_before: datetime | None = None,
     ) -> list[tuple[DocumentChunk, float]]:
         distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
         stmt = (
@@ -195,6 +230,14 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         )
         if document_ids:
             stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
+        stmt = self._apply_chunk_document_filters(
+            stmt,
+            connector_ids=connector_ids,
+            mime_types=mime_types,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+        )
         result = await self.session.execute(stmt)
         return [(row[0], float(row[1])) for row in result.all()]
 
@@ -205,6 +248,11 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             auth: AuthContext,
             limit: int = 16,
             document_ids: Sequence[UUID] | None = None,
+            connector_ids: Sequence[UUID | str] | None = None,
+            mime_types: Sequence[str] | None = None,
+            path_prefixes: Sequence[str] | None = None,
+            modified_after: datetime | None = None,
+            modified_before: datetime | None = None,
     ) -> list[DocumentChunk]:
         normalized_terms = [term.strip() for term in terms if term.strip()]
         if not normalized_terms:
@@ -232,5 +280,43 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         )
         if document_ids:
             stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
+        stmt = self._apply_chunk_document_filters(
+            stmt,
+            connector_ids=connector_ids,
+            mime_types=mime_types,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+        )
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+
+    @staticmethod
+    def _apply_chunk_document_filters(
+        stmt: Select,
+        *,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+    ) -> Select:
+        if connector_ids:
+            stmt = stmt.where(Document.connector_id.in_(list(connector_ids)))
+        if mime_types:
+            stmt = stmt.where(Document.mime_type.in_(list(mime_types)))
+        if path_prefixes:
+            stmt = stmt.where(
+                or_(
+                    *[
+                        Document.file_path.ilike(f"{path_prefix.rstrip('%')}%")
+                        for path_prefix in path_prefixes
+                        if path_prefix
+                    ]
+                )
+            )
+        if modified_after is not None:
+            stmt = stmt.where(Document.modified_at >= modified_after)
+        if modified_before is not None:
+            stmt = stmt.where(Document.modified_at <= modified_before)
+        return stmt

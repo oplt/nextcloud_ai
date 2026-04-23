@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 import httpx
 import pytest
 
+from backend.core.config import settings
 from backend.core.security import AuthContext
 from backend.db.models import ChatMessage, ChatSession, User
 from backend.schemas.chat_schema import ChatAskRequest, ChatSource
@@ -100,6 +101,7 @@ class StaticRetrievalService:
             sources=self.sources,
             query_embedding=[0.1, 0.2],
             grounded_document_ids=self.grounded_document_ids,
+            retrieval_debug={},
         )
 
 
@@ -327,7 +329,8 @@ async def test_chat_service_keeps_only_cited_sources_and_reindexes_citations() -
     service, session, session_repo, message_repo = _build_service(
         retrieval_service=StaticRetrievalService(sources),
         llm_client=CitationLLMClient(
-            "Employees can carry over five unused vacation days [2]."
+            # Sources are reranked before prompting; policy is first for this question.
+            "Employees can carry over five unused vacation days [1]."
         ),
     )
 
@@ -352,6 +355,12 @@ async def test_chat_service_keeps_only_cited_sources_and_reindexes_citations() -
     assert message_repo.items[1].citations_json is not None
     assert len(message_repo.items[1].citations_json) == 1
     assert message_repo.items[1].citations_json[0]["file_name"] == "policy.md"
+    assert message_repo.items[1].generation_metadata_json is not None
+    assert message_repo.items[1].generation_metadata_json.get("trace_id")
+    assert message_repo.items[1].generation_metadata_json.get("llm_provider") == settings.effective_llm_provider
+    assert response.generation_trace_id
+    assert response.llm_provider == settings.effective_llm_provider
+    assert response.grounded_prompt_version == "1"
     assert session.commits == 2
 
 
@@ -521,12 +530,16 @@ async def test_chat_service_anchors_follow_up_to_active_context_documents(
         existing_session=existing_session,
     )
 
-    async def fake_build_retrieval_query(**kwargs):
-        return "vacation policy carry over limit", True
+    async def fake_plan_retrieval_query(**kwargs):
+        return SimpleNamespace(
+            retrieval_query="vacation policy carry over limit",
+            is_follow_up=True,
+            follow_up=SimpleNamespace(confidence=0.9, reasons=["test"], is_follow_up=True),
+        )
 
     monkeypatch.setattr(
-        "backend.services.chat_service.build_retrieval_query",
-        fake_build_retrieval_query,
+        "backend.services.chat_service.plan_retrieval_query",
+        fake_plan_retrieval_query,
     )
 
     response = await service.ask(

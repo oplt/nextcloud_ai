@@ -4,7 +4,30 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from pydantic import field_validator
+
 from backend.schemas.common_schema import TimestampedSchema
+from backend.schemas.intelligence_schema import (
+    DocumentInsightRead,
+    KnowledgeEdgeRead,
+    KnowledgeNodeRead,
+    WorkflowTaskRead,
+)
+
+
+_INTERNAL_METADATA_KEYS = {
+    "stored_payload_b64",
+}
+
+
+def _sanitize_metadata(metadata_json: dict[str, Any] | None) -> dict[str, Any] | None:
+    if metadata_json is None:
+        return None
+    return {
+        key: value
+        for key, value in metadata_json.items()
+        if key not in _INTERNAL_METADATA_KEYS
+    }
 
 
 class DocumentChunkRead(TimestampedSchema):
@@ -46,6 +69,17 @@ class DocumentRead(TimestampedSchema):
     acl_json: dict[str, Any] | None = None
     metadata_json: dict[str, Any] | None = None
 
+    @field_validator("metadata_json", mode="before")
+    @classmethod
+    def sanitize_metadata_json(
+        cls, value: dict[str, Any] | None
+    ) -> dict[str, Any] | None:
+        return _sanitize_metadata(value)
+
 
 class DocumentDetail(DocumentRead):
     chunks: list[DocumentChunkRead] = []
+    insights: list[DocumentInsightRead] = []
+    workflow_tasks: list[WorkflowTaskRead] = []
+    knowledge_nodes: list[KnowledgeNodeRead] = []
+    knowledge_edges: list[KnowledgeEdgeRead] = []

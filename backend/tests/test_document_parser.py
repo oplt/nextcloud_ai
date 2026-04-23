@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+from email.message import EmailMessage
 from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
@@ -33,6 +34,36 @@ async def test_parse_document_bytes_supports_odt_by_mime_type() -> None:
 
     assert parsed.text.startswith("Quarterly Report\nHello team.")
     assert parsed.metadata["parser"] == "odt-xml"
+
+
+@pytest.mark.asyncio
+async def test_parse_document_bytes_supports_eml_with_attachments() -> None:
+    message = EmailMessage()
+    message["Subject"] = "Weekly Team Sync"
+    message["From"] = "Alice Example <alice@example.com>"
+    message["To"] = "Bob Example <bob@example.com>"
+    message["Message-ID"] = "<msg-1@example.com>"
+    message["References"] = "<thread-root@example.com>"
+    message.set_content("Decision: Ship the pilot this week.\nAction item: Alice to send rollout plan by 2026-05-01.")
+    message.add_attachment(
+        b"Contract renewal date is 2026-06-30.",
+        maintype="text",
+        subtype="plain",
+        filename="renewal.txt",
+    )
+
+    parsed = await parse_document_bytes(
+        "weekly-sync.eml",
+        "message/rfc822",
+        message.as_bytes(),
+    )
+
+    assert "Weekly Team Sync" in parsed.text
+    assert "Ship the pilot this week" in parsed.text
+    assert parsed.metadata["thread_key"] == "<thread-root@example.com>"
+    assert parsed.metadata["attachment_count"] == 1
+    assert parsed.attachments[0].file_name == "renewal.txt"
+    assert parsed.attachments[0].payload == b"Contract renewal date is 2026-06-30."
 
 
 def _build_odt_payload() -> bytes:

@@ -1,3 +1,8 @@
+import { useState } from 'react';
+import IconButton from '@mui/material/IconButton';
+
+import { AppButton } from './ui/AppButton';
+import { AppCard } from './ui/AppCard';
 import type { DocumentSummary } from '../types/api';
 import { formatDateTime, getDocumentTypeLabel } from '../utils/documentDisplay';
 
@@ -14,6 +19,8 @@ type DocumentTableProps = {
   totalPages: number;
   rowsPerPage: number;
   loading?: boolean;
+  /** When true, header chevron collapses table body + footer (e.g. Documents page). */
+  sectionCollapsible?: boolean;
   onPageChange: (page: number) => void;
   onSort: (column: DocumentSortColumn) => void;
   onSelect: (document: DocumentSummary) => void;
@@ -54,10 +61,13 @@ export function DocumentTable({
   totalPages,
   rowsPerPage,
   loading = false,
+  sectionCollapsible = false,
   onPageChange,
   onSort,
   onSelect,
 }: DocumentTableProps) {
+  const [sectionOpen, setSectionOpen] = useState(true);
+
   const ariaSort = (col: DocumentSortColumn) => {
     if (sortColumn !== col) return 'none' as const;
     return sortDirection === 'asc' ? ('ascending' as const) : ('descending' as const);
@@ -66,21 +76,51 @@ export function DocumentTable({
   const firstRow = totalDocuments === 0 ? 0 : (currentPage - 1) * rowsPerPage + 1;
   const lastRow  = totalDocuments === 0 ? 0 : firstRow + documents.length - 1;
 
+  const collapsed = sectionCollapsible && !sectionOpen;
+
   return (
-    <div className="card table-card document-table-card">
+    <AppCard
+      className={`card table-card document-table-card${collapsed ? ' document-table-card--section-collapsed' : ''}`}
+    >
       <header className="panel-header">
-        <h3>Documents</h3>
+        <div className="panel-header__lead">
+          {sectionCollapsible ? (
+            <IconButton
+              type="button"
+              className="panel-collapse-toggle"
+              aria-expanded={sectionOpen}
+              aria-controls="document-table-body"
+              onClick={() => setSectionOpen((open) => !open)}
+              title={sectionOpen ? 'Collapse document list' : 'Expand document list'}
+            >
+              <svg
+                className={`panel-collapse-toggle__icon${sectionOpen ? ' panel-collapse-toggle__icon--open' : ''}`}
+                viewBox="0 0 20 20"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <path d="M5 8l5 5 5-5" />
+              </svg>
+            </IconButton>
+          ) : null}
+          <h3>Documents</h3>
+        </div>
         <span>{totalDocuments}</span>
       </header>
 
-      <div className="table-wrap">
+      <div id="document-table-body" className="table-wrap" hidden={collapsed}>
         <table className="document-table">
           <thead>
             <tr>
               {columns.map((col) => (
                 <th key={col.key} aria-sort={ariaSort(col.key)}>
-                  <button
+                  <AppButton
                     type="button"
+                    variant="text"
                     className={`sort-button${sortColumn === col.key ? ' sort-button--active' : ''}`}
                     onClick={() => onSort(col.key)}
                     aria-label={`Sort by ${col.label}${sortColumn === col.key ? `, currently ${sortDirection}ending` : ''}`}
@@ -89,7 +129,7 @@ export function DocumentTable({
                     <span className="sort-button__icon" aria-hidden="true">
                       {sortColumn === col.key ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}
                     </span>
-                  </button>
+                  </AppButton>
                 </th>
               ))}
             </tr>
@@ -119,8 +159,9 @@ export function DocumentTable({
                     <small title={doc.file_path}>{doc.file_path}</small>
                   </td>
                   <td>
-                    <strong>{getDocumentTypeLabel(doc)}</strong>
-                    <small>{doc.mime_type ?? '—'}</small>
+                    <strong title={doc.mime_type ?? 'Unknown document type'}>
+                      {getDocumentTypeLabel(doc)}
+                    </strong>
                   </td>
                   <td>
                     <span className={`pill pill--${doc.parse_status}`}>{doc.parse_status}</span>
@@ -133,32 +174,34 @@ export function DocumentTable({
         </table>
       </div>
 
-      <footer className="document-table__footer">
+      <footer className="document-table__footer" hidden={collapsed}>
         <p>
           {totalDocuments === 0
             ? 'No documents'
             : `Showing ${firstRow}–${lastRow} of ${totalDocuments}`}
         </p>
         <div className="pagination-controls">
-          <button
+          <AppButton
             type="button"
+            variant="outlined"
             onClick={() => onPageChange(currentPage - 1)}
             disabled={currentPage <= 1}
             aria-label="Previous page"
           >
             ← Prev
-          </button>
+          </AppButton>
           <span aria-live="polite">{currentPage} / {totalPages}</span>
-          <button
+          <AppButton
             type="button"
+            variant="outlined"
             onClick={() => onPageChange(currentPage + 1)}
             disabled={currentPage >= totalPages}
             aria-label="Next page"
           >
             Next →
-          </button>
+          </AppButton>
         </div>
       </footer>
-    </div>
+    </AppCard>
   );
 }

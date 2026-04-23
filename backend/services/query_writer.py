@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from typing import TYPE_CHECKING
+
+from backend.ai.follow_up_classifier import FollowUpClassification, classify_follow_up
 
 if TYPE_CHECKING:
     from backend.ai.llm_client import LLMClientProtocol
@@ -21,20 +24,19 @@ _FOLLOW_UP_RE = re.compile(
     re.IGNORECASE,
 )
 
-_SHORT_WORD_LIMIT = 10  # questions under this word-count with a follow-up opener => rewrite
+_SHORT_WORD_LIMIT = 10
 
 
 def is_likely_follow_up(question: str, *, has_history: bool) -> bool:
-    """Return True when the question looks like it relies on prior conversational context."""
-    if not has_history:
-        return False
-    words = question.split()
-    if len(words) <= _SHORT_WORD_LIMIT and _FOLLOW_UP_RE.search(question):
-        return True
-    # Very short bare questions (e.g. "why?", "and then?") are almost always follow-ups.
-    if len(words) <= 4:
-        return True
-    return False
+    """Backward-compatible coarse follow-up flag."""
+    return classify_follow_up(question, has_history=has_history).is_follow_up
+
+
+@dataclass(slots=True)
+class RetrievalQueryPlan:
+    retrieval_query: str
+    is_follow_up: bool
+    follow_up: FollowUpClassification
 
 
 async def build_retrieval_query(
@@ -43,25 +45,34 @@ async def build_retrieval_query(
     history: list[dict[str, str]],
     llm_client: "LLMClientProtocol",
 ) -> tuple[str, bool]:
-    """Return ``(retrieval_query, is_follow_up)``.
+    """Return ``(retrieval_query, is_follow_up)`` for pinning and logging."""
+    plan = await plan_retrieval_query(question=question, history=history, llm_client=llm_client)
+    return plan.retrieval_query, plan.is_follow_up
 
-    When the current question is a follow-up, the LLM rewrites it into a
-    fully self-contained retrieval query that incorporates relevant context
-    from *history*.  The caller can use ``is_follow_up`` to decide whether
-    to apply document-pinning in the retrieval stage.
 
-    On any LLM failure the original *question* is returned unchanged so the
-    system degrades gracefully rather than raising.
-    """
-    follow_up = is_likely_follow_up(question, has_history=bool(history))
-    if not follow_up:
-        return question, False
+async def plan_retrieval_query(
+    *,
+    question: str,
+    history: list[dict[str, str]],
+    llm_client: "LLMClientProtocol",
+) -> RetrievalQueryPlan:
+    structured = classify_follow_up(question, has_history=bool(history))
+    legacy_signal = (
+        len(question.split()) <= _SHORT_WORD_LIMIT and _FOLLOW_UP_RE.search(question)
+    )
+    eligible = structured.is_follow_up or (
+        bool(history) and legacy_signal and structured.confidence >= 0.35
+    )
+    if not eligible:
+        return RetrievalQueryPlan(
+            retrieval_query=question,
+            is_follow_up=False,
+            follow_up=structured,
+        )
 
-    # Use the last 4 user/assistant pairs at most to stay within context budget.
     recent_messages = history[-8:]
     history_text = "\n".join(
-        f"{msg['role'].upper()}: {msg['content'][:400]}"
-        for msg in recent_messages
+        f"{msg['role'].upper()}: {msg['content'][:400]}" for msg in recent_messages
     )
 
     rewrite_prompt = (
@@ -81,12 +92,22 @@ async def build_retrieval_query(
 
     try:
         rewritten = (await llm_client.generate(rewrite_prompt)).strip()
-        # Sanity-check: reject empty or pathologically long rewrites.
         if not rewritten or len(rewritten) > 500:
-            return question, True
-        # Strip surrounding quotes that some models add.
+            return RetrievalQueryPlan(
+                retrieval_query=question,
+                is_follow_up=structured.confidence >= 0.55,
+                follow_up=structured,
+            )
         rewritten = rewritten.strip('"').strip("'").strip()
-        return rewritten, True
+        is_follow_up = structured.confidence >= 0.55
+        return RetrievalQueryPlan(
+            retrieval_query=rewritten,
+            is_follow_up=is_follow_up,
+            follow_up=structured,
+        )
     except Exception:
-        # Never let a rewrite failure break the chat.
-        return question, True
+        return RetrievalQueryPlan(
+            retrieval_query=question,
+            is_follow_up=structured.confidence >= 0.55,
+            follow_up=structured,
+        )

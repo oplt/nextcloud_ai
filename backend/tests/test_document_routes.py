@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from types import SimpleNamespace
 from uuid import uuid4
 
@@ -91,3 +92,51 @@ async def test_get_document_original_downloads_file_from_nextcloud(
     assert response.headers["content-length"] == "8"
     assert response.headers["content-disposition"].startswith("inline;")
     assert clients and clients[0].closed is True
+
+
+@pytest.mark.asyncio
+async def test_get_document_original_returns_inline_email_payload_without_connector_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payload = b"Subject: Pilot\n\nBody"
+    document = Document(
+        id=uuid4(),
+        connector_id=uuid4(),
+        external_id="email-1",
+        file_path="/INBOX/thread/pilot.eml",
+        file_name="pilot.eml",
+        mime_type="message/rfc822",
+        parse_status="indexed",
+        sync_status="synced",
+        allowed_user_ids=[],
+        allowed_group_ids=[],
+        metadata_json={"stored_payload_b64": base64.b64encode(payload).decode("ascii")},
+    )
+    auth = SimpleNamespace()
+
+    async def fake_get_visible_to_auth(self, document_id: str, current_auth: object) -> Document:
+        assert document_id == str(document.id)
+        assert current_auth is auth
+        return document
+
+    monkeypatch.setattr(
+        document_routes.DocumentRepository,
+        "get_visible_to_auth",
+        fake_get_visible_to_auth,
+    )
+    monkeypatch.setattr(
+        document_routes.ConnectorRepository,
+        "get",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("connector lookup should not run")
+        ),
+    )
+
+    response = await document_routes.get_document_original(
+        str(document.id),
+        session=SimpleNamespace(),
+        identity=SimpleNamespace(auth=auth),
+    )
+
+    assert response.body == payload
+    assert response.media_type == "message/rfc822"

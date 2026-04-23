@@ -1,3 +1,5 @@
+import ScheduleOutlinedIcon from '@mui/icons-material/ScheduleOutlined';
+import { AppCard } from './ui/AppCard';
 import type { Connector, SyncJob } from '../types/api';
 
 type JobStatusListProps = {
@@ -33,10 +35,7 @@ function EmptyJobs() {
   return (
     <div className="empty-state">
       <div className="empty-state-icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <circle cx="10" cy="10" r="8" strokeLinecap="round" />
-          <path d="M10 6v4l2.5 2.5" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <ScheduleOutlinedIcon fontSize="medium" />
       </div>
       <span>No jobs queued yet.</span>
     </div>
@@ -47,7 +46,7 @@ export function JobStatusList({ jobs, connectors }: JobStatusListProps) {
   const nameById = new Map(connectors.map((c) => [c.id, c.display_name]));
 
   return (
-    <div className="card table-card">
+    <AppCard className="card table-card">
       <header className="panel-header">
         <h3>Background Jobs</h3>
         {jobs.length > 0 ? <span>{jobs.length}</span> : null}
@@ -75,7 +74,7 @@ export function JobStatusList({ jobs, connectors }: JobStatusListProps) {
             );
           })}
         </div>
-      )}
-    </div>
+        )}
+    </AppCard>
   );
 }

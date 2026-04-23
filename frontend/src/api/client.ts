@@ -1,20 +1,31 @@
 import type {
+  AuditLog,
+  AuditLogFilters,
   AuthSession,
   ChatAskRequest,
   ChatAskResponse,
+  ChatMemoryPatchRequest,
   ChatSessionDetail,
+  ChatSessionMemoryJson,
   ChatSessionSummary,
   Connector,
   ConnectorPayload,
   ConnectorUpdatePayload,
+  CreateUserPayload,
   CsrfTokenResponse,
   DocumentDetail,
+  DocumentListFilters,
   DocumentSummary,
+  HealthReadiness,
+  IntelligenceOverview,
+  Role,
   SyncJob,
+  UpdateUserPayload,
   User,
 } from '../types/api';
 
 const API_BASE = (import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8000/api/v1').replace(/\/$/, '');
+const AUTH_COOKIE_NAME = 'nc_ai_access_token';
 const CSRF_COOKIE_NAME = 'nc_ai_csrf_token';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -33,6 +44,10 @@ function readCookie(name: string): string | null {
     return decodeURIComponent(cookie.slice(prefix.length));
   }
   return null;
+}
+
+export function hasSessionCookie(): boolean {
+  return readCookie(AUTH_COOKIE_NAME) !== null;
 }
 
 async function fetchCsrfToken(): Promise<string> {
@@ -131,6 +146,33 @@ export async function getCurrentUser(): Promise<User> {
   return request<User>('/auth/me');
 }
 
+export async function getBackendReadiness(): Promise<HealthReadiness> {
+  const response = await fetch(`${API_BASE}/health/ready`, {
+    credentials: 'include',
+  });
+
+  let payload: HealthReadiness | null = null;
+  try {
+    payload = (await response.json()) as HealthReadiness;
+  } catch {
+    payload = null;
+  }
+
+  if (payload && (response.ok || response.status === 503)) {
+    return payload;
+  }
+
+  if (!response.ok) {
+    const detail =
+      typeof payload === 'object' && payload && 'status' in payload
+        ? `Health check failed: ${String(payload.status)}`
+        : `Request failed with ${response.status}`;
+    throw new Error(detail);
+  }
+
+  throw new Error('Health check returned an invalid payload');
+}
+
 export async function listConnectors(): Promise<Connector[]> {
   return request<Connector[]>('/connectors');
 }
@@ -169,10 +211,25 @@ export async function syncConnector(connectorId: string, fullReindex = false): P
   });
 }
 
-export async function listDocuments(query?: string): Promise<DocumentSummary[]> {
+export async function listDocuments(filters: DocumentListFilters = {}): Promise<DocumentSummary[]> {
   const params = new URLSearchParams();
-  if (query) {
-    params.set('query', query);
+  if (filters.query) {
+    params.set('query', filters.query);
+  }
+  for (const connectorId of filters.connector_ids ?? []) {
+    params.append('connector_id', connectorId);
+  }
+  for (const mimeType of filters.mime_types ?? []) {
+    params.append('mime_type', mimeType);
+  }
+  for (const pathPrefix of filters.path_prefixes ?? []) {
+    params.append('path_prefix', pathPrefix);
+  }
+  if (filters.modified_after) {
+    params.set('modified_after', filters.modified_after);
+  }
+  if (filters.modified_before) {
+    params.set('modified_before', filters.modified_before);
   }
   const suffix = params.toString();
   return request<DocumentSummary[]>(`/documents${suffix ? `?${suffix}` : ''}`);
@@ -180,6 +237,10 @@ export async function listDocuments(query?: string): Promise<DocumentSummary[]> 
 
 export async function getDocument(documentId: string): Promise<DocumentDetail> {
   return request<DocumentDetail>(`/documents/${documentId}`);
+}
+
+export async function getIntelligenceOverview(): Promise<IntelligenceOverview> {
+  return request<IntelligenceOverview>('/intelligence/overview');
 }
 
 export function getDocumentOriginalUrl(documentId: string): string {
@@ -194,6 +255,12 @@ export async function reindexDocument(documentId: string): Promise<{ status: str
 
 export async function listJobs(): Promise<SyncJob[]> {
   return request<SyncJob[]>('/jobs');
+}
+
+export async function retryJob(jobId: string): Promise<SyncJob> {
+  return request<SyncJob>(`/jobs/${jobId}/retry`, {
+    method: 'POST',
+  });
 }
 
 export async function listChatSessions(): Promise<ChatSessionSummary[]> {
@@ -218,8 +285,61 @@ export async function askChat(payload: ChatAskRequest): Promise<ChatAskResponse>
       session_id: payload.session_id ?? null,
       top_k: payload.top_k ?? 6,
       parent_message_id: payload.parent_message_id ?? null,
+      document_ids: payload.document_ids ?? null,
       active_context_document_ids: payload.active_context_document_ids ?? [],
       request_id: payload.request_id ?? crypto.randomUUID(),
+      retrieval_filters: payload.retrieval_filters ?? null,
+      clear_session_memory: payload.clear_session_memory ?? false,
+      focus_lock_document_ids: payload.focus_lock_document_ids ?? [],
+      memory_items_patch: payload.memory_items_patch ?? null,
     }),
   });
+}
+
+export async function patchChatSessionMemory(
+  sessionId: string,
+  payload: ChatMemoryPatchRequest,
+): Promise<ChatSessionMemoryJson> {
+  return request<ChatSessionMemoryJson>(`/chat/sessions/${sessionId}/memory`, {
+    method: 'PATCH',
+    body: JSON.stringify({
+      clear: payload.clear ?? false,
+      focus_lock_document_ids: payload.focus_lock_document_ids ?? null,
+      items: payload.items ?? [],
+    }),
+  });
+}
+
+export async function listUsers(query?: string): Promise<User[]> {
+  const suffix = query ? `?query=${encodeURIComponent(query)}` : '';
+  return request<User[]>(`/users/${suffix}`.replace('/?', '?'));
+}
+
+export async function createUser(payload: CreateUserPayload): Promise<User> {
+  return request<User>('/users/', {
+    method: 'POST',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function updateUser(userId: string, payload: UpdateUserPayload): Promise<User> {
+  return request<User>(`/users/${userId}`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
+  });
+}
+
+export async function listRoles(): Promise<Role[]> {
+  return request<Role[]>('/admin/roles');
+}
+
+export async function listAuditLogs(filters: AuditLogFilters = {}): Promise<AuditLog[]> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(filters)) {
+    if (value) {
+      params.set(key, value);
+    }
+  }
+  const suffix = params.toString();
+  return request<AuditLog[]>(`/admin/audit-logs${suffix ? `?${suffix}` : ''}`);
 }

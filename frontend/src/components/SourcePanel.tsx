@@ -1,4 +1,6 @@
 import { getDocumentOriginalUrl } from '../api/client';
+import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
+import { AppCard } from './ui/AppCard';
 import type { ChatActiveContextDocument, ChatSource } from '../types/api';
 
 type SourcePanelProps = {
@@ -121,9 +123,7 @@ function EmptySources() {
   return (
     <div className="empty-state">
       <div className="empty-state-icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <path d="M6 9h8M6 13h5M4 3h12a2 2 0 0 1 2 2v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2z" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
+        <DescriptionOutlinedIcon fontSize="medium" />
       </div>
       <span>Sources appear here after retrieval.</span>
     </div>
@@ -135,7 +135,7 @@ export function SourcePanel({ sources, activeContextDocuments = [] }: SourcePane
   const groups = groupByDocument(sources);
 
   return (
-    <aside className="card source-panel">
+    <AppCard component="aside" className="card source-panel">
       <header className="panel-header">
         <h3>Sources for this answer</h3>
         {groups.length > 0 ? <span>{groups.length}</span> : null}
@@ -164,6 +164,6 @@ export function SourcePanel({ sources, activeContextDocuments = [] }: SourcePane
           </div>
         </>
       ) : null}
-    </aside>
+    </AppCard>
   );
 }

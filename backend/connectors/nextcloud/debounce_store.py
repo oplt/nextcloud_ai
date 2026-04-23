@@ -15,7 +15,7 @@ class DebounceStore(Protocol):
         """Return True when a debounce slot is acquired for the first time."""
 
 
-@dataclass(slots=True)
+@dataclass
 class RedisDebounceStore:
     redis_url: str
     namespace: str = "nextcloud:webhooks"

@@ -1,9 +1,20 @@
+import { useState } from 'react';
+
 import type { Connector, ConnectorPayload } from '../types/api';
 import { NextcloudConnectorForm } from '../components/NextcloudConnectorForm';
+import { AppButton } from '../components/ui/AppButton';
+import { AppCard } from '../components/ui/AppCard';
+import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined';
+import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
+import IconButton from '@mui/material/IconButton';
+import Stack from '@mui/material/Stack';
+import Typography from '@mui/material/Typography';
 
 type ConnectorsPageProps = {
   connectors: Connector[];
+  listLoading?: boolean;
+  listError?: string | null;
   onCreate: (payload: ConnectorPayload) => Promise<void>;
   onDelete: (connectorId: string) => Promise<void>;
   onTest: (connectorId: string) => Promise<void>;
@@ -18,13 +29,7 @@ function EmptyConnectors() {
   return (
     <div className="empty-state">
       <div className="empty-state-icon" aria-hidden="true">
-        <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" strokeWidth="1.5">
-          <rect x="2" y="3" width="6" height="4" rx="1" />
-          <rect x="12" y="3" width="6" height="4" rx="1" />
-          <rect x="7" y="13" width="6" height="4" rx="1" />
-          <path d="M5 7v2a3 3 0 0 0 3 3h4a3 3 0 0 0 3-3V7" strokeLinecap="round" />
-          <line x1="10" y1="12" x2="10" y2="13" strokeLinecap="round" />
-        </svg>
+        <HubOutlinedIcon fontSize="medium" />
       </div>
       <span>No connectors configured yet. Add one using the form.</span>
     </div>
@@ -34,26 +39,36 @@ function EmptyConnectors() {
 // ─── ConnectorsPage ───────────────────────────────────────────
 export function ConnectorsPage({
   connectors,
+  listLoading = false,
+  listError = null,
   onCreate,
   onDelete,
   onTest,
   onSync,
   onToggleActive,
 }: ConnectorsPageProps) {
-  const handleDelete = async (id: string, name: string) => {
-    if (!window.confirm(`Delete "${name}" and all its synced documents?`)) return;
-    await onDelete(id);
-  };
+  const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
 
   return (
     <section className="split-layout">
       <NextcloudConnectorForm onSubmit={onCreate} />
 
-      <div className="card table-card">
+      <AppCard className="card table-card">
         <header className="panel-header">
           <h3>Configured Connectors</h3>
           {connectors.length > 0 ? <span>{connectors.length}</span> : null}
         </header>
+
+        {listError ? (
+          <div className="page-alert page-alert--error" role="alert">
+            {listError}
+          </div>
+        ) : null}
+        {listLoading ? (
+          <div className="page-alert page-alert--info" role="status">
+            Loading connector list…
+          </div>
+        ) : null}
 
         {connectors.length === 0 ? (
           <EmptyConnectors />
@@ -64,45 +79,79 @@ export function ConnectorsPage({
                 <div className="connector-card__info">
                   <strong>{connector.display_name}</strong>
                   <p title={connector.base_url}>{connector.base_url}</p>
+                  <small>
+                    Type: {connector.connector_type === 'imap' ? 'IMAP email' : 'Nextcloud'}
+                  </small>
+                  <small>
+                    Scope: {connector.root_path}
+                  </small>
+                  <small>
+                    Owner: {connector.owner?.full_name || connector.owner?.email || connector.owner?.username || 'Unassigned'}
+                  </small>
                 </div>
 
-                <div className="connector-actions">
+                <Stack className="connector-actions" direction="row" useFlexGap flexWrap="wrap">
                   <span className={`pill pill--${connector.is_active ? 'active' : 'inactive'}`}>
                     {connector.is_active ? 'active' : 'inactive'}
                   </span>
                   <span className={`pill pill--${connector.status}`}>
                     {connector.status}
                   </span>
-                  <button
+                  <AppButton
                     type="button"
+                    variant="outlined"
                     onClick={() => void onToggleActive(connector.id, !connector.is_active)}
                   >
                     {connector.is_active ? 'Deactivate' : 'Activate'}
-                  </button>
-                  <button type="button" onClick={() => void onTest(connector.id)}>
+                  </AppButton>
+                  <AppButton type="button" variant="outlined" onClick={() => void onTest(connector.id)}>
                     Test
-                  </button>
-                  <button type="button" onClick={() => void onSync(connector.id, false)}>
+                  </AppButton>
+                  <AppButton type="button" variant="outlined" onClick={() => void onSync(connector.id, false)}>
                     Sync
-                  </button>
-                  <button type="button" onClick={() => void onSync(connector.id, true)}>
+                  </AppButton>
+                  <AppButton type="button" variant="outlined" onClick={() => void onSync(connector.id, true)}>
                     Full reindex
-                  </button>
-                  <button
+                  </AppButton>
+                  <IconButton
                     type="button"
                     className="icon-button icon-button--danger"
-                    onClick={() => void handleDelete(connector.id, connector.display_name)}
+                    onClick={() => setDeleteTarget({ id: connector.id, name: connector.display_name })}
                     aria-label={`Delete ${connector.display_name}`}
                     title="Delete connector"
+                    color="error"
                   >
                     <DeleteOutlineOutlinedIcon />
-                  </button>
-                </div>
+                  </IconButton>
+                </Stack>
               </article>
             ))}
           </div>
         )}
-      </div>
+      </AppCard>
+
+      <ConfirmDialog
+        open={deleteTarget !== null}
+        title="Delete connector?"
+        description={
+          deleteTarget ? (
+            <Typography component="p">
+                This removes <strong>{deleteTarget.name}</strong> and all documents synced from that source. Running
+                jobs may fail; you can add the connector again later.
+            </Typography>
+          ) : null
+        }
+        confirmLabel="Delete connector"
+        cancelLabel="Cancel"
+        variant="danger"
+        onCancel={() => setDeleteTarget(null)}
+        onConfirm={() => {
+          if (!deleteTarget) return;
+          const id = deleteTarget.id;
+          setDeleteTarget(null);
+          void onDelete(id);
+        }}
+      />
     </section>
   );
 }

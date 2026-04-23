@@ -1,33 +1,39 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
+import uuid
 from datetime import datetime, timezone
 from uuid import UUID
 
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from backend.ai import rag_temporal
+from backend.ai.follow_up_classifier import FollowUpClassification
+from backend.ai import session_memory as chat_memory
 from backend.ai.llm_client import LLMClientFactory, LLMClientProtocol
-from backend.ai.prompt_builder import build_grounded_prompt
-from backend.services.query_writer import build_retrieval_query
+from backend.ai.prompt_builder import GROUNDED_PROMPT_VERSION, build_grounded_prompt
+from backend.ai.rag_postprocess import rerank_and_truncate_sources
+from backend.services.query_writer import plan_retrieval_query
+from backend.core import observability
+from backend.core.config import settings
 from backend.core.exceptions import AuthorizationError, NotFoundError
 from backend.core.security import AuthContext
 from backend.db.models import ChatMessage, ChatSession, User
 from backend.db.repo.chat import ChatMessageRepository, ChatSessionRepository
-from backend.schemas.chat_schema import ChatAskRequest, ChatAskResponse, ChatSource
+from backend.schemas.chat_schema import (
+    ChatAskRequest,
+    ChatAskResponse,
+    ChatMemoryPatchRequest,
+    ChatSource,
+)
 from backend.services.audit_service import AuditService
 from backend.services.retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
 _CITATION_RE = re.compile(r"\[(\d+)\]")
-_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
-_YEAR_RANGE_RE = re.compile(
-    r"\b(?:[A-Za-z]{3,9}\s+)?(?P<start>(?:19|20)\d{2})\b"
-    r"\s*(?:-|–|—|to|through|until)\s*"
-    r"(?:(?:[A-Za-z]{3,9}\s+)?(?P<end>(?:19|20)\d{2})|(?P<open>present|current|now))",
-    flags=re.IGNORECASE,
-)
 _EMPLOYMENT_ORG_RE = re.compile(
     r"\b(?:work(?:ed)?|employed|employment|job|role|position)\b.{0,60}?\b(?:at|in|for)\s+([A-Za-z0-9&./'\-]+(?:\s+[A-Za-z0-9&./'\-]+){0,5})",
     flags=re.IGNORECASE,
@@ -57,16 +63,6 @@ _NEGATION_MARKERS = (
     ' not work ',
     ' was not ',
     ' were not ',
-)
-_EMPLOYMENT_HINT_RE = re.compile(
-    r"\b(?:work experience|employment history|worked|employed|employment|job|role|position|"
-    r"developer|engineer|analyst|researcher|manager|officer|consultant|specialist|intern)\b",
-    flags=re.IGNORECASE,
-)
-_EDUCATION_HINT_RE = re.compile(
-    r"\b(?:education|qualifications|qualification|phd|master(?:'s)?|bachelor(?:'s)?|student|"
-    r"thesis|degree|diploma)\b",
-    flags=re.IGNORECASE,
 )
 
 # How many prior messages to load for context (user + assistant alternating).
@@ -114,6 +110,27 @@ class ChatService:
     @staticmethod
     def _touch_session(chat_session: ChatSession) -> None:
         chat_session.updated_at = datetime.now(timezone.utc)
+
+    async def patch_session_memory(
+        self,
+        *,
+        user: User,
+        session_id: str | UUID,
+        payload: ChatMemoryPatchRequest,
+    ) -> dict[str, object]:
+        chat_session = await self._get_session_for_user(session_id, user)
+        mem = chat_memory.normalize_memory(getattr(chat_session, 'memory_json', None))
+        if payload.clear:
+            mem = chat_memory.empty_memory()
+        if payload.items:
+            chat_memory.apply_memory_item_patch(mem, payload.items)
+        if payload.focus_lock_document_ids is not None:
+            mem['focus_lock_document_ids'] = list(payload.focus_lock_document_ids)[:24]
+        chat_memory.prune_expired_items(mem)
+        chat_session.memory_json = dict(mem)
+        self._touch_session(chat_session)
+        await self.session.commit()
+        return mem
 
     async def delete_session(self, session_id: str, actor: User) -> None:
         chat_session = await self._get_session_for_user(session_id, actor)
@@ -324,36 +341,22 @@ class ChatService:
 
     @staticmethod
     def _question_years(question: str) -> list[str]:
-        return list(dict.fromkeys(_YEAR_RE.findall(question)))
+        return rag_temporal.extract_question_years(question)
 
     @staticmethod
-    def _extract_year_ranges(text: str) -> list[tuple[int, int]]:
-        ranges: list[tuple[int, int]] = []
-        current_year = datetime.now(timezone.utc).year
-        for match in _YEAR_RANGE_RE.finditer(text):
-            start_year = int(match.group('start'))
-            end_year = int(match.group('end')) if match.group('end') else current_year
-            if end_year < start_year:
-                start_year, end_year = end_year, start_year
-            ranges.append((start_year, end_year))
-        return ranges
-
-    @classmethod
-    def _text_supports_year(cls, text: str, year: str) -> bool:
-        if re.search(rf"\b{re.escape(str(year))}\b", text):
-            return True
-
-        year_value = int(year)
-        return any(start_year <= year_value <= end_year for start_year, end_year in cls._extract_year_ranges(text))
+    def _text_supports_year(text: str, year: str) -> bool:
+        return rag_temporal.text_supports_year(
+            text, year, open_end_policy="current_year"
+        )
 
     @classmethod
     def _source_year_match_status(cls, *, source: ChatSource, years: list[str]) -> int:
         source_text = (source.content or source.snippet or '').strip()
         if not years or not source_text:
             return 0
-        if all(cls._text_supports_year(source_text, year) for year in years):
+        if all(ChatService._text_supports_year(source_text, year) for year in years):
             return 1
-        if _YEAR_RE.search(source_text):
+        if rag_temporal.year_literal_present(source_text):
             return -1
         return 0
 
@@ -374,8 +377,8 @@ class ChatService:
             source_text = (source.content or source.snippet or '').strip()
             employment_status = 0
             if employment_question and source_text:
-                has_employment_markers = bool(_EMPLOYMENT_HINT_RE.search(source_text))
-                has_education_markers = bool(_EDUCATION_HINT_RE.search(source_text))
+                has_employment_markers = rag_temporal.employment_markers_present(source_text)
+                has_education_markers = rag_temporal.education_markers_present(source_text)
                 if has_employment_markers:
                     employment_status = 1
                 elif has_education_markers:
@@ -405,9 +408,7 @@ class ChatService:
 
     @staticmethod
     def _looks_like_employment_question(question: str) -> bool:
-        lowered = question.lower()
-        employment_terms = (' work ', ' worked ', ' employer ', ' employed ', ' employment ', ' company ', ' job ', ' role ')
-        return any(term in f' {lowered} ' for term in employment_terms)
+        return rag_temporal.looks_like_employment_question(question)
 
     @staticmethod
     def _looks_like_claim_challenge(question: str) -> bool:
@@ -440,7 +441,7 @@ class ChatService:
                     continue
                 if candidate in _GENERIC_ORG_TERMS:
                     continue
-                if _YEAR_RE.fullmatch(candidate) or not any(char.isalpha() for char in candidate):
+                if rag_temporal.is_year_token(candidate) or not any(char.isalpha() for char in candidate):
                     continue
                 if candidate not in matches:
                     matches.append(candidate)
@@ -524,27 +525,166 @@ class ChatService:
             return 'I could not verify that claim from the indexed sources.'
         return 'I could not verify that from the indexed sources.'
 
-    def _normalize_answer_and_sources(
+    def _llm_model_id(self) -> str:
+        client = self.llm_client
+        model = getattr(client, 'model', None)
+        if model is not None:
+            return str(model)
+        return 'stub'
+
+    def _retrieval_settings_snapshot(
+        self,
+        *,
+        request: ChatAskRequest,
+        retrieval_query: str,
+        is_follow_up: bool,
+        follow_up: FollowUpClassification | None = None,
+    ) -> dict[str, object]:
+        filters_dump: object = None
+        if request.retrieval_filters is not None:
+            filters_dump = request.retrieval_filters.model_dump(mode='json')
+        snap: dict[str, object] = {
+            'top_k': request.top_k,
+            'document_ids': [str(d) for d in (request.document_ids or [])],
+            'retrieval_filters': filters_dump,
+            'active_context_document_ids': list(request.active_context_document_ids or []),
+            'is_follow_up': is_follow_up,
+            'retrieval_query': retrieval_query,
+        }
+        if follow_up is not None:
+            snap['follow_up_confidence'] = follow_up.confidence
+            snap['follow_up_reasons'] = list(follow_up.reasons)
+        return snap
+
+    @staticmethod
+    def _compute_answer_confidence(
+        sources: list[ChatSource],
+        verification_summary: dict[str, object] | None,
+    ) -> float | None:
+        if verification_summary is None:
+            return None
+        result = verification_summary.get('result')
+        top = max((s.score for s in sources), default=0.0)
+        if result == 'passed':
+            return round(min(0.99, 0.52 + 0.42 * top), 3)
+        if result in {'insufficient_answer', 'empty_llm'}:
+            return round(0.15 + 0.25 * top, 3)
+        if result in {'no_sources', 'no_inline_citations', 'support_check_failed'}:
+            return round(0.12 + 0.2 * top, 3)
+        return round(0.2 + 0.15 * top, 3)
+
+    async def _maybe_summarize_session(
+        self,
+        *,
+        chat_session: ChatSession,
+        messages: list[ChatMessage],
+        mem: dict[str, object],
+    ) -> None:
+        if len(messages) < settings.RAG_SESSION_SUMMARY_MESSAGE_THRESHOLD:
+            return
+        head = messages[: max(0, len(messages) - 8)]
+        if len(head) < 6:
+            return
+        lines = [f'{m.role}: {m.content[:520]}' for m in head]
+        prompt = (
+            'Summarize durable facts and unresolved threads from this chat prefix '
+            'in 4-6 sentences for future turns. Do not invent facts.\n\n'
+            + '\n'.join(lines)
+        )
+        try:
+            summary = (await self.llm_client.generate(prompt)).strip()
+            if summary:
+                mem['session_summary'] = summary[:4000]
+                chat_session.memory_json = dict(mem)
+        except Exception:
+            logger.exception(
+                'chat.session_summary_failed session=%s', chat_session.id
+            )
+
+    def _verify_and_normalize_answer(
         self,
         *,
         question: str,
         answer: str,
         sources: list[ChatSource],
-    ) -> tuple[str, list[ChatSource]]:
+        shadow_mode: bool,
+        trace_id: str,
+    ) -> tuple[str, list[ChatSource], dict[str, object]]:
+        verification: dict[str, object] = {
+            'shadow_mode': shadow_mode,
+            'trace_id': trace_id,
+        }
+        if answer == self._build_empty_answer():
+            verification['result'] = 'empty_llm'
+            return answer, sources, verification
+
         normalized_answer, cited_sources = self._filter_sources_to_citations(answer, sources)
         if self._is_insufficient_answer(normalized_answer):
-            return normalized_answer, []
+            verification['result'] = 'insufficient_answer'
+            return normalized_answer, [], verification
+
         if not cited_sources:
-            return self._build_unverified_answer(question), []
-        if not self._answer_is_supported(question=question, answer=normalized_answer, cited_sources=cited_sources):
-            return self._build_unverified_answer(question), []
-        return normalized_answer, cited_sources
+            strict_answer = self._build_unverified_answer(question)
+            verification['result'] = 'no_inline_citations'
+            verification['strict_answer_would_be'] = strict_answer
+            if shadow_mode:
+                verification['shadow_kept_raw'] = True
+                logger.warning(
+                    'chat.verification.shadow_skip_no_citations %s',
+                    json.dumps({'trace_id': trace_id}),
+                )
+                return answer.strip(), [], verification
+            return strict_answer, [], verification
+
+        support = self._answer_is_supported(
+            question=question, answer=normalized_answer, cited_sources=cited_sources
+        )
+        verification['support_check_passed'] = support
+        if not support:
+            strict_answer = self._build_unverified_answer(question)
+            verification['result'] = 'support_check_failed'
+            verification['strict_answer_would_be'] = strict_answer
+            if shadow_mode:
+                verification['shadow_keeps_citation_answer'] = True
+                logger.warning(
+                    'chat.verification.shadow_skip_support_check %s',
+                    json.dumps({'trace_id': trace_id, 'question': question[:240]}),
+                )
+                return normalized_answer, cited_sources, verification
+            return strict_answer, [], verification
+
+        verification['result'] = 'passed'
+        return normalized_answer, cited_sources, verification
 
     async def ask(
         self, *, user: User, auth: AuthContext, request: ChatAskRequest
     ) -> ChatAskResponse:
         question = request.question.strip() or request.question
+        trace_id = request.request_id or str(uuid.uuid4())
+        llm_provider = settings.effective_llm_provider
+        llm_model_id = self._llm_model_id()
+        prompt_version = GROUNDED_PROMPT_VERSION
+        shadow_mode = settings.CHAT_VERIFICATION_SHADOW_MODE
+
         chat_session = await self._get_or_create_session(user=user, request=request)
+
+        prior_before = await self.message_repo.list_by_session(
+            chat_session.id, limit=_HISTORY_WINDOW
+        )
+        mem = chat_memory.normalize_memory(getattr(chat_session, 'memory_json', None))
+        if request.clear_session_memory:
+            mem = chat_memory.empty_memory()
+        if request.memory_items_patch:
+            chat_memory.apply_memory_item_patch(mem, request.memory_items_patch)
+        if request.focus_lock_document_ids:
+            mem['focus_lock_document_ids'] = [
+                str(x) for x in request.focus_lock_document_ids
+            ][:24]
+        chat_memory.prune_expired_items(mem)
+        chat_session.memory_json = dict(mem)
+        await self._maybe_summarize_session(
+            chat_session=chat_session, messages=prior_before, mem=mem
+        )
 
         user_message = ChatMessage(
             session_id=chat_session.id, role='user', content=question
@@ -555,10 +695,9 @@ class ChatService:
         await self.session.refresh(user_message)
         await self.session.refresh(chat_session)
 
-        prior_orm_messages: list[ChatMessage] = await self.message_repo.list_by_session(
-            chat_session.id, limit=_HISTORY_WINDOW
-        )
-        prior_orm_messages = [m for m in prior_orm_messages if m.id != user_message.id]
+        prior_orm_messages: list[ChatMessage] = [
+            m for m in prior_before if m.id != user_message.id
+        ]
         history: list[dict[str, str]] = [
             {'role': m.role, 'content': m.content} for m in prior_orm_messages
         ]
@@ -572,83 +711,229 @@ class ChatService:
             preferred_document_ids,
         )
 
-        retrieval_query, is_follow_up = await build_retrieval_query(
-            question=question,
-            history=history,
-            llm_client=self.llm_client,
-        )
-        if is_follow_up:
-            logger.debug(
-                'Follow-up detected. Rewritten query: %r Preferred docs: %s',
-                retrieval_query,
-                preferred_document_ids,
-            )
-
+        retrieval_query = question
+        is_follow_up = False
+        follow_up_plan: FollowUpClassification | None = None
+        retrieval_settings_snapshot: dict[str, object] = {}
+        verification_summary: dict[str, object] | None = None
+        retrieval_error_type: str | None = None
+        llm_error_type: str | None = None
         sources: list[ChatSource] = []
         active_context_document_ids = follow_up_document_ids
+        answer = ''
+        retrieval_debug_payload: dict[str, object] = {}
+        memory_applied_payload: dict[str, object] = {
+            'session_summary_present': bool(mem.get('session_summary')),
+            'structured_items': len(mem.get('long_term_items') or []),
+            'focus_lock_count': len(mem.get('focus_lock_document_ids') or []),
+        }
+        rerank_stats: dict[str, object] = {}
+        candidate_sources_for_metrics: list[ChatSource] | None = None
+
         try:
+            plan = await plan_retrieval_query(
+                question=question,
+                history=history,
+                llm_client=self.llm_client,
+            )
+            retrieval_query = plan.retrieval_query
+            is_follow_up = plan.is_follow_up
+            follow_up_plan = plan.follow_up
+        except Exception as exc:
+            retrieval_error_type = type(exc).__name__
+            logger.exception(
+                'chat.retrieval_query_failed session=%s trace=%s',
+                chat_session.id,
+                trace_id,
+            )
+            answer = self._build_failure_answer(exc)
+            verification_summary = {
+                'result': 'retrieval_query_failed',
+                'error_type': retrieval_error_type,
+                'shadow_mode': shadow_mode,
+                'trace_id': trace_id,
+            }
+            observability.record_rag_stage_error(stage='retrieval_query')
+        else:
+            retrieval_settings_snapshot = self._retrieval_settings_snapshot(
+                request=request,
+                retrieval_query=retrieval_query,
+                is_follow_up=is_follow_up,
+                follow_up=follow_up_plan,
+            )
+            if is_follow_up:
+                logger.debug(
+                    'Follow-up detected. Rewritten query: %r Preferred docs: %s',
+                    retrieval_query,
+                    preferred_document_ids,
+                )
+
             explicit_document_ids = request.document_ids or None
             retrieval_document_ids = explicit_document_ids
             retrieval_preferred_document_ids = None
+            lock_ids = self._parse_active_context_document_ids(
+                [str(x) for x in (mem.get('focus_lock_document_ids') or [])]
+            )
+            if lock_ids and explicit_document_ids is None:
+                retrieval_document_ids = lock_ids
             if (
                 requested_active_context_document_ids
                 and is_follow_up
                 and explicit_document_ids is None
+                and not lock_ids
             ):
                 retrieval_document_ids = requested_active_context_document_ids
-            elif follow_up_document_ids and is_follow_up and explicit_document_ids is None:
+            elif follow_up_document_ids and is_follow_up and explicit_document_ids is None and not lock_ids:
                 retrieval_preferred_document_ids = follow_up_document_ids
 
-            retrieval = await self.retrieval_service.retrieve(
-                question=retrieval_query,
-                auth=auth,
-                top_k=request.top_k,
-                document_ids=retrieval_document_ids,
-                preferred_document_ids=retrieval_preferred_document_ids,
-            )
-            candidate_sources = self._prioritize_sources_for_question(
-                question=question,
-                sources=retrieval.sources,
-            )
-            grounded_document_ids = getattr(retrieval, 'grounded_document_ids', [])
-            active_context_document_ids = self._merge_document_ids(
-                list(grounded_document_ids),
-                self._extract_document_ids_from_sources(candidate_sources),
-                follow_up_document_ids,
-            )
-
-            if candidate_sources:
-                prompt = build_grounded_prompt(
-                    question=question,
-                    sources=candidate_sources,
-                    history=history if history else None,
+            try:
+                retrieval = await self.retrieval_service.retrieve(
+                    question=retrieval_query,
+                    auth=auth,
+                    top_k=request.top_k,
+                    document_ids=retrieval_document_ids,
+                    preferred_document_ids=retrieval_preferred_document_ids,
+                    filters=request.retrieval_filters,
                 )
-                answer = (await self.llm_client.generate(prompt)).strip()
-                if not answer:
-                    answer = self._build_empty_answer()
+            except Exception as exc:
+                retrieval_error_type = type(exc).__name__
+                logger.exception(
+                    'chat.retrieval_failed session=%s trace=%s',
+                    chat_session.id,
+                    trace_id,
+                )
+                answer = self._build_failure_answer(exc)
+                verification_summary = {
+                    'result': 'retrieval_failed',
+                    'error_type': retrieval_error_type,
+                    'shadow_mode': shadow_mode,
+                    'trace_id': trace_id,
+                }
+                observability.record_rag_stage_error(stage='retrieval')
             else:
-                answer = self._build_no_sources_answer()
+                retrieval_debug_payload = dict(
+                    getattr(retrieval, 'retrieval_debug', {}) or {}
+                )
+                candidate_sources = rerank_and_truncate_sources(
+                    question,
+                    self._prioritize_sources_for_question(
+                        question=question,
+                        sources=retrieval.sources,
+                    ),
+                    stats_out=rerank_stats,
+                )
+                candidate_sources_for_metrics = candidate_sources
+                grounded_document_ids = getattr(retrieval, 'grounded_document_ids', [])
+                active_context_document_ids = self._merge_document_ids(
+                    list(grounded_document_ids),
+                    self._extract_document_ids_from_sources(candidate_sources),
+                    follow_up_document_ids,
+                )
 
-            answer, sources = self._normalize_answer_and_sources(
-                question=question,
-                answer=answer,
-                sources=candidate_sources,
-            )
-        except Exception as exc:
-            logger.exception('Chat answer generation failed for session %s', chat_session.id)
-            answer = self._build_failure_answer(exc)
-            sources = []
+                if not candidate_sources:
+                    answer = self._build_no_sources_answer()
+                    sources = []
+                    verification_summary = {
+                        'result': 'no_sources',
+                        'shadow_mode': shadow_mode,
+                        'trace_id': trace_id,
+                    }
+                else:
+                    try:
+                        memory_note = chat_memory.build_memory_prompt_block(mem)
+                        prompt = build_grounded_prompt(
+                            question=question,
+                            sources=candidate_sources,
+                            history=history if history else None,
+                            memory_block=memory_note or None,
+                        )
+                        raw_answer = (await self.llm_client.generate(prompt)).strip()
+                    except Exception as exc:
+                        llm_error_type = type(exc).__name__
+                        logger.exception(
+                            'chat.llm_failed session=%s trace=%s',
+                            chat_session.id,
+                            trace_id,
+                        )
+                        answer = self._build_failure_answer(exc)
+                        sources = []
+                        verification_summary = {
+                            'result': 'llm_failed',
+                            'error_type': llm_error_type,
+                            'shadow_mode': shadow_mode,
+                            'trace_id': trace_id,
+                        }
+                        observability.record_rag_stage_error(stage='llm')
+                    else:
+                        if not raw_answer:
+                            answer = self._build_empty_answer()
+                            sources = candidate_sources
+                            verification_summary = {
+                                'result': 'empty_llm',
+                                'shadow_mode': shadow_mode,
+                                'trace_id': trace_id,
+                            }
+                        else:
+                            answer, sources, verification_summary = self._verify_and_normalize_answer(
+                                question=question,
+                                answer=raw_answer,
+                                sources=candidate_sources,
+                                shadow_mode=shadow_mode,
+                                trace_id=trace_id,
+                            )
 
         cited_document_ids = self._extract_document_ids_from_sources(sources)
         if cited_document_ids:
             active_context_document_ids = self._merge_document_ids(cited_document_ids, follow_up_document_ids)
+
+        answer_confidence_value = self._compute_answer_confidence(sources, verification_summary)
+        if verification_summary:
+            observability.record_rag_verification(
+                result=str(verification_summary.get('result')),
+                shadow_mode=shadow_mode,
+            )
+            if shadow_mode and verification_summary.get('shadow_kept_raw'):
+                observability.record_rag_shadow_override(reason='no_inline_citations')
+            if shadow_mode and verification_summary.get('shadow_keeps_citation_answer'):
+                observability.record_rag_shadow_override(reason='support_check_failed')
+        if candidate_sources_for_metrics is not None:
+            observability.record_rag_citation_filter(
+                before_count=len(candidate_sources_for_metrics),
+                after_count=len(sources),
+            )
+        if rerank_stats:
+            observability.record_rag_rerank_event(
+                order_changed=bool(rerank_stats.get('order_changed')),
+                content_truncated_count=int(rerank_stats.get('sources_content_truncated') or 0),
+            )
+        observability.record_rag_low_confidence_answer(confidence=answer_confidence_value)
+
+        model_label = f'{llm_provider}:{llm_model_id}'
+        generation_metadata: dict[str, object] = {
+            'trace_id': trace_id,
+            'llm_provider': llm_provider,
+            'llm_model_id': llm_model_id,
+            'grounded_prompt_version': prompt_version,
+            'retrieval': retrieval_settings_snapshot,
+            'verification': verification_summary,
+            'retrieval_debug': retrieval_debug_payload,
+            'memory_applied': memory_applied_payload,
+            'answer_confidence': answer_confidence_value,
+        }
+        if retrieval_error_type:
+            generation_metadata['retrieval_error_type'] = retrieval_error_type
+        if llm_error_type:
+            generation_metadata['llm_error_type'] = llm_error_type
+
+        chat_session.memory_json = dict(mem)
 
         assistant_message = ChatMessage(
             session_id=chat_session.id,
             role='assistant',
             content=answer,
             citations_json=([source.model_dump(mode='json') for source in sources] or None),
-            model_name=self.llm_client.__class__.__name__,
+            model_name=model_label,
+            generation_metadata_json=generation_metadata,
         )
         self._touch_session(chat_session)
         await self.message_repo.add(assistant_message, flush=True)
@@ -659,6 +944,7 @@ class ChatService:
         return ChatAskResponse(
             session_id=chat_session.id,
             answer=answer,
+            answer_confidence=answer_confidence_value,
             sources=sources,
             user_message_id=user_message.id,
             assistant_message_id=assistant_message.id,
@@ -671,4 +957,12 @@ class ChatService:
                 active_context_document_ids,
             ),
             conversation_query=retrieval_query,
+            generation_trace_id=trace_id,
+            llm_provider=llm_provider,
+            llm_model_id=llm_model_id,
+            grounded_prompt_version=prompt_version,
+            retrieval_settings=retrieval_settings_snapshot,
+            verification=verification_summary,
+            retrieval_debug=retrieval_debug_payload or None,
+            memory_applied=memory_applied_payload,
         )

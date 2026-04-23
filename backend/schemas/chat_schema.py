@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from uuid import UUID
 from dataclasses import dataclass, field
@@ -22,6 +23,20 @@ class ChatSource(BaseModel):
     content: str | None = Field(default=None, exclude=True, repr=False)
 
 
+class ChatMemoryPatchRequest(BaseModel):
+    clear: bool = False
+    focus_lock_document_ids: list[str] | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class RetrievalFilters(BaseModel):
+    connector_ids: list[UUID] = Field(default_factory=list)
+    mime_types: list[str] = Field(default_factory=list)
+    path_prefixes: list[str] = Field(default_factory=list)
+    modified_after: datetime | None = None
+    modified_before: datetime | None = None
+
+
 class ChatAskRequest(BaseModel):
     question: str = Field(min_length=2, max_length=10000)
     top_k: int = Field(default=6, ge=1, le=20)
@@ -30,6 +45,10 @@ class ChatAskRequest(BaseModel):
     parent_message_id: str | None = None
     request_id: str | None = None
     active_context_document_ids: list[str] = Field(default_factory=list)
+    retrieval_filters: RetrievalFilters | None = None
+    clear_session_memory: bool = False
+    focus_lock_document_ids: list[str] = Field(default_factory=list)
+    memory_items_patch: list[dict[str, Any]] | None = None
 
 
 class ChatMessageRead(TimestampedSchema):
@@ -38,12 +57,14 @@ class ChatMessageRead(TimestampedSchema):
     content: str
     citations_json: list[dict] | None = None
     model_name: str | None = None
+    generation_metadata_json: dict[str, Any] | None = None
 
 
 class ChatSessionRead(TimestampedSchema):
     user_id: UUID
     title: str
     subject: str
+    memory_json: dict[str, Any] | None = None
 
 
 class ChatSessionDetail(ChatSessionRead):
@@ -55,6 +76,7 @@ class ChatSessionDetail(ChatSessionRead):
 class ChatAskResponse(BaseModel):
     session_id: UUID
     answer: str
+    answer_confidence: float | None = None
     sources: list[ChatSource]
     user_message_id: UUID
     assistant_message_id: UUID
@@ -64,6 +86,14 @@ class ChatAskResponse(BaseModel):
     active_context_document_ids: list[str]
     active_context_documents: list[dict[str, str]]
     conversation_query: str
+    generation_trace_id: str
+    llm_provider: str
+    llm_model_id: str
+    grounded_prompt_version: str
+    retrieval_settings: dict[str, Any] = Field(default_factory=dict)
+    verification: dict[str, Any] | None = None
+    retrieval_debug: dict[str, Any] | None = None
+    memory_applied: dict[str, Any] | None = None
 
 @dataclass(slots=True)
 class ConversationState:

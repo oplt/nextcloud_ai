@@ -7,7 +7,7 @@ This repository contains a private document-search and chat workspace built arou
 The stack has four main parts:
 
 - A FastAPI backend that handles authentication, connector management, document ingestion, chat, health checks, and Nextcloud webhook/bridge endpoints
-- A React + Vite frontend for login, chat, connectors, documents, and job monitoring
+- A React + Vite frontend for login, chat, connectors, documents, job monitoring, and admin operations
 - Celery workers and a beat scheduler for sync and reindex jobs
 - An optional Nextcloud app (`nc_ai_bridge/`) that launches the frontend from a logged-in Nextcloud session
 
@@ -17,14 +17,18 @@ At a high level, the system connects to Nextcloud, syncs file metadata and file 
 
 - Local admin sign-in plus Nextcloud bridge sign-in
 - Cookie-based session auth with CSRF protection
+- Role-based access control for admin, operator, and viewer personas
 - Nextcloud connector CRUD, credential testing, sync, and full reindex
 - Document ingestion for PDF, DOCX, ODT, TXT, and Markdown files
 - ACL-aware document visibility based on Nextcloud owners, users, groups, public links, and superuser access
 - Grounded chat responses with saved chat sessions and cited source snippets
+- Retrieval controls by connector, file type, path prefix, modified date, and per-chat active document scope
 - Document browsing, metadata inspection, inline original-file preview, and per-document reindex
-- Background sync/reindex jobs with job status tracking
+- Background sync/reindex jobs with retry, dead-letter tracking, and document-level failure diagnostics
+- Admin UX for user management, role assignment, connector ownership, and audit log browsing
 - Nextcloud webhook handling with debounce logic and fallback scheduled syncs
 - Health endpoints for liveness, readiness, database, Redis, broker, and Ollama status
+- Prometheus-compatible metrics, structured request and trace IDs, and optional Sentry reporting
 - Automatic Ollama model readiness checks, model pulling, and warm-up when Ollama providers are enabled
 
 ## Tech Stack
@@ -38,6 +42,7 @@ At a high level, the system connects to Nextcloud, syncs file metadata and file 
 - Celery + Redis
 - Ollama
 - `pdfplumber` and `python-docx`
+- `prometheus-client` and `sentry-sdk`
 
 ### Frontend
 
@@ -56,6 +61,8 @@ At a high level, the system connects to Nextcloud, syncs file metadata and file 
 
 ```text
 .
+├── .env.example          # Deployment-level reverse proxy variables
+├── Makefile              # Bootstrap, validate, dev, and deploy commands
 ├── backend/
 │   ├── ai/                 # Embeddings, LLM clients, prompt building, citations, Ollama runtime
 │   ├── alembic/            # Database migrations
@@ -70,14 +77,17 @@ At a high level, the system connects to Nextcloud, syncs file metadata and file 
 │   ├── tests/              # Pytest suite
 │   ├── workers/            # Celery app and background tasks
 │   ├── Dockerfile
+│   ├── .env.example
 │   └── pyproject.toml
+├── deployment/             # TLS-ready compose stack, backups, upgrade and rotation runbooks
 ├── frontend/
 │   ├── src/
 │   │   ├── api/           # Frontend API client
 │   │   ├── components/    # Chat, connector, document, and job UI
 │   │   ├── hooks/         # Session hook
-│   │   └── pages/         # Login, overview, connectors, documents, jobs
+│   │   └── pages/         # Login, overview, connectors, documents, jobs, admin
 │   ├── Dockerfile
+│   ├── .env.example
 │   └── package.json
 ├── nc_ai_bridge/           # Optional Nextcloud app for SSO-style handoff
 └── docker-compose.yml      # Full local stack
@@ -92,7 +102,8 @@ Prerequisite: Docker with Compose.
 From the repository root:
 
 ```bash
-docker compose up --build
+make bootstrap-env
+make dev-up
 ```
 
 This starts:
@@ -120,14 +131,13 @@ Prerequisites:
 - Python 3.12
 - PostgreSQL with the `vector` extension available
 - Redis
-- Ollama. In the committed `backend/.env`, both `EMBEDDING_PROVIDER` and `LLM_PROVIDER` are set to `ollama`.
+- Ollama. In `backend/.env.example`, both `EMBEDDING_PROVIDER` and `LLM_PROVIDER` are set to `ollama`.
 
 Create a virtual environment and install the backend:
 
 ```bash
-python3.12 -m venv .venv
-source .venv/bin/activate
-pip install -e "./backend[dev]"
+make bootstrap-env
+make install-backend
 ```
 
 #### Frontend install
@@ -135,35 +145,48 @@ pip install -e "./backend[dev]"
 Prerequisite: Node.js with npm.
 
 ```bash
-npm --prefix frontend ci
+make install-frontend
 ```
 
 ## Configuration
 
-The repository does not include `.env.example` files. The code reads `backend/.env` and `frontend/.env` directly.
+Bootstrap env files from examples:
+
+```bash
+make bootstrap-env
+```
 
 ### `backend/.env`
 
-The committed backend env file currently includes these variables:
+Start from `backend/.env.example`, then set:
 
 - Application: `APP_NAME`, `APP_ENV`, `DEBUG`, `API_V1_PREFIX`, `FRONTEND_URL`
 - Database and queue: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `DATABASE_URL`, `REDIS_URL`, `REDIS_PORT`, `CELERY_TASK_ALWAYS_EAGER`
 - Auth and admin bootstrap: `JWT_SECRET_KEY`, `SETTINGS_VAULT_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`, `AUTH_COOKIE_DOMAIN`, `FIRST_SUPERUSER_EMAIL`, `FIRST_SUPERUSER_PASSWORD`
 - AI runtime: `EMBEDDING_DIM`, `EMBEDDING_PROVIDER`, `LLM_PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_PORT`
 - Nextcloud integration: `NEXTCLOUD_BRIDGE_SHARED_SECRET`, `NEXTCLOUD_BRIDGE_ISSUER`, `NEXTCLOUD_BRIDGE_AUDIENCE`, `NEXTCLOUD_BRIDGE_TTL_SECONDS`, `NEXTCLOUD_BRIDGE_ALLOWED_CLOCK_SKEW_SECONDS`, `NEXTCLOUD_BRIDGE_REDIS_URL`, `NEXTCLOUD_WEBHOOK_SECRET`, `NEXTCLOUD_VERIFY_TLS`, `NEXTCLOUD_REQUEST_TIMEOUT_SECONDS`
+- Observability: `SENTRY_DSN`, `SENTRY_TRACES_SAMPLE_RATE`, `METRICS_ENABLED`, `METRICS_PATH`, `REQUEST_ID_HEADER_NAME`, `TRACE_ID_HEADER_NAME`
 - Frontend API base value also appears in this file: `VITE_API_BASE_URL`
 
 Additional optional settings with code defaults live in `backend/core/config.py`.
 
 ### `frontend/.env`
 
-The committed frontend env file includes:
+Start from `frontend/.env.example`. It includes:
 
 - `VITE_API_BASE_URL`
 
+### Root `.env`
+
+Start from `.env.example` when using [deployment/docker-compose.yml](/home/polat/Desktop/Projects/NextCloud/deployment/docker-compose.yml:1). It includes:
+
+- `PUBLIC_HOSTNAME`
+- `ACME_EMAIL`
+- `FRONTEND_API_BASE_URL`
+
 ### What still needs manual input
 
-- Replace the committed development secrets and passwords in `backend/.env` before any non-local deployment.
+- Replace example secrets and passwords in `backend/.env` before any non-local deployment.
 - Supply real Nextcloud connector values in the UI or API: base URL, username, app password, and root path.
 - `NEXTCLOUD_WEBHOOK_SECRET` is blank in `backend/.env`; set it if you want signed webhook verification on `/api/v1/nextcloud/webhooks`.
 - `NEXTCLOUD_BRIDGE_REDIS_URL` is blank in `backend/.env`; set it if you want separate Redis-backed replay protection for bridge tokens.
@@ -222,6 +245,20 @@ Start the development server:
 ```bash
 npm --prefix frontend run dev -- --host 0.0.0.0
 ```
+
+### Makefile shortcuts
+
+```bash
+make backend-test
+make frontend-lint
+make frontend-build
+make check
+make ci
+make seed-admin
+```
+
+`make backend-test` disables unrelated host pytest plugins and loads `pytest_asyncio` explicitly, which avoids false failures from globally installed plugins.
+`make ci` runs backend tests plus frontend lint and build in one command.
 
 Create a production build:
 
@@ -322,6 +359,29 @@ When a user opens the `AI Workspace` navigation entry in Nextcloud, the app:
 3. Posts that token to `/api/v1/auth/nextcloud/sso/consume`
 4. Receives backend session cookies and is redirected to the frontend
 
+## Deployment
+
+Production deployment package now lives in [deployment/README.md](/home/polat/Desktop/Projects/NextCloud/deployment/README.md:1).
+
+Quick start:
+
+```bash
+cp .env.example .env
+cp backend/.env.example backend/.env
+make deploy-config
+make deploy-up
+```
+
+What it adds:
+
+- Caddy reverse proxy with automatic TLS
+- Persistent Postgres, Redis, Ollama, and Caddy volumes
+- Static production frontend container
+- Dedicated backend worker and scheduler services
+- Prometheus-compatible `/metrics`
+- Backup and restore scripts in `deployment/scripts`
+- Upgrade, webhook, bridge auth, and credential rotation runbooks in `deployment/OPERATIONS.md`
+
 ## Troubleshooting
 
 - `GET /api/v1/health/ready` returns `503`: the response body includes separate readiness details for the database, Redis, broker, and Ollama runtime.
@@ -339,9 +399,8 @@ This repository does not include a dedicated contribution guide.
 Useful checks that are present in the repo:
 
 ```bash
-cd backend && pytest -q
-npm --prefix frontend run build
-npm --prefix frontend run lint
+make backend-test
+make frontend-build
 ```
 
 There is a backend pytest suite in `backend/tests/`. No frontend test runner is configured in this repository.

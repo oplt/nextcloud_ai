@@ -13,17 +13,21 @@ from backend.core.security import (
     verify_password,
 )
 from backend.db.models import User
-from backend.db.repo.user import UserRepository
+from backend.db.repo.user import RoleRepository, UserRepository
 from backend.schemas.auth_schema import IssuedAuthSession
 from backend.schemas.user_schema import UserRead
+from backend.services.authorization_service import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 from backend.services.audit_service import AuditService
+from backend.services.role_bootstrap_service import RoleBootstrapService
 
 
 class AuthService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.user_repo = UserRepository(session)
+        self.role_repo = RoleRepository(session)
         self.audit = AuditService(session)
+        self.role_bootstrap = RoleBootstrapService(session)
 
     async def login_with_password(
         self, email: str, password: str
@@ -53,13 +57,19 @@ class AuthService:
             existing = await self.user_repo.get_by_email(email)
             if existing:
                 raise ConflictError("User already exists")
+        roles = await self.role_bootstrap.ensure_system_roles()
+        default_role_name = ROLE_ADMIN if is_superuser else ROLE_OPERATOR
+        resolved_role_id = role_id
+        if resolved_role_id is None:
+            default_role = roles.get(default_role_name)
+            resolved_role_id = default_role.id if default_role is not None else None
         user = User(
             auth_provider="local",
             username=username,
             email=email,
             hashed_password=get_password_hash(password),
             full_name=full_name,
-            role_id=role_id,
+            role_id=resolved_role_id,
             is_superuser=is_superuser,
             is_active=True,
         )
@@ -78,8 +88,10 @@ class AuthService:
     async def sync_nextcloud_principal(
         self, principal: Principal
     ) -> IssuedAuthSession:
+        roles = await self.role_bootstrap.ensure_system_roles()
         user = await self.user_repo.get_by_external_subject("nextcloud", principal.sub)
         if user is None:
+            viewer_role = roles.get(ROLE_VIEWER)
             user = User(
                 auth_provider="nextcloud",
                 external_subject=principal.sub,
@@ -87,6 +99,7 @@ class AuthService:
                 email=principal.email,
                 full_name=principal.display_name,
                 nextcloud_base_url=principal.nc_base_url,
+                role_id=viewer_role.id if viewer_role is not None else None,
                 is_active=True,
             )
             await self.user_repo.add(user, flush=True)
@@ -95,6 +108,9 @@ class AuthService:
             user.email = principal.email
             user.full_name = principal.display_name
             user.nextcloud_base_url = principal.nc_base_url
+            if user.role_id is None:
+                viewer_role = roles.get(ROLE_VIEWER)
+                user.role_id = viewer_role.id if viewer_role is not None else None
 
         user.last_login_at = datetime.now(timezone.utc)
         await self.audit.log(

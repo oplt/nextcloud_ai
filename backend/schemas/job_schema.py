@@ -5,6 +5,7 @@ from typing import Any
 from uuid import UUID
 
 from backend.schemas.common_schema import TimestampedSchema
+from backend.schemas.connector_schema import ConnectorRead
 
 
 class SyncJobRead(TimestampedSchema):
@@ -22,3 +23,4 @@ class SyncJobRead(TimestampedSchema):
     error_message: str | None = None
     payload_json: dict[str, Any] | None = None
     result_json: dict[str, Any] | None = None
+    connector: ConnectorRead | None = None

@@ -540,3 +540,74 @@ async def test_retrieval_keeps_close_semantic_matches_from_multiple_documents() 
 
     assert len(result.sources) == 2
     assert {source.file_name for source in result.sources} == {"leave.md", "time-off.md"}
+
+
+@pytest.mark.asyncio
+async def test_retrieval_expands_document_scope_with_graph_related_documents() -> None:
+    primary_document = Document(
+        id=uuid4(),
+        connector_id=uuid4(),
+        external_id="doc-1",
+        file_path="/contracts/master-services-agreement.pdf",
+        file_name="master-services-agreement.pdf",
+        allowed_user_ids=[],
+        allowed_group_ids=[],
+        is_deleted=False,
+    )
+    related_document = Document(
+        id=uuid4(),
+        connector_id=uuid4(),
+        external_id="doc-2",
+        file_path="/emails/vendor-renewal.eml",
+        file_name="vendor-renewal.eml",
+        allowed_user_ids=[],
+        allowed_group_ids=[],
+        is_deleted=False,
+    )
+    related_chunk = DocumentChunk(
+        id=uuid4(),
+        document_id=related_document.id,
+        chunk_index=0,
+        content="Vendor confirmed the renewal deadline is 2026-06-30 and requested legal review.",
+    )
+    related_chunk.document = related_document
+
+    service = RetrievalService(session=SimpleNamespace())
+    service.graph_repo = SimpleNamespace(
+        list_related_document_ids=_async_value([related_document.id])
+    )
+
+    async def fake_semantic_search(**kwargs):
+        assert kwargs["document_ids"] == [primary_document.id, related_document.id]
+        return [(related_chunk, 0.08)]
+
+    async def fake_keyword_search(**kwargs):
+        assert kwargs["document_ids"] == [primary_document.id, related_document.id]
+        return []
+
+    service.chunk_repo = SimpleNamespace(
+        semantic_search=fake_semantic_search,
+        keyword_search=fake_keyword_search,
+    )
+
+    result = await service.retrieve(
+        question="What is the renewal deadline?",
+        auth=AuthContext(
+            user_id="1",
+            auth_provider="nextcloud",
+            external_subject="alice",
+            username="alice",
+        ),
+        top_k=4,
+        preferred_document_ids=[primary_document.id],
+    )
+
+    assert len(result.sources) == 1
+    assert result.sources[0].file_name == "vendor-renewal.eml"
+
+
+def _async_value(value):
+    async def inner(**kwargs):
+        return value
+
+    return inner

@@ -4,6 +4,8 @@ import io
 
 from backend.schemas.chat_schema import ChatSource
 
+GROUNDED_PROMPT_VERSION = "1"
+
 _PREAMBLE = (
     'You are a private company knowledge assistant.\n'
     'Answer only from the provided sources.\n'
@@ -28,9 +30,15 @@ def build_grounded_prompt(
     sources: list[ChatSource],
     *,
     history: list[dict[str, str]] | None = None,
+    memory_block: str | None = None,
 ) -> str:
     buffer = io.StringIO()
     buffer.write(_PREAMBLE)
+
+    if memory_block:
+        buffer.write("\n")
+        buffer.write(memory_block.strip())
+        buffer.write("\n")
 
     if history:
         recent = history[-6:]

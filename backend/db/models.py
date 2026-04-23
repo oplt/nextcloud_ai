@@ -7,6 +7,7 @@ from pgvector.sqlalchemy import Vector
 from sqlalchemy import (
     Boolean,
     DateTime,
+    Float,
     ForeignKey,
     Index,
     Integer,
@@ -126,6 +127,9 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     requested_jobs: Mapped[list["SyncJob"]] = relationship(
         back_populates="requested_by", passive_deletes=True, lazy="selectin"
     )
+    owned_connectors: Mapped[list["Connector"]] = relationship(
+        back_populates="owner", passive_deletes=True, lazy="selectin"
+    )
 
 
 class Connector(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -146,6 +150,12 @@ class Connector(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    owner_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
 
     documents: Mapped[list["Document"]] = relationship(
         back_populates="connector",
@@ -158,6 +168,9 @@ class Connector(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         passive_deletes=True,
         lazy="selectin",
+    )
+    owner: Mapped["User | None"] = relationship(
+        back_populates="owned_connectors", lazy="selectin"
     )
 
 
@@ -229,6 +242,20 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         passive_deletes=True,
         lazy="selectin",
         order_by="DocumentChunk.chunk_index",
+    )
+    insights: Mapped[list["DocumentInsight"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="DocumentInsight.created_at.desc()",
+    )
+    workflow_tasks: Mapped[list["WorkflowTask"]] = relationship(
+        back_populates="document",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        order_by="WorkflowTask.created_at.desc()",
     )
 
 
@@ -325,6 +352,7 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         index=True,
     )
     title: Mapped[str] = mapped_column(String(255), nullable=False, default="New chat")
+    memory_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="chat_sessions", lazy="selectin")
     messages: Mapped[list["ChatMessage"]] = relationship(
@@ -416,6 +444,7 @@ class ChatMessage(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     content: Mapped[str] = mapped_column(Text, nullable=False)
     citations_json: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
     model_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    generation_metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(
         back_populates="messages", lazy="selectin"
@@ -442,3 +471,166 @@ class AuditLog(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     user: Mapped["User | None"] = relationship(
         back_populates="audit_logs", lazy="selectin"
     )
+
+
+class DocumentInsight(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "document_insights"
+    __table_args__ = (
+        Index("ix_document_insights_document_type", "document_id", "insight_type"),
+    )
+
+    document_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    insight_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="active")
+    confidence: Mapped[float | None] = mapped_column(Float, nullable=True)
+    owner_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    payload_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    document: Mapped["Document"] = relationship(back_populates="insights", lazy="selectin")
+    workflow_tasks: Mapped[list["WorkflowTask"]] = relationship(
+        back_populates="insight",
+        passive_deletes=True,
+        lazy="selectin",
+    )
+
+
+class WorkflowTask(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "workflow_tasks"
+    __table_args__ = (
+        Index("ix_workflow_tasks_queue_status", "queue_name", "status"),
+    )
+
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    insight_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("document_insights.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
+    task_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    queue_name: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(String(255), nullable=False)
+    description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(50), nullable=False, default="queued")
+    priority: Mapped[str] = mapped_column(String(50), nullable=False, default="normal")
+    owner_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    due_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    hook_status: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    hook_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    hook_last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    document: Mapped["Document | None"] = relationship(
+        back_populates="workflow_tasks", lazy="selectin"
+    )
+    insight: Mapped["DocumentInsight | None"] = relationship(
+        back_populates="workflow_tasks", lazy="selectin"
+    )
+
+
+class KnowledgeNode(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "knowledge_nodes"
+    __table_args__ = (
+        UniqueConstraint(
+            "node_type", "external_key", name="uq_knowledge_nodes_type_external_key"
+        ),
+        UniqueConstraint(
+            "document_id", name="uq_knowledge_nodes_document_id"
+        ),
+    )
+
+    node_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    label: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    external_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    document: Mapped["Document | None"] = relationship(lazy="selectin")
+    outgoing_edges: Mapped[list["KnowledgeEdge"]] = relationship(
+        back_populates="source_node",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        foreign_keys="KnowledgeEdge.source_node_id",
+    )
+    incoming_edges: Mapped[list["KnowledgeEdge"]] = relationship(
+        back_populates="target_node",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+        lazy="selectin",
+        foreign_keys="KnowledgeEdge.target_node_id",
+    )
+
+
+class KnowledgeEdge(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    __tablename__ = "knowledge_edges"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_node_id",
+            "target_node_id",
+            "relation_type",
+            "document_id",
+            name="uq_knowledge_edges_relation",
+        ),
+    )
+
+    source_node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    target_node_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("knowledge_nodes.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    document_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("documents.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
+    relation_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    weight: Mapped[float] = mapped_column(Float, nullable=False, default=1.0)
+    metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+
+    source_node: Mapped["KnowledgeNode"] = relationship(
+        back_populates="outgoing_edges",
+        lazy="selectin",
+        foreign_keys=[source_node_id],
+    )
+    target_node: Mapped["KnowledgeNode"] = relationship(
+        back_populates="incoming_edges",
+        lazy="selectin",
+        foreign_keys=[target_node_id],
+    )
+    document: Mapped["Document | None"] = relationship(lazy="selectin")

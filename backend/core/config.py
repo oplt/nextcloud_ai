@@ -5,7 +5,7 @@ import hashlib
 import json
 from functools import cached_property
 from pathlib import Path
-from typing import Literal, List
+from typing import List, Literal
 
 from pydantic import AnyHttpUrl, Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -68,6 +68,16 @@ class Settings(BaseSettings):
     OLLAMA_PULL_TIMEOUT_SECONDS: float = Field(default=900.0, ge=30.0, le=3600.0)
     OLLAMA_WARMUP_TIMEOUT_SECONDS: float = Field(default=120.0, ge=5.0, le=900.0)
 
+    CHAT_VERIFICATION_SHADOW_MODE: bool = False
+
+    RAG_GRAPH_EXPANSION_ENABLED: bool = True
+    RAG_GRAPH_EXPANSION_MAX_SEED_DOCUMENTS: int = Field(default=4, ge=1, le=20)
+    RAG_SESSION_SUMMARY_MESSAGE_THRESHOLD: int = Field(default=14, ge=6, le=200)
+    RAG_EVAL_METRICS_LOG_PATH: str | None = None
+
+    PRODUCT_INTELLIGENCE_ENABLED: bool = True
+    PRODUCT_INTELLIGENCE_EXTRACTION_MODE: Literal["off", "inline", "async"] = "inline"
+
     NEXTCLOUD_BRIDGE_SHARED_SECRET: SecretStr = Field(default=SecretStr("change-me"))
     NEXTCLOUD_BRIDGE_ISSUER: str = "nextcloud-bridge"
     NEXTCLOUD_BRIDGE_AUDIENCE: str = "fastapi-nextcloud"
@@ -84,6 +94,17 @@ class Settings(BaseSettings):
     NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS: int = Field(
         default=900, ge=60, le=604800
     )
+    EMAIL_CONNECTOR_FETCH_LIMIT: int = Field(default=100, ge=1, le=500)
+    EMAIL_INLINE_BLOB_MAX_BYTES: int = Field(default=2_000_000, ge=4096, le=20_000_000)
+    TASK_WEBHOOK_URL: str | None = None
+    TASK_WEBHOOK_TIMEOUT_SECONDS: float = Field(default=10.0, ge=1.0, le=120.0)
+
+    SENTRY_DSN: str | None = None
+    SENTRY_TRACES_SAMPLE_RATE: float = Field(default=0.0, ge=0.0, le=1.0)
+    METRICS_ENABLED: bool = True
+    METRICS_PATH: str = "/metrics"
+    REQUEST_ID_HEADER_NAME: str = "X-Request-ID"
+    TRACE_ID_HEADER_NAME: str = "X-Trace-ID"
 
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 

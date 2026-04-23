@@ -1,0 +1,140 @@
+services:
+  caddy:
+    image: caddy:2.10-alpine
+    restart: unless-stopped
+    depends_on:
+      - frontend
+      - backend
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+  postgres:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+
+  ollama:
+    image: ollama/ollama:latest
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+
+  backend:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      FRONTEND_URL: https://${PUBLIC_HOSTNAME}
+      AUTH_COOKIE_SECURE: "true"
+      CSRF_COOKIE_SECURE: "true"
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
+        alembic -c backend/alembic.ini upgrade head
+        uvicorn backend.main:app --host 0.0.0.0 --port 8000
+
+  worker:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      FRONTEND_URL: https://${PUBLIC_HOSTNAME}
+      AUTH_COOKIE_SECURE: "true"
+      CSRF_COOKIE_SECURE: "true"
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
+        celery -A backend.workers.celery_app.celery_app worker --loglevel=INFO
+
+  scheduler:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    env_file:
+      - ../backend/.env
+    environment:
+      APP_ENV: production
+      DEBUG: "false"
+      POSTGRES_HOST: postgres
+      REDIS_URL: redis://redis:6379/0
+      CELERY_BROKER_URL: redis://redis:6379/0
+      CELERY_RESULT_BACKEND: redis://redis:6379/0
+      OLLAMA_BASE_URL: http://ollama:11434
+      FRONTEND_URL: https://${PUBLIC_HOSTNAME}
+      AUTH_COOKIE_SECURE: "true"
+      CSRF_COOKIE_SECURE: "true"
+    depends_on:
+      - postgres
+      - redis
+      - ollama
+    command:
+      - /bin/sh
+      - -c
+      - |
+        export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
+        celery -A backend.workers.celery_app.celery_app beat --loglevel=INFO
+
+  frontend:
+    build:
+      context: ..
+      dockerfile: deployment/frontend.Dockerfile
+      args:
+        VITE_API_BASE_URL: ${FRONTEND_API_BASE_URL:-/api/v1}
+    restart: unless-stopped
+    depends_on:
+      - backend
+
+volumes:
+  caddy_config:
+  caddy_data:
+  postgres_data:
+  redis_data:
+  ollama_data:

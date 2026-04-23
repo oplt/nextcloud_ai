@@ -12,10 +12,12 @@ dependencies = [
   "asyncpg>=0.30,<1",
   "celery[redis]>=5.4,<6",
   "cryptography>=44,<46",
+  "email-validator>=2.2,<3",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "passlib[bcrypt]>=1.7,<2",
   "pgvector>=0.3,<1",
+  "prometheus-client>=0.21,<1",
   "psycopg[binary]>=3.2,<4",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.10,<3",
@@ -24,6 +26,7 @@ dependencies = [
   "python-docx>=1.2,<2",
   "python-multipart>=0.0.20,<1",
   "redis>=6,<7",
+  "sentry-sdk[fastapi]>=2.18,<3",
   "SQLAlchemy>=2.0.38,<3",
   "structlog>=25.4,<26",
   "uvicorn[standard]>=0.35,<1"
@@ -43,3 +46,5 @@ packages = ["backend"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+# ROS/Jazzy ships broken pytest plugins unless `lark` is installed; disable them for this repo.
+addopts = "-p no:launch_pytest -p no:launch_testing -p no:launch_ros"

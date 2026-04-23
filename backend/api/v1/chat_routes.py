@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Response, status
+from fastapi import APIRouter, Depends, Response, status
 
-from backend.api.deps import CurrentIdentityDep, DbSessionDep
+from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
 from backend.core.exceptions import NotFoundError
 from backend.db.repo.chat import ChatSessionRepository
 from backend.schemas.chat_schema import (
     ChatAskRequest,
     ChatAskResponse,
+    ChatMemoryPatchRequest,
     ChatSessionDetail,
     ChatSessionRead,
 )
@@ -18,7 +19,9 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 
 @router.post("/ask", response_model=ChatAskResponse)
 async def ask_question(
-    payload: ChatAskRequest, session: DbSessionDep, identity: CurrentIdentityDep
+    payload: ChatAskRequest,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("chat:use")),
 ) -> ChatAskResponse:
     return await ChatService(session).ask(
         user=identity.user, auth=identity.auth, request=payload
@@ -27,7 +30,8 @@ async def ask_question(
 
 @router.get("/sessions", response_model=list[ChatSessionRead])
 async def list_chat_sessions(
-    session: DbSessionDep, identity: CurrentIdentityDep
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("chat:use")),
 ) -> list[ChatSessionRead]:
     items = await ChatSessionRepository(session).list_by_user(
         identity.user.id, limit=100
@@ -37,7 +41,9 @@ async def list_chat_sessions(
 
 @router.get("/sessions/{session_id}", response_model=ChatSessionDetail)
 async def get_chat_session(
-    session_id: str, session: DbSessionDep, identity: CurrentIdentityDep
+    session_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("chat:use")),
 ) -> ChatSessionDetail:
     item = await ChatSessionRepository(session).get_with_messages(session_id)
     if item is None or item.user_id != identity.user.id:
@@ -45,9 +51,23 @@ async def get_chat_session(
     return ChatSessionDetail.model_validate(item)
 
 
+@router.patch("/sessions/{session_id}/memory", response_model=dict)
+async def patch_chat_session_memory(
+    session_id: str,
+    payload: ChatMemoryPatchRequest,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("chat:use")),
+) -> dict:
+    return await ChatService(session).patch_session_memory(
+        user=identity.user, session_id=session_id, payload=payload
+    )
+
+
 @router.delete("/sessions/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_chat_session(
-    session_id: str, session: DbSessionDep, identity: CurrentIdentityDep
+    session_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("chat:use")),
 ) -> Response:
     await ChatService(session).delete_session(session_id, actor=identity.user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)

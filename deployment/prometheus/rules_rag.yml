@@ -1,0 +1,74 @@
+# Prometheus alerting rules for Nextcloud AI RAG / chat pipeline.
+# Load with Prometheus: rule_files: [ "rules_rag.yml" ] (path relative to Prometheus config).
+#
+# Metric names match backend/core/observability.py (nextcloud_ai_*).
+#
+# Tune `for` and thresholds for your traffic; defaults assume a small pilot deployment.
+
+groups:
+  - name: nextcloud_ai_rag
+    interval: 30s
+    rules:
+      - alert: RagEmbeddingErrors
+        expr: |
+          sum(rate(nextcloud_ai_rag_embedding_seconds_count{outcome="error"}[10m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "RAG query embedding failures"
+          description: "Embedding calls are returning errors; check Ollama/upstream and /metrics nextcloud_ai_rag_embedding_seconds."
+
+      - alert: RagRetrievalStageErrors
+        expr: |
+          sum(rate(nextcloud_ai_rag_stage_errors_total{stage="retrieval"}[15m])) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Retrieval failures in chat pipeline"
+          description: "Increase in nextcloud_ai_rag_stage_errors_total{stage='retrieval'} — inspect DB, embeddings, and chunk visibility."
+
+      - alert: RagLlmStageErrors
+        expr: |
+          sum(rate(nextcloud_ai_rag_stage_errors_total{stage="llm"}[15m])) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "LLM failures during grounded chat"
+          description: "nextcloud_ai_rag_stage_errors_total{stage='llm'} rising — check Ollama/model availability and timeouts."
+
+      - alert: RagNoSourceAnswers
+        expr: |
+          (
+            sum(rate(nextcloud_ai_rag_verification_decisions_total{result="no_sources"}[30m]))
+            /
+            clamp_min(sum(rate(nextcloud_ai_rag_verification_decisions_total[30m])), 0.001)
+          ) > 0.35
+        for: 20m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High share of no-source chat outcomes"
+          description: "Many answers end with verification result no_sources — review indexing coverage and retrieval filters."
+
+      - alert: RagLowConfidenceAnswers
+        expr: |
+          sum(rate(nextcloud_ai_rag_chat_low_confidence_answers_total[30m])) > 0.2
+        for: 20m
+        labels:
+          severity: info
+        annotations:
+          summary: "Frequent low-confidence grounded answers"
+          description: "nextcloud_ai_rag_chat_low_confidence_answers_total increasing — review verification shadow mode and source quality."
+
+      - alert: ProductIntelligenceExtractionFailures
+        expr: |
+          sum(rate(nextcloud_ai_intelligence_extraction_failures_total[1h])) > 0.05
+        for: 15m
+        labels:
+          severity: info
+        annotations:
+          summary: "Product intelligence extraction errors after indexing"
+          description: "Check application logs for stack traces; intelligence is decoupled from chat search."
