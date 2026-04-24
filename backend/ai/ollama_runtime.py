@@ -94,7 +94,7 @@ class OllamaRuntimeService:
         *,
         ready: bool,
         available_models: list[str] | None = None,
-        missing_models: list[str] | None = None,
+        missing_models: list[str] | (None) = None,
         warmed_capabilities: list[str] | None = None,
         error: str | None = None,
     ) -> OllamaRuntimeStatus:
@@ -152,9 +152,14 @@ class OllamaRuntimeService:
 
     async def _list_models(self) -> list[str]:
         async with self._client(self.settings.OLLAMA_READINESS_TIMEOUT_SECONDS) as client:
-            response = await client.get(f"{self.base_url}/api/tags")
-            response.raise_for_status()
-        return self._extract_model_names(response.json())
+            try:
+                response = await client.get(f"{self.base_url}/api/tags")
+                response.raise_for_status()
+                return self._extract_model_names(response.json())
+            except httpx.HTTPError as exc:
+                # Log the specific error for debugging
+                print(f"Failed to list Ollama models: {self._format_http_error(exc)}")
+                raise
 
     async def _pull_model(self, model: str) -> None:
         async with self._client(self.settings.OLLAMA_PULL_TIMEOUT_SECONDS) as client:
@@ -201,8 +206,8 @@ class OllamaRuntimeService:
             return self._base_status(ready=True)
 
         try:
-            available_models = self._list_models()
-            available_models = sorted(await available_models)
+            available_models = await self._list_models()
+            available_models = sorted(available_models)
         except httpx.HTTPError as exc:
             return self._base_status(ready=False, error=self._format_http_error(exc))
 
@@ -247,6 +252,17 @@ class OllamaRuntimeService:
             if self.settings.effective_embedding_provider == "ollama":
                 await self._warm_embedding_model()
                 warmed_capabilities.append("embedding")
+            if self.settings.effective_llm_provider == "ollama":
+                warmed_capabilities.append("chat")
+        except httpx.HTTPError as exc:
+            return self._base_status(
+                ready=False,
+                available_models=status.available_models,
+                warmed_capabilities=warmed_capabilities,
+                error=self._format_http_error(exc),
+            )
+
+        try:
             if self.settings.effective_llm_provider == "ollama":
                 await self._warm_chat_model()
                 warmed_capabilities.append("chat")
