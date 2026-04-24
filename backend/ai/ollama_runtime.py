@@ -6,7 +6,7 @@ from typing import Literal
 
 import httpx
 
-from backend.core.config import Settings, settings
+from ..core.config import Settings, settings
 
 
 @dataclass(slots=True, frozen=True)
@@ -166,6 +166,18 @@ class OllamaRuntimeService:
 
     async def _warm_embedding_model(self) -> None:
         async with self._client(self.settings.OLLAMA_WARMUP_TIMEOUT_SECONDS) as client:
+            try:
+                response = await client.post(
+                    f"{self.base_url}/api/embed",
+                    json={"model": self.settings.OLLAMA_EMBEDDING_MODEL, "input": "warmup"},
+                )
+                response.raise_for_status()
+                return
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code != 404:
+                    raise
+
+            # Backward compatibility with older Ollama versions.
             response = await client.post(
                 f"{self.base_url}/api/embeddings",
                 json={"model": self.settings.OLLAMA_EMBEDDING_MODEL, "prompt": "warmup"},
