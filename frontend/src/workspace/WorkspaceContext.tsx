@@ -46,6 +46,7 @@ import type {
   ChatSessionSummary,
   Connector,
   ConnectorPayload,
+  ConnectorUpdatePayload,
   DocumentDetail,
   DocumentSummary,
   IntelligenceOverview,
@@ -75,6 +76,15 @@ type BackendStatus = {
   detail: string | null;
   checkedAt: string | null;
 };
+
+const HEALTH_POLL_INTERVAL_MS = 30_000;
+const ACTIVE_JOBS_POLL_INTERVAL_MS = 5_000;
+const IDLE_JOBS_POLL_INTERVAL_MS = 20_000;
+const DOCUMENTS_POLL_INTERVAL_MS = 15_000;
+
+function isActiveJob(job: SyncJob): boolean {
+  return ['pending', 'queued', 'running', 'processing', 'retrying'].includes(job.status);
+}
 
 export type WorkspaceContextValue = {
   user: User;
@@ -118,6 +128,7 @@ export type WorkspaceContextValue = {
   setChatFilters: Dispatch<SetStateAction<RetrievalFilterFormState>>;
   resetChatFilters: () => void;
   handleCreate: (payload: ConnectorPayload) => Promise<void>;
+  handleUpdateConnector: (connectorId: string, payload: ConnectorUpdatePayload) => Promise<void>;
   handleDelete: (connectorId: string) => Promise<void>;
   handleTestConnector: (connectorId: string) => Promise<void>;
   handleSyncConnector: (connectorId: string, fullReindex?: boolean) => Promise<void>;
@@ -302,7 +313,7 @@ export function WorkspaceProvider({
         setDocumentsViewLoading(true);
       }
       try {
-        await Promise.all([loadDocuments(), loadConnectors(), loadJobs({ silent: true })]);
+        await Promise.all([loadDocuments(), loadConnectors()]);
         setDocumentsViewError(null);
       } catch (cause) {
         const message = cause instanceof Error ? cause.message : 'Failed to load documents';
@@ -316,7 +327,7 @@ export function WorkspaceProvider({
         }
       }
     },
-    [loadConnectors, loadDocuments, loadJobs, toast],
+    [loadConnectors, loadDocuments, toast],
   );
 
   const loadData = useCallback(async () => {
@@ -424,7 +435,7 @@ export function WorkspaceProvider({
       if (document.visibilityState !== 'hidden') {
         void runCheck();
       }
-    }, 15000);
+    }, HEALTH_POLL_INTERVAL_MS);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
@@ -452,17 +463,21 @@ export function WorkspaceProvider({
       return;
     }
 
+    const jobsPollIntervalMs = jobs.some(isActiveJob)
+      ? ACTIVE_JOBS_POLL_INTERVAL_MS
+      : IDLE_JOBS_POLL_INTERVAL_MS;
+
     void loadJobs({ silent: jobs.length > 0 });
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== 'hidden') {
         void loadJobs({ silent: true });
       }
-    }, 5000);
+    }, jobsPollIntervalMs);
 
     return () => {
       window.clearInterval(intervalId);
     };
-  }, [jobs.length, loadJobs, user, workspaceSection]);
+  }, [jobs, loadJobs, user, workspaceSection]);
 
   useEffect(() => {
     if (!user || workspaceSection !== 'documents') {
@@ -474,7 +489,7 @@ export function WorkspaceProvider({
       if (document.visibilityState !== 'hidden') {
         void refreshDocumentsView({ silent: true });
       }
-    }, 5000);
+    }, DOCUMENTS_POLL_INTERVAL_MS);
 
     return () => {
       window.clearInterval(intervalId);
@@ -553,6 +568,16 @@ export function WorkspaceProvider({
         await createConnector(payload);
         await loadConnectors();
       }, 'Connector saved');
+    },
+    [loadConnectors, withFeedback],
+  );
+
+  const handleUpdateConnector = useCallback(
+    async (connectorId: string, payload: ConnectorUpdatePayload) => {
+      await withFeedback(async () => {
+        await updateConnector(connectorId, payload);
+        await loadConnectors();
+      }, 'Connector updated');
     },
     [loadConnectors, withFeedback],
   );
@@ -906,6 +931,7 @@ export function WorkspaceProvider({
     setChatFilters,
     resetChatFilters,
     handleCreate,
+    handleUpdateConnector,
     handleDelete,
     handleTestConnector,
     handleSyncConnector,

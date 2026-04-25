@@ -43,10 +43,8 @@ export function LoginPage({ onLogin, error, onDismissError }: LoginPageProps) {
         </Typography>
 
         <div className="login-help" role="note">
-          First login: run{' '}
-          <code>python -m backend.scripts.seed_admin</code> or{' '}
-          <code>docker compose exec backend python -m backend.scripts.seed_admin</code>
-          , then use{' '}
+          Docker startup seeds the admin user automatically. For local-only runs,
+          use <code>python -m scripts.seed_admin</code>, then sign in with{' '}
           <code>FIRST_SUPERUSER_EMAIL</code> and{' '}
           <code>FIRST_SUPERUSER_PASSWORD</code> from{' '}
           <code>backend/.env</code>.

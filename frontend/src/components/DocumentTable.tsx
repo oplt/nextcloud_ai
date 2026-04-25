@@ -4,9 +4,9 @@ import IconButton from '@mui/material/IconButton';
 import { AppButton } from './ui/AppButton';
 import { AppCard } from './ui/AppCard';
 import type { DocumentSummary } from '../types/api';
-import { formatDateTime, getDocumentTypeLabel } from '../utils/documentDisplay';
+import { formatConfidence, formatDateTime, getBusinessDomainLabel, getDocumentTypeLabel } from '../utils/documentDisplay';
 
-export type DocumentSortColumn = 'name' | 'type' | 'status' | 'updated';
+export type DocumentSortColumn = 'name' | 'type' | 'domain' | 'status' | 'confidence' | 'updated';
 export type SortDirection       = 'asc' | 'desc';
 
 type DocumentTableProps = {
@@ -29,7 +29,9 @@ type DocumentTableProps = {
 const columns: Array<{ key: DocumentSortColumn; label: string }> = [
   { key: 'name',    label: 'Name'    },
   { key: 'type',    label: 'Type'    },
+  { key: 'domain',  label: 'Domain'  },
   { key: 'status',  label: 'Status'  },
+  { key: 'confidence',  label: 'Confidence'  },
   { key: 'updated', label: 'Updated' },
 ];
 
@@ -43,6 +45,8 @@ function SkeletonRows() {
             <div className="skeleton skeleton-text" style={{ width: '40%', marginTop: 6 }} />
           </td>
           <td><div className="skeleton skeleton-text" style={{ width: '44%' }} /></td>
+          <td><div className="skeleton skeleton-pill" /></td>
+          <td><div className="skeleton skeleton-text" style={{ width: '70%' }} /></td>
           <td><div className="skeleton skeleton-pill" /></td>
           <td><div className="skeleton skeleton-text" style={{ width: '70%' }} /></td>
         </tr>
@@ -163,10 +167,13 @@ export function DocumentTable({
                       {getDocumentTypeLabel(doc)}
                     </strong>
                   </td>
+                  <td>{getBusinessDomainLabel(doc)}</td>
                   <td>
                     <span className={`pill pill--${doc.parse_status}`}>{doc.parse_status}</span>
+                    {doc.needs_review ? <span className="pill pill--warning">Needs review</span> : null}
                   </td>
-                  <td>{formatDateTime(doc.modified_at)}</td>
+                  <td title={doc.document_type_reason ?? undefined}>{formatConfidence(Math.min(doc.document_type_confidence, doc.business_domain_confidence))}</td>
+                  <td>{formatDateTime(doc.indexed_at ?? doc.modified_at)}</td>
                 </tr>
               ))
             )}

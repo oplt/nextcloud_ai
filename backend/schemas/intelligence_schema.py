@@ -6,7 +6,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field
 
-from backend.schemas.common_schema import TimestampedSchema
+from .common_schema import TimestampedSchema
 
 
 class DocumentInsightRead(TimestampedSchema):

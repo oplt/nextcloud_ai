@@ -5,6 +5,10 @@ services:
     depends_on:
       - frontend
       - backend
+      - nextcloud
+    environment:
+      PUBLIC_HOSTNAME: ${PUBLIC_HOSTNAME}
+      ACME_EMAIL: ${ACME_EMAIL}
     ports:
       - "80:80"
       - "443:443"
@@ -20,6 +24,11 @@ services:
       - ../backend/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
 
   redis:
     image: redis:7-alpine
@@ -27,12 +36,38 @@ services:
     command: ["redis-server", "--appendonly", "yes"]
     volumes:
       - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
 
   ollama:
     image: ollama/ollama:latest
     restart: unless-stopped
     volumes:
       - ollama_data:/root/.ollama
+
+  nextcloud-db:
+    image: mariadb:11
+    restart: unless-stopped
+    command:
+      - --transaction-isolation=READ-COMMITTED
+      - --log-bin=binlog
+      - --binlog-format=ROW
+      - --skip-innodb-read-only-compressed
+    environment:
+      MARIADB_ROOT_PASSWORD: ${NEXTCLOUD_DB_ROOT_PASSWORD:-nextcloud_root}
+      MARIADB_DATABASE: ${NEXTCLOUD_DB_NAME:-nextcloud}
+      MARIADB_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      MARIADB_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-nextcloud}
+    volumes:
+      - nextcloud_db_data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
 
   backend:
     build:
@@ -44,6 +79,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
+      PYTHONPATH: /app/backend
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -53,16 +89,23 @@ services:
       AUTH_COOKIE_SECURE: "true"
       CSRF_COOKIE_SECURE: "true"
     depends_on:
-      - postgres
-      - redis
-      - ollama
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    working_dir: /app/backend
     command:
       - /bin/sh
       - -c
       - |
+        set -eu
+
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        alembic -c backend/alembic.ini upgrade head
-        uvicorn backend.main:app --host 0.0.0.0 --port 8000
+        alembic -c alembic.ini upgrade head
+        python -m scripts.seed_admin
+        uvicorn main:app --host 0.0.0.0 --port 8000
 
   worker:
     build:
@@ -74,6 +117,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
+      PYTHONPATH: /app/backend
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -83,15 +127,19 @@ services:
       AUTH_COOKIE_SECURE: "true"
       CSRF_COOKIE_SECURE: "true"
     depends_on:
-      - postgres
-      - redis
-      - ollama
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    working_dir: /app/backend
     command:
       - /bin/sh
       - -c
       - |
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        celery -A backend.workers.celery_app.celery_app worker --loglevel=INFO
+        celery -A workers.celery_app:celery_app worker --loglevel=INFO
 
   scheduler:
     build:
@@ -103,6 +151,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
+      PYTHONPATH: /app/backend
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -112,15 +161,19 @@ services:
       AUTH_COOKIE_SECURE: "true"
       CSRF_COOKIE_SECURE: "true"
     depends_on:
-      - postgres
-      - redis
-      - ollama
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    working_dir: /app/backend
     command:
       - /bin/sh
       - -c
       - |
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        celery -A backend.workers.celery_app.celery_app beat --loglevel=INFO
+        celery -A workers.celery_app:celery_app beat --loglevel=INFO
 
   frontend:
     build:
@@ -132,9 +185,45 @@ services:
     depends_on:
       - backend
 
+  nextcloud:
+    image: nextcloud:31-apache
+    restart: unless-stopped
+    depends_on:
+      nextcloud-db:
+        condition: service_healthy
+      backend:
+        condition: service_started
+      frontend:
+        condition: service_started
+      worker:
+        condition: service_started
+      scheduler:
+        condition: service_started
+    environment:
+      MYSQL_HOST: nextcloud-db
+      MYSQL_DATABASE: ${NEXTCLOUD_DB_NAME:-nextcloud}
+      MYSQL_USER: ${NEXTCLOUD_DB_USER:-nextcloud}
+      MYSQL_PASSWORD: ${NEXTCLOUD_DB_PASSWORD:-nextcloud}
+      NEXTCLOUD_ADMIN_USER: ${NEXTCLOUD_ADMIN_USER:-admin}
+      NEXTCLOUD_ADMIN_PASSWORD: ${NEXTCLOUD_ADMIN_PASSWORD:-admin}
+      NEXTCLOUD_TRUSTED_DOMAINS: ${PUBLIC_HOSTNAME}
+      OVERWRITEHOST: ${PUBLIC_HOSTNAME}
+      OVERWRITEPROTOCOL: https
+      OVERWRITECLIURL: https://${PUBLIC_HOSTNAME}/nextcloud
+      NEXTCLOUD_OVERWRITE_WEBROOT: /nextcloud
+      NC_AI_BRIDGE_FASTAPI_BASE_URL: https://${PUBLIC_HOSTNAME}
+    env_file:
+      - ../backend/.env
+    volumes:
+      - nextcloud_data:/var/www/html
+      - ../nc_ai_bridge:/nc_ai_bridge_seed:ro
+      - ./scripts/nextcloud-configure-bridge.sh:/docker-entrypoint-hooks.d/before-starting/10-configure-bridge.sh:ro
+
 volumes:
   caddy_config:
   caddy_data:
   postgres_data:
   redis_data:
   ollama_data:
+  nextcloud_db_data:
+  nextcloud_data:

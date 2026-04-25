@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import Role
-from backend.db.repo.user import RoleRepository
-from backend.services.authorization_service import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
+from ..db.models import Role
+from ..db.repo.user import RoleRepository
+from .authorization_service import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
 
 
 SYSTEM_ROLE_DESCRIPTIONS: dict[str, str] = {

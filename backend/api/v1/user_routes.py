@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.core.exceptions import NotFoundError
-from backend.db.repo.user import RoleRepository, UserRepository
-from backend.schemas.user_schema import UserCreate, UserRead, UserUpdate
-from backend.services.audit_service import AuditService
-from backend.services.auth_service import AuthService
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...core.exceptions import NotFoundError
+from ...db.repo.user import RoleRepository, UserRepository
+from ...schemas.user_schema import UserCreate, UserRead, UserUpdate
+from ...services.audit_service import AuditService
+from ...services.auth_service import AuthService
 
 router = APIRouter(prefix="/users", tags=["users"])
 

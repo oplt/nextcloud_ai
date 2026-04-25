@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from sqlalchemy import or_, select
+from datetime import datetime, timezone
+
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import Connector, SyncJob
-from backend.db.repo.base import BaseRepository
+from ..models import Connector, SyncJob
+from .base import BaseRepository
 
 
 class SyncJobRepository(BaseRepository[SyncJob]):
@@ -46,6 +48,20 @@ class SyncJobRepository(BaseRepository[SyncJob]):
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+    async def reset_stale_running_jobs(self, *, message: str) -> int:
+        now = datetime.now(timezone.utc)
+        result = await self.session.execute(
+            update(SyncJob)
+            .where(SyncJob.status == "running")
+            .values(
+                status="failed",
+                completed_at=now,
+                error_message=message,
+            )
+        )
+        await self.session.commit()
+        return int(result.rowcount or 0)
 
     async def list_visible_to_user(
         self,

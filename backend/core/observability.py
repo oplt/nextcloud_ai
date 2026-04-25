@@ -10,7 +10,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
 
-from backend.core.config import settings
+from .config import settings
 
 try:  # pragma: no cover - optional runtime integration
     import sentry_sdk

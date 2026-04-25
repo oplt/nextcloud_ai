@@ -2,18 +2,31 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+import time
 
 from kombu import Connection
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.ai.ollama_runtime import OllamaRuntimeService, OllamaRuntimeStatus
-from backend.core.config import Settings, settings
+from ..ai.ollama_runtime import OllamaRuntimeService, OllamaRuntimeStatus
+from ..core.config import Settings, settings
 
 try:
     import redis.asyncio as redis
 except Exception:  # pragma: no cover - optional dependency guard
     redis = None
+
+_AI_RUNTIME_CACHE_TTL_SECONDS = 30.0
+_ai_runtime_cache_status: OllamaRuntimeStatus | None = None
+_ai_runtime_cache_checked_at = 0.0
+_ai_runtime_cache_lock: asyncio.Lock | None = None
+
+
+def _get_ai_runtime_cache_lock() -> asyncio.Lock:
+    global _ai_runtime_cache_lock
+    if _ai_runtime_cache_lock is None:
+        _ai_runtime_cache_lock = asyncio.Lock()
+    return _ai_runtime_cache_lock
 
 
 @dataclass(slots=True, frozen=True)
@@ -82,4 +95,25 @@ class HealthCheckService:
         return DependencyStatus.healthy()
 
     async def check_ai_runtime(self) -> OllamaRuntimeStatus:
-        return await OllamaRuntimeService(settings_obj=self.settings).check_readiness()
+        global _ai_runtime_cache_status, _ai_runtime_cache_checked_at
+
+        now = time.monotonic()
+        if (
+            _ai_runtime_cache_status is not None
+            and now - _ai_runtime_cache_checked_at < _AI_RUNTIME_CACHE_TTL_SECONDS
+        ):
+            return _ai_runtime_cache_status
+
+        lock = _get_ai_runtime_cache_lock()
+        async with lock:
+            now = time.monotonic()
+            if (
+                _ai_runtime_cache_status is not None
+                and now - _ai_runtime_cache_checked_at < _AI_RUNTIME_CACHE_TTL_SECONDS
+            ):
+                return _ai_runtime_cache_status
+
+            status = await OllamaRuntimeService(settings_obj=self.settings).check_readiness()
+            _ai_runtime_cache_status = status
+            _ai_runtime_cache_checked_at = now
+            return status

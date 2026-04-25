@@ -24,17 +24,57 @@ class OllamaEmbeddingClient:
         )
         self._client = httpx.AsyncClient(timeout=timeout_seconds, limits=limits)
 
-    async def embed_query(self, text: str) -> list[float]:
+    async def _embed_via_modern_endpoint(
+        self, input_payload: str | list[str]
+    ) -> list[list[float]]:
+        async with self._sem:
+            response = await self._client.post(
+                f"{self.base_url}/api/embed",
+                json={"model": self.model, "input": input_payload},
+            )
+        response.raise_for_status()
+        payload = response.json()
+        embeddings = payload.get("embeddings")
+        if not isinstance(embeddings, list):
+            raise ValueError("Ollama /api/embed response missing embeddings")
+        if embeddings and not isinstance(embeddings[0], list):
+            raise ValueError("Ollama /api/embed returned malformed embeddings payload")
+        return embeddings
+
+    async def _embed_via_legacy_endpoint(self, text: str) -> list[float]:
         async with self._sem:
             response = await self._client.post(
                 f"{self.base_url}/api/embeddings",
                 json={"model": self.model, "prompt": text},
             )
         response.raise_for_status()
-        return response.json()["embedding"]
+        payload = response.json()
+        embedding = payload.get("embedding")
+        if not isinstance(embedding, list):
+            raise ValueError("Ollama /api/embeddings response missing embedding")
+        return embedding
+
+    async def embed_query(self, text: str) -> list[float]:
+        try:
+            embeddings = await self._embed_via_modern_endpoint(text)
+            if not embeddings:
+                raise ValueError("Ollama /api/embed returned empty embeddings")
+            return embeddings[0]
+        except httpx.HTTPStatusError as exc:
+            # Backward compatibility with older Ollama versions that still expose /api/embeddings.
+            if exc.response.status_code != 404:
+                raise
+            return await self._embed_via_legacy_endpoint(text)
 
     async def embed_documents(self, texts: list[str]) -> list[list[float]]:
-        return list(await asyncio.gather(*[self.embed_query(text) for text in texts]))
+        if not texts:
+            return []
+        try:
+            return await self._embed_via_modern_endpoint(texts)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            return list(await asyncio.gather(*[self._embed_via_legacy_endpoint(text) for text in texts]))
 
     async def aclose(self) -> None:
         await self._client.aclose()

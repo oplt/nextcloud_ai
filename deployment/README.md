@@ -4,6 +4,7 @@ Production stack lives in [deployment/docker-compose.yml](/home/polat/Desktop/Pr
 
 - Caddy reverse proxy with automatic TLS
 - Persistent volumes for Postgres, Redis append-only data, Ollama models, and Caddy state
+- Nextcloud + MariaDB with bundled `nc_ai_bridge` (bridge page route is `/workspace` so the app menu resolves under `/apps/nc_ai_bridge/` instead of the bare origin)
 - Separate backend, worker, scheduler, and static frontend containers
 - Prometheus-compatible metrics at `/metrics` (RAG/chat counters in `backend/core/observability.py`)
 - Example alert rules: [prometheus/rules_rag.yml](prometheus/rules_rag.yml)
@@ -77,6 +78,7 @@ make deploy-restore-db BACKUP_FILE=deployment/backups/postgres-YYYYMMDD-HHMMSS.s
 
 - `/api/*`, `/docs`, `/redoc`, `/openapi.json`, `/health` -> backend
 - `/metrics` -> backend
+- `/nextcloud*` -> Nextcloud
 - all other paths -> static frontend
 
 ## Notes

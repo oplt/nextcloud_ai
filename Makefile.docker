@@ -1,0 +1,79 @@
+.PHONY: docker-up docker-up-detached docker-up-rebuild docker-up-open docker-open-nextcloud docker-wait-nextcloud docker-nextcloud-up docker-nextcloud-down docker-down docker-build docker-logs docker-ps docker-restart docker-seed-admin docker-backend-shell docker-db-shell docker-backend-test docker-frontend-lint docker-frontend-build docker-check
+
+DOCKER_COMPOSE ?= docker compose
+NEXTCLOUD_URL ?= http://localhost:8081
+NEXTCLOUD_LOGIN_URL ?= http://localhost:8081/login
+BROWSER_OPEN ?= python3 -m webbrowser -t
+
+docker-up:
+	$(DOCKER_COMPOSE) up
+
+docker-up-detached:
+	$(DOCKER_COMPOSE) up -d
+
+docker-up-rebuild:
+	$(DOCKER_COMPOSE) up --build --force-recreate -d
+
+docker-up-open:
+	$(DOCKER_COMPOSE) up -d
+	$(MAKE) docker-wait-nextcloud
+	$(BROWSER_OPEN) "$(NEXTCLOUD_LOGIN_URL)"
+
+docker-open-nextcloud:
+	$(MAKE) docker-wait-nextcloud
+	$(BROWSER_OPEN) "$(NEXTCLOUD_LOGIN_URL)"
+
+docker-wait-nextcloud:
+	@echo "Waiting for Nextcloud at $(NEXTCLOUD_LOGIN_URL)..."
+	@for i in $$(seq 1 90); do \
+		if curl -fsS -o /dev/null "$(NEXTCLOUD_LOGIN_URL)"; then \
+			echo "Nextcloud ready"; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "Timed out waiting for Nextcloud: $(NEXTCLOUD_LOGIN_URL)" >&2; \
+	exit 1
+
+# Nextcloud + MariaDB only (host runs backend/frontend via Makefile.local).
+docker-nextcloud-up:
+	$(DOCKER_COMPOSE) up -d nextcloud-db nextcloud
+
+docker-nextcloud-down:
+	$(DOCKER_COMPOSE) stop nextcloud nextcloud-db
+
+docker-down:
+	$(DOCKER_COMPOSE) down
+
+docker-build:
+	$(DOCKER_COMPOSE) build
+
+docker-logs:
+	$(DOCKER_COMPOSE) logs -f
+
+docker-ps:
+	$(DOCKER_COMPOSE) ps
+
+docker-restart:
+	$(DOCKER_COMPOSE) down
+	$(DOCKER_COMPOSE) up -d
+
+docker-seed-admin:
+	$(DOCKER_COMPOSE) exec backend python -m scripts.seed_admin
+
+docker-backend-shell:
+	$(DOCKER_COMPOSE) exec backend sh
+
+docker-db-shell:
+	$(DOCKER_COMPOSE) exec postgres psql -U $$POSTGRES_USER -d $$POSTGRES_DB
+
+docker-backend-test:
+	$(DOCKER_COMPOSE) exec backend pytest
+
+docker-frontend-lint:
+	$(DOCKER_COMPOSE) exec frontend npm run lint
+
+docker-frontend-build:
+	$(DOCKER_COMPOSE) exec frontend npm run build
+
+docker-check: docker-backend-test docker-frontend-lint docker-frontend-build

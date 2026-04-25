@@ -8,17 +8,17 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.connectors.nextcloud.debounce_store import (
+from ..connectors.nextcloud.debounce_store import (
     DebounceStore,
     RedisDebounceStore,
 )
-from backend.connectors.nextcloud.schemas import NextcloudWebhookEvent
-from backend.core.config import settings
-from backend.db.models import Connector
-from backend.db.repo.connector import ConnectorRepository
-from backend.db.repo.document import DocumentRepository
-from backend.db.repo.sync_job import SyncJobRepository
-from backend.services.job_service import JobService
+from ..connectors.nextcloud.schemas import NextcloudWebhookEvent
+from ..core.config import settings
+from ..db.models import Connector
+from ..db.repo.connector import ConnectorRepository
+from ..db.repo.document import DocumentRepository
+from ..db.repo.sync_job import SyncJobRepository
+from .job_service import JobService
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,7 @@ class NextcloudAutomationService:
         normalized_path = self._normalize_path(event.path)
         action = await self._select_webhook_action(connector, event, normalized_path)
         if action == "reindex" and normalized_path is not None:
-            from backend.workers.indexing_tasks import enqueue_document_reindex
+            from ..workers.indexing_tasks import enqueue_document_reindex
 
             document = await self.document_repo.get_by_connector_and_file_path(
                 connector.id, normalized_path
@@ -164,7 +164,7 @@ class NextcloudAutomationService:
                 reason="duplicate_job",
             )
 
-        from backend.workers.indexing_tasks import enqueue_connector_sync_job
+        from ..workers.indexing_tasks import enqueue_connector_sync_job
 
         task = enqueue_connector_sync_job(str(reservation.job.id))
         reservation.job.worker_task_id = task.id
@@ -219,7 +219,7 @@ class NextcloudAutomationService:
                 summary.skipped_duplicate_job += 1
                 continue
 
-            from backend.workers.indexing_tasks import enqueue_connector_sync_job
+            from ..workers.indexing_tasks import enqueue_connector_sync_job
 
             task = enqueue_connector_sync_job(str(reservation.job.id))
             reservation.job.worker_task_id = task.id

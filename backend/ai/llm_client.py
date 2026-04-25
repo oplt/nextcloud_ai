@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Protocol
 
-from backend.ai.ollama_llm_client import OllamaLLMClient
-from backend.core.config import settings
+from .ollama_llm_client import OllamaLLMClient
+from ..core.config import settings
 
 
 class LLMClientProtocol(Protocol):

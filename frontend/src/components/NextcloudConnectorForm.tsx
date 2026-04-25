@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import IconButton from '@mui/material/IconButton';
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined';
@@ -9,10 +9,12 @@ import { AppCard } from './ui/AppCard';
 import { AppCheckbox } from './ui/AppCheckbox';
 import { AppSelectField } from './ui/AppSelectField';
 import { AppTextField } from './ui/AppTextField';
-import type { ConnectorPayload } from '../types/api';
+import type { Connector, ConnectorPayload, ConnectorUpdatePayload } from '../types/api';
 
 type NextcloudConnectorFormProps = {
-  onSubmit: (payload: ConnectorPayload) => Promise<void>;
+  editingConnector?: Connector | null;
+  onSubmit: (payload: ConnectorPayload | ConnectorUpdatePayload) => Promise<void>;
+  onCancelEdit?: () => void;
 };
 
 function createInitialForm(connectorType: 'nextcloud' | 'imap' = 'nextcloud'): ConnectorPayload {
@@ -41,10 +43,55 @@ function createInitialForm(connectorType: 'nextcloud' | 'imap' = 'nextcloud'): C
   };
 }
 
-export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps) {
-  const [form, setForm]           = useState<ConnectorPayload>(createInitialForm());
+function connectorToForm(connector: Connector): ConnectorPayload {
+  const metadata = connector.metadata_json ?? {};
+  const connectorType = connector.connector_type === 'imap' ? 'imap' : 'nextcloud';
+  return {
+    connector_type: connectorType,
+    display_name: connector.display_name,
+    base_url: connector.base_url,
+    username: connector.username,
+    secret: '',
+    root_path: connector.root_path,
+    verify_tls: typeof metadata.verify_tls === 'boolean' ? metadata.verify_tls : true,
+    port: typeof metadata.port === 'number' ? metadata.port : connectorType === 'imap' ? 993 : undefined,
+    use_ssl: typeof metadata.use_ssl === 'boolean' ? metadata.use_ssl : connectorType === 'imap' ? true : undefined,
+    search_criteria:
+      typeof metadata.search_criteria === 'string' ? metadata.search_criteria : connectorType === 'imap' ? 'ALL' : undefined,
+  };
+}
+
+function buildUpdatePayload(form: ConnectorPayload): ConnectorUpdatePayload {
+  const payload: ConnectorUpdatePayload = {
+    display_name: form.display_name.trim(),
+    base_url: form.base_url.trim(),
+    username: form.username.trim(),
+    root_path: form.root_path.trim(),
+    verify_tls: Boolean(form.verify_tls),
+  };
+
+  if (form.secret.trim()) {
+    payload.secret = form.secret;
+  }
+
+  if (form.connector_type === 'imap') {
+    payload.port = form.port ?? 993;
+    payload.use_ssl = Boolean(form.use_ssl);
+    payload.search_criteria = (form.search_criteria ?? 'ALL').trim() || 'ALL';
+  }
+
+  return payload;
+}
+
+export function NextcloudConnectorForm({ editingConnector = null, onSubmit, onCancelEdit }: NextcloudConnectorFormProps) {
+  const [form, setForm] = useState<ConnectorPayload>(createInitialForm());
   const [showSecret, setShowSecret] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    setForm(editingConnector ? connectorToForm(editingConnector) : createInitialForm());
+    setShowSecret(false);
+  }, [editingConnector]);
 
   const update = (key: keyof ConnectorPayload, value: string | boolean | number | null) => {
     setForm((f) => ({ ...f, [key]: value }));
@@ -52,12 +99,13 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
 
   const connectorType = form.connector_type ?? 'nextcloud';
   const isImap = connectorType === 'imap';
+  const isEditing = editingConnector !== null;
 
   const isValid =
     form.display_name.trim() &&
     form.base_url.trim() &&
     form.username.trim() &&
-    form.secret &&
+    (isEditing || form.secret) &&
     form.root_path.trim();
 
   const handleSubmit = async (e: FormEvent<HTMLFormElement>) => {
@@ -65,8 +113,19 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
     if (!isValid) return;
     setSubmitting(true);
     try {
-      await onSubmit(form);
-      setForm((f) => ({ ...createInitialForm(connectorType), ...f, secret: '' }));
+      await onSubmit(
+        isEditing
+          ? buildUpdatePayload(form)
+          : {
+              ...form,
+              display_name: form.display_name.trim(),
+              base_url: form.base_url.trim(),
+              username: form.username.trim(),
+              root_path: form.root_path.trim(),
+              search_criteria: isImap ? (form.search_criteria ?? 'ALL').trim() || 'ALL' : undefined,
+            },
+      );
+      setForm(createInitialForm(connectorType));
       setShowSecret(false);
     } finally {
       setSubmitting(false);
@@ -76,10 +135,10 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
   const eyeLabel = showSecret ? 'Hide secret' : 'Show secret';
 
   return (
-    <form onSubmit={handleSubmit} aria-label="New connector">
+    <form onSubmit={handleSubmit} aria-label={isEditing ? 'Update connector' : 'New connector'}>
       <AppCard className="card form-card">
         <header className="panel-header">
-          <h3>New Connector</h3>
+          <h3>{isEditing ? 'Update Connector' : 'New Connector'}</h3>
         </header>
 
         <div>
@@ -87,6 +146,7 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
           id="connector-type"
           label="Connector Type"
           value={connectorType}
+          disabled={isEditing}
           onChange={(event) => {
             const nextType = event.target.value as 'nextcloud' | 'imap';
             setForm(createInitialForm(nextType));
@@ -113,13 +173,13 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
             label={isImap ? 'IMAP Host' : 'Base URL'}
             value={form.base_url}
             onChange={(e) => update('base_url', e.target.value)}
-            placeholder={isImap ? 'imap.example.com or imaps://outlook.office365.com' : 'http://localhost or https://cloud.example.com'}
+            placeholder={isImap ? 'imap.example.com or imaps://outlook.office365.com' : 'http://localhost:8080 or https://cloud.example.com'}
             autoComplete="off"
           />
           <small>
             {isImap
               ? 'Use the IMAP host for the shared mailbox. Exchange Online usually exposes `outlook.office365.com` over IMAP.'
-              : 'Use the full Nextcloud origin. Local HTTP installs usually look like `http://localhost`.'}
+              : 'Use the full Nextcloud origin. Local installs usually look like `http://localhost:8080`.'}
           </small>
         </label>
 
@@ -153,6 +213,9 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
               {showSecret ? <VisibilityOffOutlinedIcon fontSize="small" /> : <VisibilityOutlinedIcon fontSize="small" />}
             </IconButton>
           </div>
+          {isEditing ? (
+            <small>Leave blank to keep current secret.</small>
+          ) : null}
         </label>
 
         <AppTextField
@@ -205,9 +268,16 @@ export function NextcloudConnectorForm({ onSubmit }: NextcloudConnectorFormProps
           <span>Verify TLS certificate</span>
         </label>
 
-          <AppButton type="submit" disabled={submitting || !isValid}>
-            {submitting ? 'Saving…' : 'Save Connector'}
-          </AppButton>
+          <div className="form-actions">
+            {isEditing ? (
+              <AppButton type="button" variant="outlined" onClick={onCancelEdit}>
+                Cancel
+              </AppButton>
+            ) : null}
+            <AppButton type="submit" disabled={submitting || !isValid}>
+              {submitting ? (isEditing ? 'Updating…' : 'Saving…') : isEditing ? 'Update Connector' : 'Save Connector'}
+            </AppButton>
+          </div>
         </div>
       </AppCard>
     </form>

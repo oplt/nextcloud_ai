@@ -10,21 +10,21 @@ from uuid import UUID
 import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.config import settings
-from backend.core.security import AuthContext
-from backend.db.models import Document, DocumentInsight, WorkflowTask
-from backend.db.repo.document import DocumentRepository
-from backend.db.repo.intelligence import (
+from ..core.config import settings
+from ..core.security import AuthContext
+from ..db.models import Document, DocumentInsight, WorkflowTask
+from ..db.repo.document import DocumentRepository
+from ..db.repo.intelligence import (
     DocumentInsightRepository,
     KnowledgeEdgeDraft,
     KnowledgeGraphRepository,
     KnowledgeNodeDraft,
     WorkflowTaskRepository,
 )
-from backend.parsers.document_parser import ParsedDocument
-from backend.schemas.document_schema import DocumentDetail
-from backend.services import intelligence_provenance as intel_prov
-from backend.schemas.intelligence_schema import (
+from ..parsers.document_parser import ParsedDocument
+from ..schemas.document_schema import DocumentDetail
+from . import intelligence_provenance as intel_prov
+from ..schemas.intelligence_schema import (
     IntelligenceOpenTaskRead,
     IntelligenceOverviewRead,
     IntelligenceSpotlightDocumentRead,
@@ -117,18 +117,28 @@ class ProductIntelligenceService:
         text = parsed_document.text.strip()
         lowered = text.lower()
         metadata = dict(document.metadata_json or {})
-        classification, confidence, signals = self._classify_document(
-            document=document, lowered=lowered
-        )
+        classification = document.document_type or "unclassified"
+        confidence = document.document_type_confidence or 0.0
+        signals = [
+            document.document_type_source,
+            document.business_domain,
+            document.business_domain_source,
+        ]
 
         classification_insight = DocumentInsight(
             document_id=document.id,
             insight_type="classification",
             title=f"{classification.replace('_', ' ').title()} document",
-            summary="Classified from file name, source metadata, and content signals.",
+            summary=document.document_type_reason or "Document classification stored on the document record.",
             confidence=confidence,
             payload_json=intel_prov.merge_provenance(
-                {"classification": classification, "signals": signals},
+                {
+                    "classification": classification,
+                    "document_type": document.document_type,
+                    "business_domain": document.business_domain,
+                    "signals": signals,
+                    "confidence": confidence,
+                },
                 intel_prov.provenance_block(
                     methods=[
                         intel_prov.METHOD_FILENAME_KEYWORDS,
@@ -311,8 +321,8 @@ class ProductIntelligenceService:
         spotlight_documents: list[IntelligenceSpotlightDocumentRead] = []
         for document in documents:
             insight_types = [insight.insight_type for insight in document.insights]
-            classification = self._extract_classification(document.insights)
-            if classification:
+            classification = document.document_type or self._extract_classification(document.insights)
+            if classification and classification != "general":
                 type_counter[classification] += 1
             for task in document.workflow_tasks:
                 task_status_counter[task.status] += 1

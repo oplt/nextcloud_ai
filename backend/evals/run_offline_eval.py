@@ -9,14 +9,21 @@ from datetime import datetime, timezone
 from pathlib import Path
 from uuid import UUID
 
-from backend.core.config import settings
-from backend.core.security import AuthContext
-from backend.evals.offline_scorer import append_metrics_log, load_gold_rows, precision_at_k
-from backend.services.retrieval_service import RetrievalService
+from ..core.config import settings
+from ..core.security import AuthContext
+from .offline_scorer import (
+    answer_correctness,
+    append_metrics_log,
+    citation_correctness,
+    load_gold_rows,
+    precision_at_k,
+    retrieval_hit_rate,
+)
+from ..services.retrieval_service import RetrievalService
 
 
 async def _run_with_db(gold_path: Path) -> list[dict[str, object]]:
-    from backend.db.session import AsyncSessionLocal
+    from ..db.session import AsyncSessionLocal
 
     rows = load_gold_rows(gold_path)
     out: list[dict[str, object]] = []
@@ -41,13 +48,20 @@ async def _run_with_db(gold_path: Path) -> list[dict[str, object]]:
                 document_ids=exp_uuids if exp_uuids else None,
             )
             retrieved = [str(s.document_id) for s in res.sources]
+            answer_text = "\n".join(source.content or source.snippet for source in res.sources)
             p3 = precision_at_k(expected, retrieved, 3)
             p6 = precision_at_k(expected, retrieved, 6)
             rec = {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "id": row.get("id"),
+                "retrieval_hit_rate": retrieval_hit_rate(expected, retrieved, 6),
                 "precision@3": p3,
                 "precision@6": p6,
+                "answer_correctness": answer_correctness(
+                    [str(x) for x in row.get("expected_answer_contains") or []],
+                    answer_text,
+                ),
+                "citation_correctness": citation_correctness(expected, retrieved),
                 "failure_rate": 0.0 if res.sources else 1.0,
                 "retrieval_debug": res.retrieval_debug,
             }
@@ -67,8 +81,11 @@ def main() -> None:
             {
                 "ts": datetime.now(timezone.utc).isoformat(),
                 "id": r.get("id"),
+                "retrieval_hit_rate": 0.0,
                 "precision@3": 0.0,
                 "precision@6": 0.0,
+                "answer_correctness": 0.0,
+                "citation_correctness": 0.0,
                 "failure_rate": 1.0,
                 "mode": "structure_only",
             }

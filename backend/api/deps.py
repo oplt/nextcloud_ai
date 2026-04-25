@@ -7,13 +7,13 @@ import jwt
 from fastapi import Depends, Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.api.auth import extract_access_token
-from backend.core.exceptions import AuthenticationError, AuthorizationError
-from backend.core.security import AuthContext, app_token_service
-from backend.db.models import User
-from backend.db.repo.user import UserRepository
-from backend.db.session import get_db_session
-from backend.services.authorization_service import ensure_permission
+from .auth import extract_access_token
+from ..core.exceptions import AuthenticationError, AuthorizationError
+from ..core.security import AuthContext, app_token_service
+from ..db.models import User
+from ..db.repo.user import UserRepository
+from ..db.session import get_db_session
+from ..services.authorization_service import ensure_permission
 
 
 DbSessionDep = Annotated[AsyncSession, Depends(get_db_session)]

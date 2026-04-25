@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.schemas.intelligence_schema import IntelligenceOverviewRead
-from backend.services.product_intelligence_service import ProductIntelligenceService
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...schemas.intelligence_schema import IntelligenceOverviewRead
+from ...services.product_intelligence_service import ProductIntelligenceService
 
 router = APIRouter(prefix="/intelligence", tags=["intelligence"])
 

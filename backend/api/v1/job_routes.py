@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.schemas.job_schema import SyncJobRead
-from backend.services.job_service import JobService
-from backend.workers.indexing_tasks import enqueue_connector_sync_job
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...schemas.job_schema import SyncJobRead
+from ...services.job_service import JobService
+from ...workers.indexing_tasks import enqueue_connector_sync_job
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 

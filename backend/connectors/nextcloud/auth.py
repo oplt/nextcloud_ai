@@ -6,10 +6,10 @@ from typing import Any
 
 import jwt
 
-from backend.connectors.nextcloud.config import NextcloudBridgeSettings
-from backend.connectors.nextcloud.exceptions import BridgeTokenError
-from backend.connectors.nextcloud.replay_store import ReplayStore
-from backend.connectors.nextcloud.schemas import BridgeTokenClaims
+from .config import NextcloudBridgeSettings
+from .exceptions import BridgeTokenError
+from .replay_store import ReplayStore
+from .schemas import BridgeTokenClaims
 
 
 class BridgeTokenCodec:

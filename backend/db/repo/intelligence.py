@@ -8,16 +8,16 @@ from sqlalchemy import delete, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.core.security import AuthContext
-from backend.db.models import (
+from ...core.security import AuthContext
+from ..models import (
     Document,
     DocumentInsight,
     KnowledgeEdge,
     KnowledgeNode,
     WorkflowTask,
 )
-from backend.db.repo.base import BaseRepository
-from backend.db.repo.document import DocumentRepository
+from .base import BaseRepository
+from .document import DocumentRepository
 
 
 @dataclass(slots=True)

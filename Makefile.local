@@ -1,0 +1,127 @@
+.PHONY: local-bootstrap local-install-backend local-install-frontend local-db-upgrade local-db-prepare local-db-revision local-backend local-frontend local-worker local-scheduler local-seed-admin local-redis local-ollama local-dev local-open-nextcloud local-wait-nextcloud local-sync-nc-bridge local-backend-test local-frontend-lint local-frontend-build local-check
+
+PYTHON ?= python3.12
+PROJECT_DIR := $(shell pwd)
+VENV := $(PROJECT_DIR)/.venv
+BACKEND_DIR := $(PROJECT_DIR)/backend
+FRONTEND_DIR := $(PROJECT_DIR)/frontend
+# Point at your own Nextcloud base URL if it is not localhost.
+NEXTCLOUD_URL ?= http://localhost:8080
+NEXTCLOUD_LOGIN_URL ?= http://localhost:8080/login
+NEXTCLOUD_HEALTH_URL ?= http://localhost:8080/status.php
+NEXTCLOUD_OPEN_URL ?= $(NEXTCLOUD_URL)
+NEXTCLOUD_WAIT_SEC ?= 25
+BROWSER_OPEN ?= python3 -m webbrowser -t
+
+local-bootstrap:
+	@test -f .env || cp .env.example .env
+	@test -f backend/.env || cp backend/.env.example backend/.env
+	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+
+local-install-backend:
+	@if [ ! -d "$(VENV)" ]; then \
+		echo "Creating Python virtualenv..."; \
+		$(PYTHON) -m venv $(VENV); \
+	fi
+	$(VENV)/bin/pip install --upgrade pip
+	$(VENV)/bin/pip install -e "./backend[dev]"
+
+local-install-frontend:
+	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
+		echo "Installing frontend dependencies..."; \
+		npm --prefix frontend ci; \
+	else \
+		echo "Frontend dependencies already installed."; \
+	fi
+
+local-redis:
+	@if redis-cli ping >/dev/null 2>&1; then \
+		echo "Redis already running on localhost:6379"; \
+	else \
+		echo "Redis is not running. Start it with:"; \
+		echo "  sudo systemctl start redis-server"; \
+		echo "or:"; \
+		echo "  redis-server"; \
+		exit 1; \
+	fi
+
+local-ollama:
+	ollama serve
+
+local-db-upgrade:
+	@echo "Applying Alembic migrations..."
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/alembic -c backend/alembic.ini upgrade head
+
+local-db-revision:
+	@if [ -z "$(m)" ]; then \
+		echo "Usage: make local-db-revision m='describe change'"; \
+		exit 1; \
+	fi
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/alembic -c backend/alembic.ini revision --autogenerate -m "$(m)"
+
+local-db-prepare: local-db-upgrade local-seed-admin
+	
+local-backend: local-db-prepare
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+
+local-worker:
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/celery -A backend.workers.celery_app:celery_app worker --loglevel=INFO
+
+local-scheduler:
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/celery -A backend.workers.celery_app:celery_app beat --loglevel=INFO
+
+local-seed-admin:
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/python -m backend.scripts.seed_admin
+
+local-frontend:
+	npm --prefix frontend run dev
+
+local-dev: local-bootstrap local-install-backend local-install-frontend local-redis
+	@chmod +x $(PROJECT_DIR)/scripts/local-dev-spawn.sh
+	@bash $(PROJECT_DIR)/scripts/local-dev-spawn.sh
+	@echo "Starting frontend dev server..."
+	@$(MAKE) local-frontend & \
+	$(MAKE) local-open-nextcloud
+
+local-open-nextcloud:
+	@if [ "$(LOCAL_SKIP_NEXTCLOUD)" = "1" ]; then \
+		echo "LOCAL_SKIP_NEXTCLOUD=1 — skip wait + browser"; \
+	else \
+		chmod +x $(PROJECT_DIR)/scripts/local-nextcloud-ping.sh; \
+		echo "Waiting for Nextcloud at $(NEXTCLOUD_HEALTH_URL) ($(NEXTCLOUD_WAIT_SEC)s max)…"; \
+		echo "Tip: set NEXTCLOUD_URL / NEXTCLOUD_HEALTH_URL if yours differs; LOCAL_SKIP_NEXTCLOUD=1 skips this step."; \
+		if bash "$(PROJECT_DIR)/scripts/local-nextcloud-ping.sh" "$(NEXTCLOUD_HEALTH_URL)" "$(NEXTCLOUD_WAIT_SEC)"; then \
+			echo "Nextcloud ready — opening browser"; \
+			$(BROWSER_OPEN) "$(NEXTCLOUD_OPEN_URL)"; \
+		else \
+			echo "" >&2; \
+			echo "Nextcloud not reachable at $(NEXTCLOUD_HEALTH_URL) — not opening browser (dev terminals already started)." >&2; \
+			echo "  When your server is up: make local-open-nextcloud" >&2; \
+			echo "  Skip wait next time: LOCAL_SKIP_NEXTCLOUD=1 make local-dev" >&2; \
+		fi; \
+	fi
+
+local-wait-nextcloud:
+	@chmod +x $(PROJECT_DIR)/scripts/local-nextcloud-ping.sh
+	@echo "Waiting for Nextcloud at $(NEXTCLOUD_HEALTH_URL) ($(NEXTCLOUD_WAIT_SEC)s max)…"
+	@bash "$(PROJECT_DIR)/scripts/local-nextcloud-ping.sh" "$(NEXTCLOUD_HEALTH_URL)" "$(NEXTCLOUD_WAIT_SEC)" && echo "Nextcloud ready." || \
+		( echo "Timed out: $(NEXTCLOUD_HEALTH_URL)" >&2; \
+		  echo "Ensure Nextcloud is running or adjust NEXTCLOUD_HEALTH_URL." >&2; \
+		  exit 1 )
+
+# Fixes AI Workspace menu pointing at / (404): copies bridge app into Nextcloud. Example:
+#   NEXTCLOUD_HTML_ROOT=/var/www/html make local-sync-nc-bridge
+local-sync-nc-bridge:
+	@chmod +x $(PROJECT_DIR)/scripts/sync-nc-ai-bridge-to-nextcloud.sh
+	@NEXTCLOUD_HTML_ROOT="$(NEXTCLOUD_HTML_ROOT)" bash "$(PROJECT_DIR)/scripts/sync-nc-ai-bridge-to-nextcloud.sh"
+
+local-backend-test:
+	cd $(PROJECT_DIR) && PYTHONPATH=$(PROJECT_DIR) $(VENV)/bin/pytest backend
+
+local-frontend-lint:
+	npm --prefix frontend run lint
+
+local-frontend-build:
+	npm --prefix frontend run build
+
+local-check: local-backend-test local-frontend-lint local-frontend-build

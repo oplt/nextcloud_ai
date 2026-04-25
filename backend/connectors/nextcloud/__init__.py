@@ -1,12 +1,12 @@
-from backend.connectors.nextcloud.auth import BridgeTokenCodec
-from backend.connectors.nextcloud.client import AsyncNextcloudClient
-from backend.connectors.nextcloud.config import (
+from .auth import BridgeTokenCodec
+from .client import AsyncNextcloudClient
+from .config import (
     NextcloudBridgeSettings,
     NextcloudConnectorConfig,
     get_nextcloud_settings,
 )
-from backend.connectors.nextcloud.permissions import NextcloudPermissionService
-from backend.connectors.nextcloud.sync import NextcloudSyncService
+from .permissions import NextcloudPermissionService
+from .sync import NextcloudSyncService
 
 __all__ = [
     "AsyncNextcloudClient",

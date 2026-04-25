@@ -4,7 +4,7 @@ from functools import lru_cache
 
 from pydantic import AnyHttpUrl, BaseModel, SecretStr
 
-from backend.core.config import settings
+from ...core.config import settings
 
 
 class NextcloudBridgeSettings(BaseModel):

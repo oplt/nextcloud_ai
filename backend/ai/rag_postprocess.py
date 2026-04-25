@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 
-from backend.schemas.chat_schema import ChatSource
+from ..schemas.chat_schema import ChatSource
 
 
 def _overlap_score(question: str, source: ChatSource) -> float:

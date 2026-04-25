@@ -6,8 +6,8 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import ChatMessage, ChatSession
-from backend.db.repo.base import BaseRepository
+from ..models import ChatMessage, ChatSession
+from .base import BaseRepository
 
 
 class ChatSessionRepository(BaseRepository[ChatSession]):

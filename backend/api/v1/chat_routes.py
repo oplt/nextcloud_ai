@@ -2,17 +2,17 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response, status
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.core.exceptions import NotFoundError
-from backend.db.repo.chat import ChatSessionRepository
-from backend.schemas.chat_schema import (
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...core.exceptions import NotFoundError
+from ...db.repo.chat import ChatSessionRepository
+from ...schemas.chat_schema import (
     ChatAskRequest,
     ChatAskResponse,
     ChatMemoryPatchRequest,
     ChatSessionDetail,
     ChatSessionRead,
 )
-from backend.services.chat_service import ChatService
+from ...services.chat_service import ChatService
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 

@@ -21,7 +21,25 @@ const INITIAL_FILTERS: DocumentFilterFormState = {
   path_prefix: '',
   modified_after: '',
   modified_before: '',
+  document_type: '',
+  business_domain: '',
+  parse_status: '',
+  needs_review: false,
 };
+
+const DOCUMENT_FILTERS = [
+  { label: 'All', value: '' },
+  { label: 'Contracts', value: 'contract' },
+  { label: 'Finance', value: 'invoice_finance' },
+  { label: 'Legal', value: 'legal' },
+  { label: 'Compliance', value: 'compliance' },
+  { label: 'Meeting Notes', value: 'meeting_notes' },
+  { label: 'Technical Docs', value: 'technical_documentation' },
+  { label: 'HR', value: 'hr' },
+  { label: 'Sales/Proposals', value: 'sales_proposal' },
+  { label: 'Project Docs', value: 'project_document' },
+  { label: 'Unclassified', value: 'unclassified' },
+];
 
 type DocumentsPageProps = {
   documents: DocumentSummary[];
@@ -70,6 +88,18 @@ export function DocumentsPage({
       if (filters.mime_type && document.mime_type !== filters.mime_type) {
         return false;
       }
+      if (filters.document_type && document.document_type !== filters.document_type) {
+        return false;
+      }
+      if (filters.business_domain && document.business_domain !== filters.business_domain) {
+        return false;
+      }
+      if (filters.parse_status && document.parse_status !== filters.parse_status) {
+        return false;
+      }
+      if (filters.needs_review && !document.needs_review) {
+        return false;
+      }
       if (filters.path_prefix && !document.file_path.startsWith(filters.path_prefix)) {
         return false;
       }
@@ -103,6 +133,17 @@ export function DocumentsPage({
       if (sortColumn === 'status') {
         const comparison = a.parse_status.localeCompare(b.parse_status);
         if (comparison !== 0) return comparison * dir;
+        return a.file_name.localeCompare(b.file_name) * dir;
+      }
+      if (sortColumn === 'domain') {
+        const comparison = a.business_domain.localeCompare(b.business_domain);
+        if (comparison !== 0) return comparison * dir;
+        return a.file_name.localeCompare(b.file_name) * dir;
+      }
+      if (sortColumn === 'confidence') {
+        const ac = Math.min(a.document_type_confidence, a.business_domain_confidence);
+        const bc = Math.min(b.document_type_confidence, b.business_domain_confidence);
+        if (ac !== bc) return (ac - bc) * dir;
         return a.file_name.localeCompare(b.file_name) * dir;
       }
 
@@ -179,11 +220,49 @@ export function DocumentsPage({
             />
 
             <AppSelectField
+              label="Document type"
+              value={filters.document_type}
+              onChange={(event) => updateFilters({ document_type: event.target.value })}
+              options={DOCUMENT_FILTERS}
+            />
+
+            <AppSelectField
+              label="Business domain"
+              value={filters.business_domain}
+              onChange={(event) => updateFilters({ business_domain: event.target.value })}
+              options={[
+                { label: 'All domains', value: '' },
+                { label: 'Finance', value: 'finance' },
+                { label: 'Legal', value: 'legal' },
+                { label: 'Compliance', value: 'compliance' },
+                { label: 'Engineering', value: 'engineering' },
+                { label: 'HR', value: 'hr' },
+                { label: 'Operations', value: 'operations' },
+                { label: 'Sales', value: 'sales' },
+                { label: 'Unknown', value: 'unknown' },
+              ]}
+            />
+
+            <AppSelectField
+              label="Parse status"
+              value={filters.parse_status}
+              onChange={(event) => updateFilters({ parse_status: event.target.value })}
+              options={[
+                { label: 'All statuses', value: '' },
+                { label: 'Indexed', value: 'indexed' },
+                { label: 'Failed Parsing', value: 'failed' },
+                { label: 'Needs OCR', value: 'needs_ocr' },
+                { label: 'Unsupported', value: 'unsupported_type' },
+                { label: 'Pending', value: 'pending' },
+              ]}
+            />
+
+            <AppSelectField
               label="File type"
               value={filters.mime_type}
               onChange={(event) => updateFilters({ mime_type: event.target.value })}
               options={[
-                { label: 'All types', value: '' },
+                { label: 'All MIME types', value: '' },
                 ...availableMimeTypes.map((mimeType) => ({ label: mimeType, value: mimeType })),
               ]}
             />
@@ -193,6 +272,16 @@ export function DocumentsPage({
               value={filters.path_prefix}
               onChange={(event) => updateFilters({ path_prefix: event.target.value })}
               placeholder="/departments/hr"
+            />
+
+            <AppSelectField
+              label="Review"
+              value={filters.needs_review ? 'needs_review' : ''}
+              onChange={(event) => updateFilters({ needs_review: event.target.value === 'needs_review' })}
+              options={[
+                { label: 'All review states', value: '' },
+                { label: 'Needs Review', value: 'needs_review' },
+              ]}
             />
 
             <AppTextField

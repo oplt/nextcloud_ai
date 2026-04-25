@@ -7,13 +7,13 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 
-from backend.api.deps import DbSessionDep
-from backend.connectors.nextcloud.config import (
+from ...api.deps import DbSessionDep
+from .config import (
     NextcloudBridgeSettings,
     get_nextcloud_settings,
 )
-from backend.connectors.nextcloud.schemas import NextcloudWebhookEvent
-from backend.services.nextcloud_automation_service import NextcloudAutomationService
+from .schemas import NextcloudWebhookEvent
+from ...services.nextcloud_automation_service import NextcloudAutomationService
 
 router = APIRouter(prefix="/nextcloud", tags=["nextcloud-webhooks"])
 

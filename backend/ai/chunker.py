@@ -4,7 +4,9 @@ import hashlib
 import re
 from dataclasses import dataclass, field
 
-from backend.parsers.document_parser import ParsedDocument, ParsedPage
+from ..parsers.document_parser import ParsedDocument, ParsedPage
+from ..rag.chunker import HeadingTableAwareChunker
+from ..rag.parser import RagParser
 
 _WORD_RE = re.compile(r"\S+")
 
@@ -35,6 +37,27 @@ class Span:
 def chunk_parsed_document(
         parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40
 ) -> list[ChunkDraft]:
+    rag_document = RagParser().normalize(parsed)
+    rag_drafts = HeadingTableAwareChunker(
+        chunk_size=max(chunk_size, 280),
+        overlap=overlap,
+    ).chunk(rag_document)
+    if rag_drafts:
+        return [
+            ChunkDraft(
+                chunk_index=draft.chunk_index,
+                content=draft.content,
+                token_count=draft.token_count,
+                char_start=draft.char_start,
+                char_end=draft.char_end,
+                page_number=draft.page_number,
+                section_title=draft.section_title,
+                heading_path=draft.heading_path,
+                metadata=draft.metadata,
+            )
+            for draft in rag_drafts
+        ]
+
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
 

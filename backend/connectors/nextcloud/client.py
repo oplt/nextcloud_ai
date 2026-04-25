@@ -10,12 +10,12 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 
-from backend.connectors.nextcloud.config import NextcloudConnectorConfig
-from backend.connectors.nextcloud.exceptions import (
+from .config import NextcloudConnectorConfig
+from .exceptions import (
     NextcloudAPIError,
     NextcloudAuthenticationError,
 )
-from backend.connectors.nextcloud.schemas import DavNode, ShareGrant
+from .schemas import DavNode, ShareGrant
 
 DAV_NS = "DAV:"
 OC_NS = "http://owncloud.org/ns"

@@ -3,9 +3,9 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator
 
-from backend.connectors.nextcloud.client import AsyncNextcloudClient
-from backend.connectors.nextcloud.permissions import NextcloudPermissionService
-from backend.connectors.nextcloud.schemas import DavNode, SyncBatchItem
+from .client import AsyncNextcloudClient
+from .permissions import NextcloudPermissionService
+from .schemas import DavNode, SyncBatchItem
 
 
 class NextcloudSyncService:

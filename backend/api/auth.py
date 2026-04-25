@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from fastapi import Request, Response
 
-from backend.core.config import settings
-from backend.core.csrf import clear_csrf_cookie, issue_csrf_cookie
+from ..core.config import settings
+from ..core.csrf import clear_csrf_cookie, issue_csrf_cookie
 
 
 def extract_access_token(request: Request) -> str | None:

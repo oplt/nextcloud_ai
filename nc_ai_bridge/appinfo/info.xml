@@ -5,17 +5,17 @@
     <name>NC AI Bridge</name>
     <summary>Launch an external FastAPI AI workspace from the current Nextcloud session</summary>
     <description>Thin bridge app that turns the logged-in Nextcloud user session into a short-lived signed handoff for an external FastAPI service.</description>
-    <version>0.1.0</version>
+    <version>0.1.3</version>
     <licence>agpl</licence>
     <namespace>NcAiBridge</namespace>
     <category>integration</category>
     <author mail="founder@example.com">Your Company</author>
     <navigations>
         <navigation>
-            <name>AI Workspace</name>
+            <name>DocuMind</name>
             <route>nc_ai_bridge.page.index</route>
             <order>20</order>
-            <icon>app.svg</icon>
+            <icon>icon.svg</icon>
             <type>link</type>
         </navigation>
     </navigations>

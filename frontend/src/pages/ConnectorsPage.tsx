@@ -1,11 +1,12 @@
 import { useState } from 'react';
 
-import type { Connector, ConnectorPayload } from '../types/api';
+import type { Connector, ConnectorPayload, ConnectorUpdatePayload } from '../types/api';
 import { NextcloudConnectorForm } from '../components/NextcloudConnectorForm';
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
 import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined';
+import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
 import IconButton from '@mui/material/IconButton';
 import Stack from '@mui/material/Stack';
@@ -16,6 +17,7 @@ type ConnectorsPageProps = {
   listLoading?: boolean;
   listError?: string | null;
   onCreate: (payload: ConnectorPayload) => Promise<void>;
+  onUpdate: (connectorId: string, payload: ConnectorUpdatePayload) => Promise<void>;
   onDelete: (connectorId: string) => Promise<void>;
   onTest: (connectorId: string) => Promise<void>;
   onSync: (connectorId: string, fullReindex?: boolean) => Promise<void>;
@@ -42,16 +44,30 @@ export function ConnectorsPage({
   listLoading = false,
   listError = null,
   onCreate,
+  onUpdate,
   onDelete,
   onTest,
   onSync,
   onToggleActive,
 }: ConnectorsPageProps) {
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string } | null>(null);
+  const [editingConnector, setEditingConnector] = useState<Connector | null>(null);
+  const statusTone = (status: string) => (status === 'healthy' ? 'healthy' : 'error');
 
   return (
     <section className="split-layout">
-      <NextcloudConnectorForm onSubmit={onCreate} />
+      <NextcloudConnectorForm
+        editingConnector={editingConnector}
+        onCancelEdit={() => setEditingConnector(null)}
+        onSubmit={(payload) => {
+          if (editingConnector) {
+            return onUpdate(editingConnector.id, payload as ConnectorUpdatePayload).then(() => {
+              setEditingConnector(null);
+            });
+          }
+          return onCreate(payload as ConnectorPayload);
+        }}
+      />
 
       <AppCard className="card table-card">
         <header className="panel-header">
@@ -94,25 +110,35 @@ export function ConnectorsPage({
                   <span className={`pill pill--${connector.is_active ? 'active' : 'inactive'}`}>
                     {connector.is_active ? 'active' : 'inactive'}
                   </span>
-                  <span className={`pill pill--${connector.status}`}>
+                  <span className={`pill pill--${statusTone(connector.status)}`}>
                     {connector.status}
                   </span>
                   <AppButton
                     type="button"
                     variant="outlined"
+                    size="small"
                     onClick={() => void onToggleActive(connector.id, !connector.is_active)}
                   >
                     {connector.is_active ? 'Deactivate' : 'Activate'}
                   </AppButton>
-                  <AppButton type="button" variant="outlined" onClick={() => void onTest(connector.id)}>
+                  <AppButton type="button" variant="outlined" size="small" onClick={() => void onTest(connector.id)}>
                     Test
                   </AppButton>
-                  <AppButton type="button" variant="outlined" onClick={() => void onSync(connector.id, false)}>
+                  <AppButton type="button" variant="outlined" size="small" onClick={() => void onSync(connector.id, false)}>
                     Sync
                   </AppButton>
-                  <AppButton type="button" variant="outlined" onClick={() => void onSync(connector.id, true)}>
+                  <AppButton type="button" variant="outlined" size="small" onClick={() => void onSync(connector.id, true)}>
                     Full reindex
                   </AppButton>
+                  <IconButton
+                    type="button"
+                    className="icon-button"
+                    onClick={() => setEditingConnector(connector)}
+                    aria-label={`Update ${connector.display_name}`}
+                    title="Update connector"
+                  >
+                    <EditOutlinedIcon fontSize="small" />
+                  </IconButton>
                   <IconButton
                     type="button"
                     className="icon-button icon-button--danger"
@@ -121,7 +147,7 @@ export function ConnectorsPage({
                     title="Delete connector"
                     color="error"
                   >
-                    <DeleteOutlineOutlinedIcon />
+                    <DeleteOutlineOutlinedIcon fontSize="small" />
                   </IconButton>
                 </Stack>
               </article>

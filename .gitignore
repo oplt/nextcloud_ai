@@ -360,3 +360,5 @@ TODO.txt
 .claude
 AGENTS.md
 CLAUDE.md
+.secrets.baseline
+.aider*

@@ -2,29 +2,29 @@ from __future__ import annotations
 
 from urllib.parse import urlparse
 
-from backend.connectors.email.config import ImapConnectorConfig
-from backend.connectors.email.imap_client import AsyncImapClient
+from ..connectors.email.config import ImapConnectorConfig
+from ..connectors.email.imap_client import AsyncImapClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.connectors.nextcloud.client import AsyncNextcloudClient
-from backend.connectors.nextcloud.config import NextcloudConnectorConfig
-from backend.core.config import settings
-from backend.core.exceptions import AuthorizationError, NotFoundError
-from backend.core.security import connector_secret_cipher
-from backend.db.models import Connector, User
-from backend.db.repo.connector import ConnectorRepository
-from backend.db.repo.user import UserRepository
-from backend.schemas.connector_schema import (
+from ..connectors.nextcloud.client import AsyncNextcloudClient
+from ..connectors.nextcloud.config import NextcloudConnectorConfig
+from ..core.config import settings
+from ..core.exceptions import AuthorizationError, NotFoundError
+from ..core.security import connector_secret_cipher
+from ..db.models import Connector, User
+from ..db.repo.connector import ConnectorRepository
+from ..db.repo.user import UserRepository
+from ..schemas.connector_schema import (
     ConnectorCreate,
     ConnectorTestResponse,
     ConnectorUpdate,
 )
-from backend.services.authorization_service import (
+from .authorization_service import (
     connector_is_manageable_by_identity,
     connector_is_visible_to_identity,
     normalize_role_name,
 )
-from backend.services.audit_service import AuditService
+from .audit_service import AuditService
 
 
 class ConnectorService:
@@ -174,16 +174,32 @@ class ConnectorService:
             client = AsyncImapClient(self.build_imap_config(connector))
             try:
                 await client.verify_credentials()
+                connector.status = "healthy"
+                connector.last_error = None
+                await self.session.commit()
+                return ConnectorTestResponse(ok=True, message="IMAP credentials verified")
+            except Exception as exc:
+                connector.status = "error"
+                connector.last_error = str(exc)
+                await self.session.commit()
+                raise
             finally:
                 await client.aclose()
-            return ConnectorTestResponse(ok=True, message="IMAP credentials verified")
 
         client = AsyncNextcloudClient(self.build_nextcloud_config(connector))
         try:
             await client.verify_credentials()
+            connector.status = "healthy"
+            connector.last_error = None
+            await self.session.commit()
+            return ConnectorTestResponse(ok=True, message="Nextcloud credentials verified")
+        except Exception as exc:
+            connector.status = "error"
+            connector.last_error = str(exc)
+            await self.session.commit()
+            raise
         finally:
             await client.aclose()
-        return ConnectorTestResponse(ok=True, message="Nextcloud credentials verified")
 
     def build_config(self, connector: Connector) -> NextcloudConnectorConfig:
         return self.build_nextcloud_config(connector)
@@ -226,7 +242,7 @@ class ConnectorService:
 
 
 def _user_to_auth(user: User):
-    from backend.core.security import AuthContext
+    from ..core.security import AuthContext
 
     return AuthContext(
         user_id=str(user.id),

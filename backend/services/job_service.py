@@ -5,13 +5,13 @@ from dataclasses import dataclass
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.core.exceptions import AuthorizationError, NotFoundError
-from backend.db.models import SyncJob, User
-from backend.db.repo.connector import ConnectorRepository
-from backend.db.repo.sync_job import SyncJobRepository
-from backend.services.authorization_service import connector_is_manageable_by_identity
-from backend.services.job_lifecycle import JobLifecycleService
-from backend.services.connector_service import _user_to_auth
+from ..core.exceptions import AuthorizationError, NotFoundError
+from ..db.models import SyncJob, User
+from ..db.repo.connector import ConnectorRepository
+from ..db.repo.sync_job import SyncJobRepository
+from .authorization_service import connector_is_manageable_by_identity
+from .job_lifecycle import JobLifecycleService
+from .connector_service import _user_to_auth
 
 
 @dataclass(slots=True)

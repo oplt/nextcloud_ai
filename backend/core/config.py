@@ -29,6 +29,8 @@ class Settings(BaseSettings):
     FRONTEND_URL: str | List[str] = Field(
         default_factory=lambda: ["http://localhost:3000", "http://localhost:5173"]
     )
+    # Comma-separated browser origins (e.g. Nextcloud) allowed for CORS in addition to FRONTEND_URL.
+    CORS_EXTRA_ORIGINS: str = ""
 
     DATABASE_URL: str
     SQL_ECHO: bool = False
@@ -64,6 +66,7 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: AnyHttpUrl = Field(default="http://localhost:11434")
     OLLAMA_EMBEDDING_MODEL: str = "bge-m3:latest"
     OLLAMA_CHAT_MODEL: str = "llama3:latest"
+    OLLAMA_BOOTSTRAP_MODE: Literal["ensure", "check"] = "ensure"
     OLLAMA_READINESS_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=60.0)
     OLLAMA_PULL_TIMEOUT_SECONDS: float = Field(default=900.0, ge=30.0, le=3600.0)
     OLLAMA_WARMUP_TIMEOUT_SECONDS: float = Field(default=120.0, ge=5.0, le=900.0)
@@ -76,7 +79,7 @@ class Settings(BaseSettings):
     RAG_EVAL_METRICS_LOG_PATH: str | None = None
 
     PRODUCT_INTELLIGENCE_ENABLED: bool = True
-    PRODUCT_INTELLIGENCE_EXTRACTION_MODE: Literal["off", "inline", "async"] = "inline"
+    PRODUCT_INTELLIGENCE_EXTRACTION_MODE: Literal["off", "inline", "async"] = "async"
 
     NEXTCLOUD_BRIDGE_SHARED_SECRET: SecretStr = Field(default=SecretStr("change-me"))
     NEXTCLOUD_BRIDGE_ISSUER: str = "nextcloud-bridge"
@@ -94,6 +97,7 @@ class Settings(BaseSettings):
     NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS: int = Field(
         default=900, ge=60, le=604800
     )
+    NEXTCLOUD_SYNC_INGEST_CONCURRENCY: int = Field(default=4, ge=1, le=32)
     EMAIL_CONNECTOR_FETCH_LIMIT: int = Field(default=100, ge=1, le=500)
     EMAIL_INLINE_BLOB_MAX_BYTES: int = Field(default=2_000_000, ge=4096, le=20_000_000)
     TASK_WEBHOOK_URL: str | None = None
@@ -160,6 +164,26 @@ class Settings(BaseSettings):
         if isinstance(self.FRONTEND_URL, str):
             return [self.FRONTEND_URL]
         return self.FRONTEND_URL
+
+    @cached_property
+    def cors_allowed_origins(self) -> List[str]:
+        origins: List[str] = list(self.frontend_allowed_origins)
+        for part in self.CORS_EXTRA_ORIGINS.split(","):
+            u = part.strip()
+            if u and u not in origins:
+                origins.append(u)
+        if self.APP_ENV == "development":
+            for u in (
+                "http://localhost:8080",
+                "http://localhost:8081",
+                "http://localhost:5173",
+                "http://127.0.0.1:8080",
+                "http://127.0.0.1:8081",
+                "http://127.0.0.1:5173",
+            ):
+                if u not in origins:
+                    origins.append(u)
+        return origins
 
     @cached_property
     def frontend_redirect_url(self) -> str:

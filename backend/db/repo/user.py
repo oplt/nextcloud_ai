@@ -4,8 +4,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import Role, User
-from backend.db.repo.base import BaseRepository
+from ..models import Role, User
+from ..repo.base import BaseRepository
 
 
 class UserRepository(BaseRepository[User]):

@@ -2,10 +2,10 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.db.repo.audit_log import AuditLogRepository
-from backend.db.repo.user import RoleRepository
-from backend.schemas.admin_schema import AuditLogRead, RoleListResponse
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...db.repo.audit_log import AuditLogRepository
+from ...db.repo.user import RoleRepository
+from ...schemas.admin_schema import AuditLogRead, RoleListResponse
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 import imaplib
 import ssl
 
-from backend.connectors.email.config import ImapConnectorConfig
+from .config import ImapConnectorConfig
 
 
 @dataclass(slots=True)

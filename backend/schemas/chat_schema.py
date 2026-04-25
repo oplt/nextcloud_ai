@@ -6,7 +6,7 @@ from uuid import UUID
 from dataclasses import dataclass, field
 from pydantic import BaseModel, Field
 
-from backend.schemas.common_schema import TimestampedSchema
+from .common_schema import TimestampedSchema
 
 
 class ChatSource(BaseModel):
@@ -35,6 +35,9 @@ class RetrievalFilters(BaseModel):
     path_prefixes: list[str] = Field(default_factory=list)
     modified_after: datetime | None = None
     modified_before: datetime | None = None
+    document_types: list[str] = Field(default_factory=list)
+    business_domains: list[str] = Field(default_factory=list)
+    source_types: list[str] = Field(default_factory=list)
 
 
 class ChatAskRequest(BaseModel):

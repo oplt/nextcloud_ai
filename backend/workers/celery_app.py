@@ -6,8 +6,8 @@ import logging
 from celery import Celery
 from celery.signals import worker_ready
 
-from backend.ai.ollama_runtime import OllamaRuntimeService
-from backend.core.config import settings
+from ..ai.ollama_runtime import OllamaRuntimeService
+from ..core.config import settings
 
 celery_app = Celery(
     "nextcloud_ai",
@@ -41,7 +41,11 @@ def warm_ollama_models_on_worker_boot(**_: object) -> None:
     if not settings.ollama_required:
         return
 
-    status = asyncio.run(OllamaRuntimeService().ensure_models_ready())
+    runtime = OllamaRuntimeService()
+    if settings.OLLAMA_BOOTSTRAP_MODE == "ensure":
+        status = asyncio.run(runtime.ensure_models_ready())
+    else:
+        status = asyncio.run(runtime.check_readiness())
     if status.ready:
         logger.info(
             "Celery worker warmed Ollama models: %s",

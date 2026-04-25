@@ -7,6 +7,7 @@ from email import policy
 from email.parser import BytesParser
 from email.utils import getaddresses, parsedate_to_datetime
 import html
+import csv
 from pathlib import Path
 import xml.etree.ElementTree as ET
 from zipfile import BadZipFile, ZipFile
@@ -53,6 +54,16 @@ TEXT_MIME_TYPES = {
     "text/x-markdown",
     "application/octet-stream",
 }
+CSV_MIME_TYPES = {"text/csv", "application/csv"}
+IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+    "image/bmp",
+    "image/tiff",
+    "image/svg+xml",
+}
 EMAIL_MIME_TYPES = {"message/rfc822", "application/eml"}
 
 ODT_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
@@ -79,6 +90,20 @@ async def parse_document_bytes(
         return parse_odt_bytes(payload)
     if suffix == ".eml" or normalized_mime in EMAIL_MIME_TYPES:
         return parse_email_bytes(payload)
+    if suffix in {
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+        ".bmp",
+        ".tif",
+        ".tiff",
+        ".svg",
+    } or normalized_mime in IMAGE_MIME_TYPES:
+        return parse_image_bytes(file_name=file_name, mime_type=mime_type, payload=payload)
+    if suffix == ".csv" or normalized_mime in CSV_MIME_TYPES:
+        return parse_csv_bytes(payload)
     if suffix in {".txt", ".md", ".markdown"} or normalized_mime in TEXT_MIME_TYPES:
         return parse_text_bytes(
             payload,
@@ -91,9 +116,16 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
     pages: list[ParsedPage] = []
     with pdfplumber.open(io.BytesIO(payload)) as pdf:
         for index, page in enumerate(pdf.pages, start=1):
+            page_parts: list[str] = []
             text = (page.extract_text() or "").strip()
             if text:
-                pages.append(ParsedPage(page_number=index, text=text))
+                page_parts.append(text)
+            for table in page.extract_tables() or []:
+                table_text = _format_table(table)
+                if table_text:
+                    page_parts.append(table_text)
+            if page_parts:
+                pages.append(ParsedPage(page_number=index, text="\n\n".join(page_parts)))
     combined = "\n\n".join(page.text for page in pages)
     return ParsedDocument(
         text=combined,
@@ -104,17 +136,33 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
 
 def parse_docx_bytes(payload: bytes) -> ParsedDocument:
     document = docx.Document(io.BytesIO(payload))
-    paragraphs = [
-        paragraph.text.strip()
-        for paragraph in document.paragraphs
-        if paragraph.text.strip()
-    ]
-    text = "\n".join(paragraphs)
+    blocks: list[str] = []
+    for paragraph in document.paragraphs:
+        paragraph_text = paragraph.text.strip()
+        if not paragraph_text:
+            continue
+        style_name = (paragraph.style.name if paragraph.style is not None else "").lower()
+        if style_name.startswith("heading"):
+            level = _heading_level_from_style(style_name)
+            blocks.append(f"{'#' * level} {paragraph_text}")
+        else:
+            blocks.append(paragraph_text)
+    for table in document.tables:
+        table_text = _format_table(
+            [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        )
+        if table_text:
+            blocks.append(table_text)
+    text = "\n\n".join(blocks)
     pages = [ParsedPage(page_number=None, text=text)] if text else []
     return ParsedDocument(
         text=text,
         pages=pages,
-        metadata={"paragraph_count": len(paragraphs), "parser": "python-docx"},
+        metadata={
+            "block_count": len(blocks),
+            "table_count": len(document.tables),
+            "parser": "python-docx",
+        },
     )
 
 
@@ -163,6 +211,20 @@ def parse_text_bytes(payload: bytes, *, markdown: bool = False) -> ParsedDocumen
             "markdown": markdown,
             "line_count": len(text.splitlines()),
         },
+    )
+
+
+def parse_csv_bytes(payload: bytes) -> ParsedDocument:
+    text = _decode_text(payload)
+    rows = list(csv.reader(io.StringIO(text)))
+    if not rows:
+        return ParsedDocument(text="", pages=[], metadata={"parser": "csv", "row_count": 0})
+    formatted = _format_table(rows[:5000])
+    pages = [ParsedPage(page_number=None, text=formatted)] if formatted.strip() else []
+    return ParsedDocument(
+        text=formatted,
+        pages=pages,
+        metadata={"parser": "csv", "row_count": len(rows), "truncated": len(rows) > 5000},
     )
 
 
@@ -232,6 +294,27 @@ def parse_email_bytes(payload: bytes) -> ParsedDocument:
     )
 
 
+def parse_image_bytes(
+    *, file_name: str, mime_type: str | None, payload: bytes
+) -> ParsedDocument:
+    normalized_mime = (mime_type or "application/octet-stream").lower()
+    text = (
+        f"Image file: {Path(file_name).name}\n"
+        f"MIME type: {normalized_mime}\n"
+        "No OCR extracted text available for this image."
+    )
+    return ParsedDocument(
+        text=text,
+        pages=[ParsedPage(page_number=None, text=text)],
+        metadata={
+            "parser": "image-metadata-fallback",
+            "ocr_applied": False,
+            "size_bytes": len(payload),
+            "mime_type": normalized_mime,
+        },
+    )
+
+
 def _decode_text(payload: bytes) -> str:
     for encoding in ("utf-8", "utf-8-sig", "latin-1"):
         try:
@@ -261,6 +344,26 @@ def _extract_odt_text(element: ET.Element) -> str:
             parts.append(child.tail)
 
     return "".join(parts).strip()
+
+
+def _heading_level_from_style(style_name: str) -> int:
+    match = re.search(r"(\d+)", style_name)
+    if not match:
+        return 2
+    return max(1, min(6, int(match.group(1))))
+
+
+def _format_table(rows) -> str:
+    cleaned_rows: list[list[str]] = []
+    for row in rows or []:
+        cells = [str(cell or "").strip().replace("\n", " ") for cell in row]
+        if any(cells):
+            cleaned_rows.append(cells)
+    if not cleaned_rows:
+        return ""
+    width = max(len(row) for row in cleaned_rows)
+    normalized = [row + [""] * (width - len(row)) for row in cleaned_rows]
+    return "\n".join("| " + " | ".join(row) + " |" for row in normalized)
 
 
 def _extract_email_body(message) -> str:

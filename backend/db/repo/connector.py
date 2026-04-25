@@ -4,8 +4,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import Connector
-from backend.db.repo.base import BaseRepository
+from ..models import Connector
+from .base import BaseRepository
 
 
 class ConnectorRepository(BaseRepository[Connector]):

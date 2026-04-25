@@ -6,17 +6,17 @@ from html import escape
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Response, status
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, RedirectResponse
 
-from backend.api.auth import set_session_cookies
-from backend.connectors.nextcloud import BridgeTokenCodec, get_nextcloud_settings
-from backend.connectors.nextcloud.exceptions import BridgeTokenError
-from backend.connectors.nextcloud.replay_store import RedisReplayStore
-from backend.connectors.nextcloud.schemas import BridgeExchangeRequest, Principal
-from backend.core.config import settings
-from backend.schemas.auth_schema import AuthSessionResponse, IssuedAuthSession
-from backend.services.auth_service import AuthService
-from backend.api.deps import DbSessionDep
+from ..auth import set_session_cookies
+from ..deps import DbSessionDep
+from ...connectors.nextcloud import BridgeTokenCodec, get_nextcloud_settings
+from ...connectors.nextcloud.exceptions import BridgeTokenError
+from ...connectors.nextcloud.replay_store import RedisReplayStore
+from ...connectors.nextcloud.schemas import BridgeExchangeRequest, Principal
+from ...core.config import settings
+from ...schemas.auth_schema import AuthSessionResponse, IssuedAuthSession
+from ...services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth/nextcloud", tags=["nextcloud-auth"])
 
@@ -70,12 +70,29 @@ async def exchange_nextcloud_bridge_token(
     )
 
 
+@router.get("/sso/consume")
+def sso_consume_get_redirect() -> RedirectResponse:
+    """POST /sso/consume leaves this URL in history; refresh/new-tab GET used to 404."""
+    return RedirectResponse(
+        url=settings.frontend_redirect_url,
+        status_code=status.HTTP_302_FOUND,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.post("/sso/consume")
 async def consume_nextcloud_bridge_token(
     bridge_token: Annotated[str, Form(...)],
     session: DbSessionDep,
     codec: Annotated[BridgeTokenCodec, Depends(get_bridge_codec)],
 ):
+    """Return HTML that navigates to the SPA.
+
+    Do not use an HTTP redirect (303) here: the POST is submitted from a
+    Nextcloud page whose CSP `form-action` allows the API origin but not the
+    SPA; Chrome blocks redirect targets that are not listed in that directive
+    (see nextcloud/server#29317), leaving users stuck on the bridge page.
+    """
     try:
         claims = await codec.verify_and_consume(bridge_token)
     except BridgeTokenError as exc:

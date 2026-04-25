@@ -1,0 +1,41 @@
+.PHONY: deploy-config deploy-up deploy-down deploy-build deploy-logs deploy-ps deploy-restart deploy-seed-admin deploy-backend-shell deploy-db-shell deploy-backup-db deploy-restore-db
+
+DEPLOY_COMPOSE ?= docker compose -f deployment/docker-compose.yml
+
+deploy-config:
+	$(DEPLOY_COMPOSE) config
+
+deploy-up:
+	$(DEPLOY_COMPOSE) up --build --force-recreate -d
+
+deploy-down:
+	$(DEPLOY_COMPOSE) down
+
+deploy-build:
+	$(DEPLOY_COMPOSE) build
+
+deploy-logs:
+	$(DEPLOY_COMPOSE) logs -f
+
+deploy-ps:
+	$(DEPLOY_COMPOSE) ps
+
+deploy-restart:
+	$(DEPLOY_COMPOSE) down
+	$(DEPLOY_COMPOSE) up --build --force-recreate -d
+
+deploy-seed-admin:
+	$(DEPLOY_COMPOSE) exec backend python -m scripts.seed_admin
+
+deploy-backend-shell:
+	$(DEPLOY_COMPOSE) exec backend sh
+
+deploy-db-shell:
+	$(DEPLOY_COMPOSE) exec postgres psql -U $$POSTGRES_USER -d $$POSTGRES_DB
+
+deploy-backup-db:
+	deployment/scripts/backup_postgres.sh
+
+deploy-restore-db:
+	@test -n "$(BACKUP_FILE)" || (echo "Usage: make deploy-restore-db BACKUP_FILE=/path/to/backup.sql.gz" && exit 1)
+	deployment/scripts/restore_postgres.sh "$(BACKUP_FILE)"

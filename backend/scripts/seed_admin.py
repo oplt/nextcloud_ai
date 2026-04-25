@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import asyncio
 
-from backend.core.config import settings
-from backend.core.security import get_password_hash
-from backend.db.models import User
-from backend.db.repo.user import UserRepository
-from backend.db.session import AsyncSessionLocal
-from backend.services.role_bootstrap_service import RoleBootstrapService
+from ..core.config import settings
+from ..core.security import get_password_hash
+from ..db.models import User
+from ..db.repo.user import UserRepository
+from ..db.session import AsyncSessionLocal
+from ..services.role_bootstrap_service import RoleBootstrapService
 
 
 async def main() -> None:

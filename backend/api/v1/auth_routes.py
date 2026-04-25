@@ -2,16 +2,16 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Request, Response, status
 
-from backend.api.auth import clear_session_cookies, set_session_cookies
-from backend.api.deps import CurrentIdentityDep, DbSessionDep
-from backend.core.csrf import ensure_csrf_cookie
-from backend.schemas.auth_schema import (
+from ..auth import clear_session_cookies, set_session_cookies
+from ..deps import CurrentIdentityDep, DbSessionDep
+from ...core.csrf import ensure_csrf_cookie
+from ...schemas.auth_schema import (
     AuthSessionResponse,
     CsrfTokenResponse,
     LoginRequest,
 )
-from backend.schemas.user_schema import UserRead
-from backend.services.auth_service import AuthService
+from ...schemas.user_schema import UserRead
+from ...services.auth_service import AuthService
 
 router = APIRouter(prefix="/auth", tags=["auth"])
 

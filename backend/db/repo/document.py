@@ -8,9 +8,9 @@ from sqlalchemy import Select, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
 
-from backend.core.security import AuthContext
-from backend.db.models import Document, DocumentChunk
-from backend.db.repo.base import BaseRepository
+from ...core.security import AuthContext
+from ..models import Document, DocumentChunk
+from .base import BaseRepository
 
 
 class DocumentRepository(BaseRepository[Document]):
@@ -79,12 +79,17 @@ class DocumentRepository(BaseRepository[Document]):
             modified_after: datetime | None = None,
             modified_before: datetime | None = None,
             parse_status: str | None = None,
+            document_type: str | None = None,
+            business_domain: str | None = None,
+            source_type: str | None = None,
+            needs_review: bool | None = None,
+            low_confidence: bool | None = None,
             include_deleted: bool = False,
             include_intelligence: bool = False,
             offset: int = 0,
             limit: int = 50,
     ) -> list[Document]:
-        stmt: Select[tuple[Document]] = select(Document)
+        stmt: Select[tuple[Document]] = select(Document).options(selectinload(Document.chunks))
         if include_intelligence:
             stmt = stmt.options(
                 selectinload(Document.insights),
@@ -115,12 +120,40 @@ class DocumentRepository(BaseRepository[Document]):
             filters.append(Document.modified_at <= modified_before)
         if parse_status:
             filters.append(Document.parse_status == parse_status)
+        if document_type:
+            filters.append(Document.document_type == document_type)
+        if business_domain:
+            filters.append(Document.business_domain == business_domain)
+        if source_type:
+            filters.append(Document.source_type == source_type)
+        if needs_review:
+            filters.append(
+                or_(
+                    Document.parse_status.in_(["failed", "needs_ocr", "unsupported_type"]),
+                    Document.document_type == "unclassified",
+                    Document.business_domain == "unknown",
+                    Document.document_type_confidence < 0.6,
+                    Document.business_domain_confidence < 0.6,
+                )
+            )
+        if low_confidence:
+            filters.append(
+                or_(
+                    Document.document_type_confidence < 0.6,
+                    Document.business_domain_confidence < 0.6,
+                )
+            )
         if not include_deleted:
             filters.append(Document.is_deleted.is_(False))
         if query:
             like = f"%{query}%"
             filters.append(
-                or_(Document.file_name.ilike(like), Document.file_path.ilike(like))
+                or_(
+                    Document.file_name.ilike(like),
+                    Document.file_path.ilike(like),
+                    Document.document_type.ilike(like),
+                    Document.business_domain.ilike(like),
+                )
             )
         if auth is not None:
             filters.append(self.visibility_clause(auth))
@@ -153,6 +186,20 @@ class DocumentRepository(BaseRepository[Document]):
             .where(DocumentChunk.document_id == document_id)
         )
         return int(result.scalar_one())
+
+    async def find_indexed_duplicate(
+        self, *, checksum: str, source_type: str, exclude_document_id: UUID | str
+    ) -> Document | None:
+        result = await self.session.execute(
+            select(Document).where(
+                Document.checksum == checksum,
+                Document.source_type == source_type,
+                Document.id != exclude_document_id,
+                Document.parse_status == "indexed",
+                Document.is_deleted.is_(False),
+            )
+        )
+        return result.scalars().first()
 
     @staticmethod
     def visibility_clause(auth: AuthContext):
@@ -189,7 +236,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         await self.session.execute(
             update(Document)
             .where(Document.id == document_id)
-            .values(parse_status="indexing")
+            .values(parse_status="parsing")
         )
         await self.delete_for_document(document_id)
         self.session.add_all(list(chunks))
@@ -215,6 +262,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             path_prefixes: Sequence[str] | None = None,
             modified_after: datetime | None = None,
             modified_before: datetime | None = None,
+            document_types: Sequence[str] | None = None,
+            business_domains: Sequence[str] | None = None,
+            source_types: Sequence[str] | None = None,
+            parse_status: str | None = "indexed",
     ) -> list[tuple[DocumentChunk, float]]:
         distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
         stmt = (
@@ -237,6 +288,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             path_prefixes=path_prefixes,
             modified_after=modified_after,
             modified_before=modified_before,
+            document_types=document_types,
+            business_domains=business_domains,
+            source_types=source_types,
+            parse_status=parse_status,
         )
         result = await self.session.execute(stmt)
         return [(row[0], float(row[1])) for row in result.all()]
@@ -253,6 +308,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             path_prefixes: Sequence[str] | None = None,
             modified_after: datetime | None = None,
             modified_before: datetime | None = None,
+            document_types: Sequence[str] | None = None,
+            business_domains: Sequence[str] | None = None,
+            source_types: Sequence[str] | None = None,
+            parse_status: str | None = "indexed",
     ) -> list[DocumentChunk]:
         normalized_terms = [term.strip() for term in terms if term.strip()]
         if not normalized_terms:
@@ -287,6 +346,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             path_prefixes=path_prefixes,
             modified_after=modified_after,
             modified_before=modified_before,
+            document_types=document_types,
+            business_domains=business_domains,
+            source_types=source_types,
+            parse_status=parse_status,
         )
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
@@ -300,6 +363,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         path_prefixes: Sequence[str] | None = None,
         modified_after: datetime | None = None,
         modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+        parse_status: str | None = "indexed",
     ) -> Select:
         if connector_ids:
             stmt = stmt.where(Document.connector_id.in_(list(connector_ids)))
@@ -319,4 +386,12 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             stmt = stmt.where(Document.modified_at >= modified_after)
         if modified_before is not None:
             stmt = stmt.where(Document.modified_at <= modified_before)
+        if document_types:
+            stmt = stmt.where(Document.document_type.in_(list(document_types)))
+        if business_domains:
+            stmt = stmt.where(Document.business_domain.in_(list(business_domains)))
+        if source_types:
+            stmt = stmt.where(Document.source_type.in_(list(source_types)))
+        if parse_status:
+            stmt = stmt.where(Document.parse_status == parse_status)
         return stmt

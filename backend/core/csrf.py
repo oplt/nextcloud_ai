@@ -4,7 +4,7 @@ import secrets
 
 from fastapi import Request, Response
 
-from backend.core.config import settings
+from ..core.config import settings
 
 SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS", "TRACE"})
 CSRF_EXEMPT_PATHS = frozenset(

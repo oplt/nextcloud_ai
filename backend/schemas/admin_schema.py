@@ -3,8 +3,8 @@ from __future__ import annotations
 from typing import Any
 from uuid import UUID
 
-from backend.schemas.common_schema import TimestampedSchema
-from backend.schemas.user_schema import RoleRead, UserSummaryRead
+from .common_schema import TimestampedSchema
+from .user_schema import RoleRead, UserSummaryRead
 
 
 class AuditLogRead(TimestampedSchema):

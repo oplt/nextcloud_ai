@@ -2,12 +2,12 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.repo.audit_log import AuditLogRepository
-from backend.db.repo.chat import ChatMessageRepository, ChatSessionRepository
-from backend.db.repo.connector import ConnectorRepository
-from backend.db.repo.document import DocumentChunkRepository, DocumentRepository
-from backend.db.repo.sync_job import SyncJobRepository
-from backend.db.repo.user import RoleRepository, UserRepository
+from .audit_log import AuditLogRepository
+from .chat import ChatMessageRepository, ChatSessionRepository
+from .connector import ConnectorRepository
+from .document import DocumentChunkRepository, DocumentRepository
+from .sync_job import SyncJobRepository
+from .user import RoleRepository, UserRepository
 
 
 class UnitOfWork:

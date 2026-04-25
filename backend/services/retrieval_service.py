@@ -7,16 +7,17 @@ from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.ai import rag_temporal
-from backend.ai.citations import build_snippet, distance_to_score
-from backend.ai.embedding_client import EmbeddingClientFactory, EmbeddingClientProtocol
-from backend.core import observability
-from backend.core.config import settings
-from backend.core.security import AuthContext
-from backend.db.models import DocumentChunk
-from backend.db.repo.document import DocumentChunkRepository
-from backend.db.repo.intelligence import KnowledgeGraphRepository
-from backend.schemas.chat_schema import ChatSource, RetrievalFilters
+from ..ai.citations import build_snippet
+from ..ai.embedding_client import EmbeddingClientFactory, EmbeddingClientProtocol
+from ..core import observability
+from ..core.config import settings
+from ..core.security import AuthContext
+from ..db.models import DocumentChunk
+from ..db.repo.document import DocumentChunkRepository
+from ..db.repo.intelligence import KnowledgeGraphRepository
+from ..rag.retriever import HybridRetriever
+from ..rag.stores import RetrievalCandidate
+from ..schemas.chat_schema import ChatSource, RetrievalFilters
 
 _STOPWORDS = {
     "a",
@@ -44,8 +45,8 @@ _STOPWORDS = {
     "work",
     "worked",
 }
-_ABSOLUTE_MIN_SCORE = 0.40
-_NARROW_CONFIDENCE_THRESHOLD = 0.58
+_ABSOLUTE_MIN_SCORE = 0.20
+_NARROW_CONFIDENCE_THRESHOLD = 0.20
 _MAX_CHUNKS_PER_DOCUMENT = 1
 _MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT = 4
 
@@ -56,25 +57,6 @@ class RetrievalResult:
     query_embedding: list[float]
     grounded_document_ids: list[UUID] = field(default_factory=list)
     retrieval_debug: dict[str, object] = field(default_factory=dict)
-
-
-@dataclass(slots=True)
-class RankedChunk:
-    chunk: DocumentChunk
-    semantic_score: float = 0.0
-    lexical_score: float = 0.0
-    contextual_score: float = 0.0
-
-    @property
-    def score(self) -> float:
-        base_score: float
-        if self.semantic_score and self.lexical_score:
-            base_score = max(self.semantic_score, self.lexical_score) + min(
-                self.semantic_score, self.lexical_score
-            ) * 0.15
-        else:
-            base_score = max(self.semantic_score, self.lexical_score)
-        return min(0.999, max(0.0, base_score + self.contextual_score))
 
 
 class RetrievalService:
@@ -101,7 +83,8 @@ class RetrievalService:
         retrieval_debug: dict[str, object] = {
             "graph_expansion_preferred": {"applied": False, "related_added": 0},
             "graph_expansion_broad": {"applied": False, "related_added": 0},
-            "multi_evidence_question": rag_temporal.question_needs_multi_evidence(question),
+            "hybrid": {},
+            "multi_evidence_question": _question_needs_multi_evidence(question),
         }
         _emb_started = time.perf_counter()
         try:
@@ -118,7 +101,7 @@ class RetrievalService:
                 outcome="success",
             )
         keyword_terms = self._extract_keyword_terms(question)
-        allow_contextual_tail = rag_temporal.looks_like_relative_employment_question(question)
+        allow_contextual_tail = _looks_like_contextual_question(question)
         multi_evidence = bool(retrieval_debug["multi_evidence_question"])
 
         expanded_preferred, meta_p = await self._expand_document_scope(preferred_document_ids)
@@ -148,6 +131,8 @@ class RetrievalService:
                 filters=filters,
                 allow_semantic_context_chunks=allow_contextual_tail,
                 max_chunks_per_document=max_chunks_narrow,
+                retrieval_debug=retrieval_debug,
+                allow_additional_documents=multi_evidence,
             )
             if narrow_result and narrow_result[0][1] >= _NARROW_CONFIDENCE_THRESHOLD:
                 built = self._build_result(
@@ -169,6 +154,8 @@ class RetrievalService:
             filters=filters,
             allow_semantic_context_chunks=allow_contextual_tail and bool(expanded_document_ids),
             max_chunks_per_document=max_chunks_broad,
+            retrieval_debug=retrieval_debug,
+            allow_additional_documents=multi_evidence,
         )
         built = self._build_result(
             broad_result, query_embedding, retrieval_debug=retrieval_debug
@@ -204,44 +191,29 @@ class RetrievalService:
         filters: RetrievalFilters | None,
         allow_semantic_context_chunks: bool = False,
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
+        retrieval_debug: dict[str, object] | None = None,
+        allow_additional_documents: bool = False,
     ) -> list[tuple[DocumentChunk, float]]:
-        candidate_limit = max(top_k * 6, 18)
-
-        semantic_rows = await self.chunk_repo.semantic_search(
-            embedding=query_embedding,
-            auth=auth,
-            limit=candidate_limit,
-            document_ids=document_ids,
-            connector_ids=filters.connector_ids if filters else None,
-            mime_types=filters.mime_types if filters else None,
-            path_prefixes=filters.path_prefixes if filters else None,
-            modified_after=filters.modified_after if filters else None,
-            modified_before=filters.modified_before if filters else None,
-        )
-        keyword_chunks = await self.chunk_repo.keyword_search(
-            terms=keyword_terms,
-            auth=auth,
-            limit=candidate_limit,
-            document_ids=document_ids,
-            connector_ids=filters.connector_ids if filters else None,
-            mime_types=filters.mime_types if filters else None,
-            path_prefixes=filters.path_prefixes if filters else None,
-            modified_after=filters.modified_after if filters else None,
-            modified_before=filters.modified_before if filters else None,
-        )
-
-        ranked_chunks = self._merge_ranked_chunks(
+        candidate_limit = min(max(top_k * 8, 32), 64)
+        retriever = HybridRetriever(self.chunk_repo)
+        candidates, _debug = await retriever.retrieve(
             question=question,
+            query_embedding=query_embedding,
             keyword_terms=keyword_terms,
-            semantic_rows=semantic_rows,
-            keyword_chunks=keyword_chunks,
+            auth=auth,
+            limit=candidate_limit,
+            document_ids=document_ids,
+            filters=filters,
         )
+        if retrieval_debug is not None:
+            retrieval_debug["hybrid"] = _debug.as_dict()
         return self._select_grounded_chunks(
-            ranked_chunks=ranked_chunks,
+            ranked_chunks=candidates,
             keyword_terms=keyword_terms,
             top_k=top_k,
             allow_semantic_context_chunks=allow_semantic_context_chunks,
             max_chunks_per_document=max_chunks_per_document,
+            allow_additional_documents=allow_additional_documents,
         )
 
     @staticmethod
@@ -267,6 +239,7 @@ class RetrievalService:
                     file_path=document.file_path,
                     page_number=chunk.page_number,
                     section_title=chunk.section_title,
+                    heading_path=chunk.heading_path,
                     snippet=build_snippet(chunk.content, limit=420),
                     distance=max(0.0, 1.0 - score),
                     score=score,
@@ -335,49 +308,15 @@ class RetrievalService:
             meta["related_documents_added"] = len(merged_ids) - len(document_ids)
         return merged_ids, meta
 
-    def _merge_ranked_chunks(
-        self,
-        *,
-        question: str,
-        keyword_terms: list[str],
-        semantic_rows: list[tuple[DocumentChunk, float]],
-        keyword_chunks: list[DocumentChunk],
-    ) -> list[RankedChunk]:
-        merged: dict[str, RankedChunk] = {}
-
-        for chunk, distance in semantic_rows:
-            merged[str(chunk.id)] = RankedChunk(
-                chunk=chunk,
-                semantic_score=distance_to_score(distance),
-                contextual_score=rag_temporal.contextual_score_for_chunk(
-                    chunk=chunk, question=question, chunk_year_open_end_policy="start_year"
-                ),
-            )
-
-        for chunk in keyword_chunks:
-            lexical_score = self._keyword_score(keyword_terms, chunk)
-            existing = merged.get(str(chunk.id))
-            if existing is None:
-                merged[str(chunk.id)] = RankedChunk(
-                    chunk=chunk,
-                    lexical_score=lexical_score,
-                    contextual_score=rag_temporal.contextual_score_for_chunk(
-                        chunk=chunk, question=question, chunk_year_open_end_policy="start_year"
-                    ),
-                )
-                continue
-            existing.lexical_score = max(existing.lexical_score, lexical_score)
-
-        return sorted(merged.values(), key=lambda item: item.score, reverse=True)
-
     def _select_grounded_chunks(
         self,
         *,
-        ranked_chunks: list[RankedChunk],
+        ranked_chunks: list[RetrievalCandidate],
         keyword_terms: list[str],
         top_k: int,
         allow_semantic_context_chunks: bool = False,
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
+        allow_additional_documents: bool = False,
     ) -> list[tuple[DocumentChunk, float]]:
         if not ranked_chunks:
             return []
@@ -411,8 +350,13 @@ class RetrievalService:
             if current_doc_count >= max_chunks_per_document:
                 continue
 
-            if current_doc_count == 0 and selected and not self._is_additional_document_match(
+            if (
+                current_doc_count == 0
+                and selected
+                and not allow_additional_documents
+                and not self._is_additional_document_match(
                 item=item, best_score=best_score
+                )
             ):
                 continue
 
@@ -467,29 +411,50 @@ class RetrievalService:
         return []
 
     @staticmethod
-    def _is_additional_document_match(*, item: RankedChunk, best_score: float) -> bool:
+    def _is_additional_document_match(*, item: RetrievalCandidate, best_score: float) -> bool:
         if item.score >= max(0.94, best_score - 0.03):
             return True
         if item.lexical_score >= 0.5:
             return True
-        return item.score >= max(best_score - 0.06, min(0.74, best_score))
+        return False
 
-    def _keyword_score(self, keyword_terms: list[str], chunk: DocumentChunk) -> float:
-        haystack = rag_temporal.chunk_haystack(chunk)
-        if not haystack or not keyword_terms:
-            return 0.0
-
-        token_matches = sum(1 for term in keyword_terms if term in haystack)
-        phrase_matches = sum(
-            1
-            for left, right in zip(keyword_terms, keyword_terms[1:])
-            if f"{left} {right}" in haystack
+def _looks_like_contextual_question(question: str) -> bool:
+    lowered = f" {question.lower()} "
+    return any(
+        marker in lowered
+        for marker in (
+            " after ",
+            " before ",
+            " next ",
+            " previous ",
+            " then ",
+            " later ",
+            " following ",
+            " subsequent ",
+            " prior ",
         )
-        coverage = token_matches / max(len(keyword_terms), 1)
-        phrase_bonus = 0.25 * (phrase_matches / max(len(keyword_terms) - 1, 1))
-        score = coverage + phrase_bonus
-        if token_matches >= 2 and phrase_matches >= 1:
-            score += 0.15
-        if any(term.isdigit() and term in haystack for term in keyword_terms):
-            score += 0.05
-        return min(0.999, max(0.0, score))
+    )
+
+
+def _question_needs_multi_evidence(question: str) -> bool:
+    lowered = question.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "compare",
+            "contrast",
+            "difference",
+            "differences",
+            "timeline",
+            "before and after",
+            "pros and cons",
+            "how many",
+            "list all",
+            "enumerate",
+            "both",
+            "versus",
+            " vs ",
+            "trade-off",
+            "summarize all",
+        )
+    )

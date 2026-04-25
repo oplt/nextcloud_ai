@@ -3,11 +3,11 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from backend.core.exceptions import AuthorizationError
-from backend.core.security import AuthContext
+from ..core.exceptions import AuthorizationError
+from ..core.security import AuthContext
 
 if TYPE_CHECKING:
-    from backend.db.models import Connector, SyncJob, User
+    from ..db.models import Connector, SyncJob, User
 
 
 ROLE_ADMIN = "admin"

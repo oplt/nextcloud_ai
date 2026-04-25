@@ -1,3 +1,4 @@
-from backend.workers.celery_app import celery_app
+from . import celery_app
+from . import indexing_tasks
 
-__all__ = ["celery_app"]
+__all__ = ["celery_app", "indexing_tasks"]

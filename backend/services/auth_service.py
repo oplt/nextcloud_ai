@@ -4,21 +4,21 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.connectors.nextcloud.schemas import Principal
-from backend.core.exceptions import AuthenticationError, ConflictError
-from backend.core.security import (
+from ..connectors.nextcloud.schemas import Principal
+from ..core.exceptions import AuthenticationError, ConflictError
+from ..core.security import (
     AuthContext,
     app_token_service,
     get_password_hash,
     verify_password,
 )
-from backend.db.models import User
-from backend.db.repo.user import RoleRepository, UserRepository
-from backend.schemas.auth_schema import IssuedAuthSession
-from backend.schemas.user_schema import UserRead
-from backend.services.authorization_service import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
-from backend.services.audit_service import AuditService
-from backend.services.role_bootstrap_service import RoleBootstrapService
+from ..db.models import User
+from ..db.repo.user import RoleRepository, UserRepository
+from ..schemas.auth_schema import IssuedAuthSession
+from ..schemas.user_schema import UserRead
+from .authorization_service import ROLE_ADMIN, ROLE_OPERATOR, ROLE_VIEWER
+from .audit_service import AuditService
+from .role_bootstrap_service import RoleBootstrapService
 
 
 class AuthService:

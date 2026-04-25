@@ -116,10 +116,10 @@ This starts:
 - A Celery worker
 - A Celery beat scheduler
 
-Seed the first admin account after the backend is up:
+Docker startup seeds the first admin account automatically. If you need to run it manually:
 
 ```bash
-docker compose exec backend python -m backend.scripts.seed_admin
+docker compose exec backend python -m scripts.seed_admin
 ```
 
 ### Option B: Run services locally
@@ -216,7 +216,7 @@ Seed the first local admin user:
 
 ```bash
 source .venv/bin/activate
-python -m backend.scripts.seed_admin
+python -m scripts.seed_admin
 ```
 
 Start the Celery worker:
@@ -277,7 +277,7 @@ npm --prefix frontend run preview
 ### 1. First login
 
 1. Start the stack.
-2. Run `python -m backend.scripts.seed_admin` or `docker compose exec backend python -m backend.scripts.seed_admin`.
+2. Docker: admin auto-seeded. Local-only: run `python -m scripts.seed_admin`.
 3. Open `http://localhost:5173`.
 4. Sign in with `FIRST_SUPERUSER_EMAIL` and `FIRST_SUPERUSER_PASSWORD` from `backend/.env`.
 

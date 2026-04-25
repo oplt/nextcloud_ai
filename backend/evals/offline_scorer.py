@@ -23,6 +23,30 @@ def precision_at_k(expected: list[str], retrieved: list[str], k: int) -> float:
     return hits / min(k, len(head)) if head else 0.0
 
 
+def retrieval_hit_rate(expected: list[str], retrieved: list[str], k: int) -> float:
+    if not expected:
+        return 0.0
+    head = {str(item) for item in retrieved[:k]}
+    return 1.0 if any(str(item) in head for item in expected) else 0.0
+
+
+def answer_correctness(expected_terms: list[str], answer: str) -> float:
+    terms = [term.lower() for term in expected_terms if term]
+    if not terms:
+        return 0.0
+    lowered = answer.lower()
+    hits = sum(1 for term in terms if term in lowered)
+    return hits / len(terms)
+
+
+def citation_correctness(expected: list[str], cited: list[str]) -> float:
+    if not expected or not cited:
+        return 0.0
+    expected_set = {str(item) for item in expected}
+    cited_set = {str(item) for item in cited}
+    return len(expected_set & cited_set) / len(cited_set)
+
+
 def load_gold_rows(path: Path) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for line in path.read_text(encoding="utf-8").splitlines():

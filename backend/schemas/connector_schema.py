@@ -6,8 +6,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
-from backend.schemas.common_schema import TimestampedSchema
-from backend.schemas.user_schema import UserSummaryRead
+from .common_schema import TimestampedSchema
+from .user_schema import UserSummaryRead
 
 
 class ConnectorCreate(BaseModel):
@@ -32,6 +32,7 @@ class ConnectorCreate(BaseModel):
 
 class ConnectorUpdate(BaseModel):
     display_name: str | None = Field(default=None, max_length=255)
+    base_url: str | None = None
     username: str | None = Field(default=None, max_length=255)
     secret: str | None = None
     root_path: str | None = None

@@ -2,29 +2,48 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import random
 import time
 import uuid
 from dataclasses import dataclass
 
-from backend.db.session import AsyncSessionLocal
-from backend.core.config import settings
-from backend.core.observability import record_job_transition
-from backend.services.email_sync_service import EmailConnectorSyncService
-from backend.services.indexing_service import DocumentIngestionService
-from backend.services.job_lifecycle import JobLifecycleService
-from backend.services.nextcloud_automation_service import NextcloudAutomationService
-from backend.services.nextcloud_sync_service import NextcloudConnectorSyncService
-from backend.workers.celery_app import celery_app
+from ..db.session import AsyncSessionLocal
+from ..core.config import settings
+from ..core.observability import record_job_transition
+from ..services.email_sync_service import EmailConnectorSyncService
+from ..services.indexing_service import DocumentIngestionService
+from ..services.job_lifecycle import JobLifecycleService
+from ..services.nextcloud_automation_service import NextcloudAutomationService
+from ..services.nextcloud_sync_service import NextcloudConnectorSyncService
+from .celery_app import celery_app
 
 logger = logging.getLogger(__name__)
 _WORKER_PING_CACHE_TTL_SECONDS = 5.0
 _worker_ping_cache: dict[str, float | bool] = {"checked_at": 0.0, "available": False}
+_task_loop: asyncio.AbstractEventLoop | None = None
+_task_loop_pid: int | None = None
 
 
 @dataclass(slots=True)
 class EnqueuedTaskHandle:
     id: str
+
+
+def _run_in_worker_loop(coro):
+    global _task_loop, _task_loop_pid
+
+    current_pid = os.getpid()
+    if (
+        _task_loop is None
+        or _task_loop_pid != current_pid
+        or _task_loop.is_closed()
+    ):
+        _task_loop = asyncio.new_event_loop()
+        _task_loop_pid = current_pid
+
+    asyncio.set_event_loop(_task_loop)
+    return _task_loop.run_until_complete(coro)
 
 
 async def _run_logged_background_task(coro, *, label: str) -> None:
@@ -38,7 +57,7 @@ async def _run_logged_background_task(coro, *, label: str) -> None:
 def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
     retry_attempt = int(getattr(self.request, "retries", 0))
     try:
-        return asyncio.run(
+        return _run_in_worker_loop(
             _run_connector_sync_job(
                 job_id=job_id,
                 task_id=self.request.id,
@@ -47,7 +66,7 @@ def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
         )
     except Exception as exc:
         will_retry = retry_attempt < int(self.max_retries)
-        asyncio.run(
+        _run_in_worker_loop(
             _update_failed_job_state(
                 job_id=job_id,
                 task_id=self.request.id,
@@ -67,7 +86,7 @@ async def _run_connector_sync_job(
     *, job_id: str, task_id: str | None, retry_count: int = 0
 ) -> dict[str, int]:
     async with AsyncSessionLocal() as session:
-        from backend.db.repo.sync_job import SyncJobRepository
+        from ..db.repo.sync_job import SyncJobRepository
 
         job_repo = SyncJobRepository(session)
         job = await job_repo.get(job_id)
@@ -105,7 +124,7 @@ async def _update_failed_job_state(
     dead_lettered: bool,
 ) -> None:
     async with AsyncSessionLocal() as session:
-        from backend.db.repo.sync_job import SyncJobRepository
+        from ..db.repo.sync_job import SyncJobRepository
 
         job = await SyncJobRepository(session).get(job_id)
         if job is None:
@@ -151,7 +170,7 @@ async def _update_failed_job_state(
     max_retries=3,
 )
 def run_document_reindex_task(self, document_id: str) -> str:
-    return asyncio.run(_run_document_reindex_task(document_id=document_id))
+    return _run_in_worker_loop(_run_document_reindex_task(document_id=document_id))
 
 
 async def _run_document_reindex_task(*, document_id: str) -> str:
@@ -170,7 +189,7 @@ async def _run_document_reindex_task(*, document_id: str) -> str:
     max_retries=3,
 )
 def enqueue_stale_connector_syncs(self) -> dict[str, int]:
-    return asyncio.run(_enqueue_stale_connector_syncs())
+    return _run_in_worker_loop(_enqueue_stale_connector_syncs())
 
 
 async def _enqueue_stale_connector_syncs() -> dict[str, int]:
@@ -184,7 +203,7 @@ def _enqueue_eager_task(coro, *, label: str) -> EnqueuedTaskHandle:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        asyncio.run(coro)
+        _run_in_worker_loop(coro)
     else:
         loop.create_task(_run_logged_background_task(coro, label=label), name=label)
     return EnqueuedTaskHandle(id=task_id)

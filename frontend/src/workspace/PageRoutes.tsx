@@ -41,6 +41,7 @@ export function ConnectorsRoute() {
       listLoading={w.workspaceDataLoading}
       listError={w.workspaceDataError}
       onCreate={w.handleCreate}
+      onUpdate={w.handleUpdateConnector}
       onDelete={w.handleDelete}
       onTest={w.handleTestConnector}
       onSync={w.handleSyncConnector}

@@ -1,3 +1,3 @@
-from backend.connectors.nextcloud.sync import NextcloudSyncService
+from .sync import NextcloudSyncService
 
 __all__ = ["NextcloudSyncService"]

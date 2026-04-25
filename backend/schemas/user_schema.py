@@ -5,7 +5,7 @@ from uuid import UUID
 
 from pydantic import BaseModel, EmailStr, Field
 
-from backend.schemas.common_schema import ORMBaseSchema, TimestampedSchema
+from .common_schema import ORMBaseSchema, TimestampedSchema
 
 
 class RoleRead(ORMBaseSchema):

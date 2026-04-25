@@ -4,8 +4,8 @@ from dataclasses import dataclass
 from typing import Iterable, Protocol
 from uuid import UUID, uuid4
 
-from backend.ai.prompt_builder import GROUNDED_PROMPT_VERSION
-from backend.schemas.chat_schema import (
+from ..ai.prompt_builder import GROUNDED_PROMPT_VERSION
+from ..schemas.chat_schema import (
     ChatAskRequest,
     ChatAskResponse,
     ChatSource,

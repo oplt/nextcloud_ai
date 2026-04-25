@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from backend.connectors.nextcloud.client import AsyncNextcloudClient
-from backend.connectors.nextcloud.schemas import AccessControlEntry, ShareGrant
+from .client import AsyncNextcloudClient
+from .schemas import AccessControlEntry, ShareGrant
 
 USER_SHARE = 0
 GROUP_SHARE = 1

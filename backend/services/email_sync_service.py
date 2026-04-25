@@ -7,14 +7,14 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.connectors.email.imap_client import AsyncImapClient, ImapMessagePayload
-from backend.core.config import settings
-from backend.db.models import Connector, Document, SyncJob
-from backend.db.repo.document import DocumentRepository
-from backend.parsers.document_parser import ParsedAttachment, parse_email_bytes
-from backend.services.connector_service import ConnectorService
-from backend.services.indexing_service import DocumentIngestionService
-from backend.services.job_lifecycle import JobLifecycleService
+from ..connectors.email.imap_client import AsyncImapClient, ImapMessagePayload
+from ..core.config import settings
+from ..db.models import Connector, Document, SyncJob
+from ..db.repo.document import DocumentRepository
+from ..parsers.document_parser import ParsedAttachment, parse_email_bytes
+from .connector_service import ConnectorService
+from .indexing_service import DocumentIngestionService
+from .job_lifecycle import JobLifecycleService
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
@@ -290,7 +290,7 @@ class EmailConnectorSyncService:
     ) -> bool:
         if document.indexed_at is None:
             return True
-        if document.parse_status in {"failed", "pending", "unsupported"}:
+        if document.parse_status in {"failed", "pending", "unsupported", "unsupported_type", "needs_ocr"}:
             return True
         return previous_version_tag != new_version_tag
 

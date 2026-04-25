@@ -6,8 +6,8 @@ from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from backend.db.models import AuditLog
-from backend.db.repo.base import BaseRepository
+from ..models import AuditLog
+from ..repo.base import BaseRepository
 
 
 class AuditLogRepository(BaseRepository[AuditLog]):

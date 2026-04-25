@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from backend.db.models import AuditLog, User
-from backend.db.repo.audit_log import AuditLogRepository
+from ..db.models import AuditLog, User
+from ..db.repo.audit_log import AuditLogRepository
 
 
 class AuditService:

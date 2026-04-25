@@ -5,8 +5,8 @@ import asyncio
 from fastapi import APIRouter, status
 from fastapi.responses import JSONResponse
 
-from backend.api.deps import DbSessionDep
-from backend.services.health_service import HealthCheckService
+from ..deps import DbSessionDep
+from ...services.health_service import HealthCheckService
 
 router = APIRouter(prefix="/health", tags=["health"])
 

@@ -27,7 +27,7 @@ from sqlalchemy.orm import (
     relationship,
 )
 
-from backend.core.config import settings
+from ..core.config import settings
 
 NAMING_CONVENTION = {
     "ix": "ix_%(column_0_label)s",
@@ -182,20 +182,26 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         ),
         Index("ix_documents_connector_file_path", "connector_id", "file_path"),
         Index("ix_documents_connector_sync_status", "connector_id", "sync_status"),
+        Index("ix_documents_document_type", "document_type"),
+        Index("ix_documents_business_domain", "business_domain"),
+        Index("ix_documents_parse_status", "parse_status"),
+        Index("ix_documents_source_type", "source_type"),
     )
 
-    connector_id: Mapped[uuid.UUID] = mapped_column(
+    connector_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("connectors.id", ondelete="CASCADE"),
-        nullable=False,
+        nullable=True,
         index=True,
     )
-    external_id: Mapped[str] = mapped_column(String(512), nullable=False)
+    external_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    file_extension: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     checksum: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="nextcloud", index=True)
     version_tag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     modified_at: Mapped[datetime | None] = mapped_column(
@@ -210,7 +216,14 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(50), nullable=False, default="pending"
     )
     parse_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    language: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    page_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    word_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    token_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     indexed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    classified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
     last_seen_at: Mapped[datetime | None] = mapped_column(
@@ -221,6 +234,10 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     owner_external_id: Mapped[str | None] = mapped_column(
         String(255), nullable=True, index=True
     )
+    owner_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    permission_scope: Mapped[str | None] = mapped_column(String(100), nullable=True)
     allowed_user_ids: Mapped[list[str]] = mapped_column(
         ARRAY(String()), nullable=False, default=list
     )
@@ -232,8 +249,20 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     acl_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    intelligence_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    ingestion_events_json: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
 
-    connector: Mapped["Connector"] = relationship(
+    document_type: Mapped[str] = mapped_column(String(100), nullable=False, default="unclassified", index=True)
+    document_type_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    document_type_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    document_type_source: Mapped[str] = mapped_column(String(20), nullable=False, default="fallback")
+    business_domain: Mapped[str] = mapped_column(String(100), nullable=False, default="unknown", index=True)
+    business_domain_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    business_domain_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_domain_source: Mapped[str] = mapped_column(String(20), nullable=False, default="fallback")
+    manual_category_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    connector: Mapped["Connector | None"] = relationship(
         back_populates="documents", lazy="selectin"
     )
     chunks: Mapped[list["DocumentChunk"]] = relationship(
@@ -293,6 +322,9 @@ class DocumentChunk(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     content_hash: Mapped[str | None] = mapped_column(
         String(128), nullable=True, index=True
     )
+    chunk_type: Mapped[str] = mapped_column(String(50), nullable=False, default="text")
+    embedding_status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending", index=True)
+    embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(settings.EMBEDDING_DIM), nullable=True
     )

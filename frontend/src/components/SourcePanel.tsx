@@ -141,18 +141,20 @@ export function SourcePanel({ sources, activeContextDocuments = [] }: SourcePane
         {groups.length > 0 ? <span>{groups.length}</span> : null}
       </header>
 
-      {groups.length === 0 ? (
-        <EmptySources />
-      ) : (
-        <div className="source-list">
-          {groups.map((g) => (
-            <SourceCard key={g.document_id} group={g} />
-          ))}
-        </div>
-      )}
+      <div className="source-panel__sources">
+        {groups.length === 0 ? (
+          <EmptySources />
+        ) : (
+          <div className="source-list">
+            {groups.map((g) => (
+              <SourceCard key={g.document_id} group={g} />
+            ))}
+          </div>
+        )}
+      </div>
 
       {activeContextDocuments.length > 0 ? (
-        <>
+        <div className="source-panel__context">
           <header className="panel-header source-panel__subheader">
             <h4>Active context</h4>
             <span>{activeContextDocuments.length}</span>
@@ -162,7 +164,7 @@ export function SourcePanel({ sources, activeContextDocuments = [] }: SourcePane
               <ContextCard key={doc.document_id} document={doc} />
             ))}
           </div>
-        </>
+        </div>
       ) : null}
     </AppCard>
   );

@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 import hashlib
 import bcrypt  # Add direct bcrypt import
 
-from backend.core.config import settings
+from .config import settings
 
 # Use a more compatible CryptContext configuration
 pwd_context = CryptContext(

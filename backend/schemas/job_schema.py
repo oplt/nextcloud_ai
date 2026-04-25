@@ -4,8 +4,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
-from backend.schemas.common_schema import TimestampedSchema
-from backend.schemas.connector_schema import ConnectorRead
+from .common_schema import TimestampedSchema
+from .connector_schema import ConnectorRead
 
 
 class SyncJobRead(TimestampedSchema):

@@ -231,6 +231,12 @@ export async function listDocuments(filters: DocumentListFilters = {}): Promise<
   if (filters.modified_before) {
     params.set('modified_before', filters.modified_before);
   }
+  if (filters.document_type) params.set('document_type', filters.document_type);
+  if (filters.business_domain) params.set('business_domain', filters.business_domain);
+  if (filters.parse_status) params.set('parse_status', filters.parse_status);
+  if (filters.source_type) params.set('source_type', filters.source_type);
+  if (filters.needs_review) params.set('needs_review', 'true');
+  if (filters.low_confidence) params.set('low_confidence', 'true');
   const suffix = params.toString();
   return request<DocumentSummary[]>(`/documents${suffix ? `?${suffix}` : ''}`);
 }
@@ -250,6 +256,16 @@ export function getDocumentOriginalUrl(documentId: string): string {
 export async function reindexDocument(documentId: string): Promise<{ status: string; task_id: string; document_id: string }> {
   return request<{ status: string; task_id: string; document_id: string }>(`/documents/${documentId}/reindex`, {
     method: 'POST',
+  });
+}
+
+export async function updateDocumentClassification(
+  documentId: string,
+  payload: { document_type: string; business_domain: string; document_type_reason?: string; business_domain_reason?: string },
+): Promise<DocumentDetail> {
+  return request<DocumentDetail>(`/documents/${documentId}/classification`, {
+    method: 'PATCH',
+    body: JSON.stringify(payload),
   });
 }
 

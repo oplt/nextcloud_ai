@@ -95,6 +95,7 @@ export type ConnectorPayload = {
 
 export type ConnectorUpdatePayload = {
   display_name?: string;
+  base_url?: string;
   username?: string;
   secret?: string;
   root_path?: string;
@@ -130,13 +131,15 @@ export type SyncJob = {
 
 export type DocumentSummary = {
   id: string;
-  connector_id: string;
-  external_id: string;
+  connector_id: string | null;
+  external_id: string | null;
   file_path: string;
   file_name: string;
+  file_extension: string | null;
   mime_type: string | null;
   checksum: string | null;
   size_bytes: number | null;
+  source_type: string;
   version_tag: string | null;
   source_url: string | null;
   modified_at: string | null;
@@ -144,15 +147,36 @@ export type DocumentSummary = {
   sync_error: string | null;
   parse_status: string;
   parse_error: string | null;
+  language: string | null;
+  page_count: number | null;
+  word_count: number | null;
+  token_count: number | null;
   indexed_at: string | null;
+  classified_at: string | null;
   last_seen_at: string | null;
   is_deleted: boolean;
   owner_external_id: string | null;
+  owner_id: string | null;
+  permission_scope: string | null;
   allowed_user_ids: string[];
   allowed_group_ids: string[];
   public_link_enabled: boolean;
   acl_json: Record<string, unknown> | null;
   metadata_json: Record<string, unknown> | null;
+  intelligence_json: Record<string, unknown> | null;
+  ingestion_events_json: Record<string, unknown>[] | null;
+  document_type: string;
+  document_type_confidence: number;
+  document_type_reason: string | null;
+  document_type_source: string;
+  business_domain: string;
+  business_domain_confidence: number;
+  business_domain_reason: string | null;
+  business_domain_source: string;
+  manual_category_override: boolean;
+  chunk_count: number;
+  signal_counts: Record<string, number>;
+  needs_review: boolean;
   created_at: string;
   updated_at: string;
 };
@@ -169,6 +193,9 @@ export type DocumentChunk = {
   section_title: string | null;
   heading_path: string | null;
   content_hash: string | null;
+  chunk_type: string;
+  embedding_status: string;
+  embedding_model: string | null;
   metadata_json: Record<string, unknown> | null;
   created_at: string;
   updated_at: string;
@@ -214,6 +241,9 @@ export type WorkflowTask = {
   hook_response: string | null;
   hook_last_attempt_at: string | null;
   metadata_json: Record<string, unknown> | null;
+  document_file_name?: string | null;
+  document_file_path?: string | null;
+  document_connector_id?: string | null;
   created_at: string;
   updated_at: string;
 };
@@ -377,6 +407,9 @@ export type RetrievalFilters = {
   path_prefixes?: string[];
   modified_after?: string | null;
   modified_before?: string | null;
+  document_types?: string[];
+  business_domains?: string[];
+  source_types?: string[];
 };
 
 export type RetrievalFilterFormState = {
@@ -394,6 +427,12 @@ export type DocumentListFilters = {
   path_prefixes?: string[];
   modified_after?: string | null;
   modified_before?: string | null;
+  document_type?: string | null;
+  business_domain?: string | null;
+  parse_status?: string | null;
+  source_type?: string | null;
+  needs_review?: boolean | null;
+  low_confidence?: boolean | null;
 };
 
 export type DocumentFilterFormState = {
@@ -403,6 +442,10 @@ export type DocumentFilterFormState = {
   path_prefix: string;
   modified_after: string;
   modified_before: string;
+  document_type: string;
+  business_domain: string;
+  parse_status: string;
+  needs_review: boolean;
 };
 
 export type AuditLog = {

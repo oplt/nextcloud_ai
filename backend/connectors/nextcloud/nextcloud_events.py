@@ -1,3 +1,3 @@
-from backend.connectors.nextcloud.webhooks import router
+from .webhooks import router
 
 __all__ = ["router"]

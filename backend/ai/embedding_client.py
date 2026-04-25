@@ -3,8 +3,8 @@ from __future__ import annotations
 import hashlib
 from typing import Protocol
 
-from backend.core.config import settings
-from backend.ai.ollama_embedding_client import OllamaEmbeddingClient
+from ..core.config import settings
+from .ollama_embedding_client import OllamaEmbeddingClient
 
 
 class EmbeddingClientProtocol(Protocol):

@@ -12,8 +12,17 @@
 		Referrer-Policy "strict-origin-when-cross-origin"
 	}
 
-	@backend path /api/* /docs* /redoc* /openapi.json /health /metrics
-	reverse_proxy @backend backend:8000
+	@nextcloud path /nextcloud /nextcloud/*
+	handle @nextcloud {
+		reverse_proxy nextcloud:80
+	}
 
-	reverse_proxy frontend:80
+	@backend path /api/* /docs* /redoc* /openapi.json /health /metrics
+	handle @backend {
+		reverse_proxy backend:8000
+	}
+
+	handle {
+		reverse_proxy frontend:80
+	}
 }

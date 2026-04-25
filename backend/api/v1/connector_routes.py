@@ -2,23 +2,23 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Response, status
 
-from backend.api.deps import AuthenticatedUser, DbSessionDep, permission_required
-from backend.connectors.nextcloud.exceptions import (
+from ..deps import AuthenticatedUser, DbSessionDep, permission_required
+from ...connectors.nextcloud.exceptions import (
     NextcloudAPIError,
     NextcloudAuthenticationError,
 )
-from backend.core.exceptions import BadRequestError
-from backend.schemas.connector_schema import (
+from ...core.exceptions import BadRequestError
+from ...schemas.connector_schema import (
     ConnectorCreate,
     ConnectorRead,
     ConnectorSyncRequest,
     ConnectorTestResponse,
     ConnectorUpdate,
 )
-from backend.schemas.job_schema import SyncJobRead
-from backend.services.connector_service import ConnectorService
-from backend.services.job_service import JobService
-from backend.workers.indexing_tasks import (
+from ...schemas.job_schema import SyncJobRead
+from ...services.connector_service import ConnectorService
+from ...services.job_service import JobService
+from ...workers.indexing_tasks import (
     enqueue_connector_sync_job,
     should_execute_tasks_locally,
 )

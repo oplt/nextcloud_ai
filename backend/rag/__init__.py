@@ -1,0 +1,2 @@
+"""Modular RAG pipeline primitives."""
+
