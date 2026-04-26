@@ -8,7 +8,7 @@ from sqlalchemy import Select, Text, and_, cast, delete, func, or_, select, upda
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
 
-from ...core.security import AuthContext
+from ...core.security import AuthContext, auth_user_identifiers
 from ..models import Document, DocumentChunk
 from .base import BaseRepository
 
@@ -241,6 +241,21 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return int(result.scalar_one())
 
+    async def has_unusable_chunks(self, document_id: UUID | str) -> bool:
+        result = await self.session.execute(
+            select(
+                func.count(DocumentChunk.id),
+                func.count().filter(
+                    or_(
+                        DocumentChunk.embedding_status != "embedded",
+                        DocumentChunk.embedding.is_(None),
+                    )
+                ),
+            ).where(DocumentChunk.document_id == document_id)
+        )
+        chunk_count, unusable_count = result.one()
+        return int(chunk_count or 0) == 0 or int(unusable_count or 0) > 0
+
     async def find_indexed_duplicate(
         self, *, checksum: str, source_type: str, exclude_document_id: UUID | str
     ) -> Document | None:
@@ -260,11 +275,10 @@ class DocumentRepository(BaseRepository[Document]):
         if auth.is_superuser:
             return Document.is_deleted.is_(False)
         visibility = [Document.public_link_enabled.is_(True)]
-        user_identifiers = [auth.user_id]
-        if auth.external_subject:
-            user_identifiers.append(auth.external_subject)
-            visibility.append(Document.owner_external_id == auth.external_subject)
-        visibility.append(Document.allowed_user_ids.overlap(user_identifiers))
+        user_identifiers = auth_user_identifiers(auth)
+        if user_identifiers:
+            visibility.append(Document.owner_external_id.in_(user_identifiers))
+            visibility.append(Document.allowed_user_ids.overlap(user_identifiers))
         if auth.groups:
             visibility.append(Document.allowed_group_ids.overlap(auth.groups))
         return and_(Document.is_deleted.is_(False), or_(*visibility))

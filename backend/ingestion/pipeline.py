@@ -93,6 +93,7 @@ class IngestionPipeline:
 
         drafts = chunk_parsed_document(parsed_document, chunk_size=850, overlap=100)
         contents = [draft.content for draft in drafts if draft.content and draft.content.strip()]
+        embedding_inputs = [_embedding_input(content) for content in contents]
 
         embeddings: list[list[float] | None] = []
         embedding_status = "skipped"
@@ -102,7 +103,7 @@ class IngestionPipeline:
             try:
                 embeddings = await _embed_in_batches(
                     self.embedding_client,
-                    contents,
+                    embedding_inputs,
                     batch_size=EMBEDDING_BATCH_SIZE,
                 )
                 embedding_status = "embedded"
@@ -229,6 +230,10 @@ def _chunk_type(metadata: dict[str, object]) -> str:
     if metadata.get("image_ocr"):
         return "image_ocr"
     return "text"
+
+
+def _embedding_input(content: str) -> str:
+    return re.sub(r"\b[\w.+-]+@[\w.-]+\.\w+\b", " email-address ", content)
 
 
 def _append_event(

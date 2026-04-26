@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from ..core.exceptions import AuthorizationError
-from ..core.security import AuthContext
+from ..core.security import AuthContext, auth_user_identifiers
 
 if TYPE_CHECKING:
     from ..db.models import Connector, SyncJob, User
@@ -137,12 +137,10 @@ def document_is_visible_to_auth(
         return True
     if public_link_enabled:
         return True
-    if auth.user_id in allowed_user_ids:
+    user_identifiers = set(auth_user_identifiers(auth))
+    if user_identifiers.intersection(allowed_user_ids):
         return True
-    if auth.external_subject and (
-        auth.external_subject == owner_external_id
-        or auth.external_subject in allowed_user_ids
-    ):
+    if owner_external_id and owner_external_id in user_identifiers:
         return True
     if auth.groups and set(auth.groups).intersection(allowed_group_ids):
         return True

@@ -47,7 +47,14 @@ PDF_MIME_TYPES = {"application/pdf"}
 DOCX_MIME_TYPES = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 }
+DOC_MIME_TYPES = {"application/msword"}
 ODT_MIME_TYPES = {"application/vnd.oasis.opendocument.text"}
+ODP_MIME_TYPES = {"application/vnd.oasis.opendocument.presentation"}
+ODS_MIME_TYPES = {"application/vnd.oasis.opendocument.spreadsheet"}
+XLSX_MIME_TYPES = {
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+}
+XLS_MIME_TYPES = {"application/vnd.ms-excel"}
 TEXT_MIME_TYPES = {
     "text/plain",
     "text/markdown",
@@ -82,12 +89,15 @@ _INVOICE_NO_RE = re.compile(
 
 ODT_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
 ODT_TEXT_NS = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
+ODT_TABLE_NS = "urn:oasis:names:tc:opendocument:xmlns:table:1.0"
 ODT_DOCUMENT_CONTENT_TAG = f"{{{ODT_OFFICE_NS}}}document-content"
 ODT_PARAGRAPH_TAG = f"{{{ODT_TEXT_NS}}}p"
 ODT_HEADING_TAG = f"{{{ODT_TEXT_NS}}}h"
 ODT_LINE_BREAK_TAG = f"{{{ODT_TEXT_NS}}}line-break"
 ODT_TAB_TAG = f"{{{ODT_TEXT_NS}}}tab"
 ODT_SPACE_TAG = f"{{{ODT_TEXT_NS}}}s"
+ODT_TABLE_ROW_TAG = f"{{{ODT_TABLE_NS}}}table-row"
+ODT_TABLE_CELL_TAG = f"{{{ODT_TABLE_NS}}}table-cell"
 
 
 async def parse_document_bytes(
@@ -100,8 +110,12 @@ async def parse_document_bytes(
         return parse_pdf_bytes(payload)
     if suffix == ".docx" or normalized_mime in DOCX_MIME_TYPES:
         return parse_docx_bytes(payload)
-    if suffix == ".odt" or normalized_mime in ODT_MIME_TYPES:
-        return parse_odt_bytes(payload)
+    if suffix in {".odt", ".odp", ".ods"} or normalized_mime in ODT_MIME_TYPES | ODP_MIME_TYPES | ODS_MIME_TYPES:
+        return parse_odf_bytes(payload, parser_name=suffix.lstrip(".") or "odf")
+    if suffix == ".xlsx" or normalized_mime in XLSX_MIME_TYPES:
+        return parse_xlsx_bytes(payload)
+    if suffix in {".doc", ".xls"} or normalized_mime in DOC_MIME_TYPES | XLS_MIME_TYPES:
+        return parse_legacy_office_bytes(payload, parser_name=suffix.lstrip(".") or "legacy-office")
     if suffix == ".eml" or normalized_mime in EMAIL_MIME_TYPES:
         return parse_email_bytes(payload)
     if suffix in {
@@ -184,37 +198,95 @@ def parse_docx_bytes(payload: bytes) -> ParsedDocument:
 
 
 def parse_odt_bytes(payload: bytes) -> ParsedDocument:
+    return parse_odf_bytes(payload, parser_name="odt")
+
+
+def parse_odf_bytes(payload: bytes, *, parser_name: str = "odf") -> ParsedDocument:
     try:
         with ZipFile(io.BytesIO(payload)) as archive:
             content_xml = archive.read("content.xml")
     except (BadZipFile, KeyError) as exc:
-        raise ValueError("Invalid ODT payload") from exc
+        raise ValueError("Invalid ODF payload") from exc
 
     try:
         root = ET.fromstring(content_xml)
     except ET.ParseError as exc:
-        raise ValueError("Invalid ODT XML payload") from exc
+        raise ValueError("Invalid ODF XML payload") from exc
 
     if root.tag != ODT_DOCUMENT_CONTENT_TAG:
-        raise ValueError("Invalid ODT document root")
+        raise ValueError("Invalid ODF document root")
 
-    document_text = root.find(f"./{{{ODT_OFFICE_NS}}}body/{{{ODT_OFFICE_NS}}}text")
-    if document_text is None:
-        raise ValueError("Invalid ODT document body")
+    document_body = root.find(f"./{{{ODT_OFFICE_NS}}}body")
+    if document_body is None:
+        raise ValueError("Invalid ODF document body")
 
-    blocks = [
-        block_text
-        for element in document_text.iter()
-        if element.tag in {ODT_PARAGRAPH_TAG, ODT_HEADING_TAG}
-        if (block_text := _extract_odt_text(element))
-    ]
+    blocks: list[str] = []
+    for element in document_body.iter():
+        if element.tag in {ODT_PARAGRAPH_TAG, ODT_HEADING_TAG}:
+            if block_text := _clean_extracted_text(_extract_odt_text(element)):
+                blocks.append(block_text)
+        elif element.tag == ODT_TABLE_ROW_TAG:
+            cells = [
+                _clean_extracted_text(_extract_odt_text(cell))
+                for cell in element
+                if cell.tag == ODT_TABLE_CELL_TAG
+            ]
+            table_text = " | ".join(cell for cell in cells if cell)
+            if table_text:
+                blocks.append(table_text)
     text = "\n".join(blocks)
     pages = [ParsedPage(page_number=None, text=text)] if text else []
     return ParsedDocument(
         text=text,
         pages=pages,
-        metadata={"block_count": len(blocks), "parser": "odt-xml", "extracted_fields": extract_generic_financial_fields(text),},
+        metadata={
+            "block_count": len(blocks),
+            "parser": f"{parser_name}-xml",
+            "extracted_fields": extract_generic_financial_fields(text),
+        },
+    )
 
+
+def parse_xlsx_bytes(payload: bytes) -> ParsedDocument:
+    try:
+        with ZipFile(io.BytesIO(payload)) as archive:
+            shared_strings = _read_xlsx_shared_strings(archive)
+            sheet_names = sorted(
+                name for name in archive.namelist()
+                if name.startswith("xl/worksheets/") and name.endswith(".xml")
+            )
+            rows: list[list[str]] = []
+            for sheet_name in sheet_names[:20]:
+                rows.extend(_read_xlsx_sheet_rows(archive, sheet_name, shared_strings))
+    except (BadZipFile, KeyError, ET.ParseError) as exc:
+        raise ValueError("Invalid XLSX payload") from exc
+
+    formatted = _format_table(rows[:5000])
+    pages = [ParsedPage(page_number=None, text=formatted)] if formatted.strip() else []
+    return ParsedDocument(
+        text=formatted,
+        pages=pages,
+        metadata={
+            "parser": "xlsx-xml",
+            "sheet_count": len(sheet_names),
+            "row_count": len(rows),
+            "truncated": len(rows) > 5000,
+            "extracted_fields": extract_generic_financial_fields(formatted),
+        },
+    )
+
+
+def parse_legacy_office_bytes(payload: bytes, *, parser_name: str) -> ParsedDocument:
+    text = _extract_printable_binary_text(payload)
+    pages = [ParsedPage(page_number=None, text=text)] if text else []
+    return ParsedDocument(
+        text=text,
+        pages=pages,
+        metadata={
+            "parser": f"{parser_name}-binary-text",
+            "fallback": True,
+            "extracted_fields": extract_generic_financial_fields(text),
+        },
     )
 
 
@@ -365,6 +437,65 @@ def _extract_odt_text(element: ET.Element) -> str:
             parts.append(child.tail)
 
     return "".join(parts).strip()
+
+
+def _clean_extracted_text(text: str) -> str:
+    # Presentation templates often contain decorative emoji/placeholders that
+    # can make local embedding backends reject otherwise indexable text.
+    text = re.sub(r"[\U0001F300-\U0001FAFF]", " ", text)
+    return " ".join(text.split())
+
+
+def _read_xlsx_shared_strings(archive: ZipFile) -> list[str]:
+    try:
+        xml_payload = archive.read("xl/sharedStrings.xml")
+    except KeyError:
+        return []
+    root = ET.fromstring(xml_payload)
+    values: list[str] = []
+    for item in root.iter():
+        if item.tag.endswith("}si") or item.tag == "si":
+            values.append("".join(text.text or "" for text in item.iter() if text.tag.endswith("}t") or text.tag == "t"))
+    return values
+
+
+def _read_xlsx_sheet_rows(
+    archive: ZipFile, sheet_name: str, shared_strings: list[str]
+) -> list[list[str]]:
+    root = ET.fromstring(archive.read(sheet_name))
+    rows: list[list[str]] = []
+    for row in root.iter():
+        if not (row.tag.endswith("}row") or row.tag == "row"):
+            continue
+        values: list[str] = []
+        for cell in row:
+            if not (cell.tag.endswith("}c") or cell.tag == "c"):
+                continue
+            cell_type = cell.attrib.get("t")
+            raw_value = ""
+            for child in cell:
+                if child.tag.endswith("}v") or child.tag == "v":
+                    raw_value = child.text or ""
+                    break
+                if child.tag.endswith("}is") or child.tag == "is":
+                    raw_value = "".join(text.text or "" for text in child.iter() if text.tag.endswith("}t") or text.tag == "t")
+                    break
+            if cell_type == "s" and raw_value.isdigit():
+                index = int(raw_value)
+                value = shared_strings[index] if index < len(shared_strings) else raw_value
+            else:
+                value = raw_value
+            values.append(value.strip())
+        if any(values):
+            rows.append(values)
+    return rows
+
+
+def _extract_printable_binary_text(payload: bytes) -> str:
+    decoded = payload.decode("utf-16le", errors="ignore") + "\n" + payload.decode("latin-1", errors="ignore")
+    tokens = re.findall(r"[^\x00-\x1f\x7f-\x9f]{4,}", decoded)
+    cleaned = [" ".join(token.split()) for token in tokens]
+    return "\n".join(dict.fromkeys(token for token in cleaned if token))
 
 
 def _heading_level_from_style(style_name: str) -> int:

@@ -65,8 +65,13 @@ def _looks_like_filename_query(question: str) -> bool:
             "file",
             "pdf",
             ".pdf",
+            ".doc",
             ".docx",
+            ".xls",
             ".xlsx",
+            ".odt",
+            ".ods",
+            ".odp",
         )
     )
 
@@ -239,6 +244,7 @@ class RetrievalService:
             allow_semantic_context_chunks=allow_semantic_context_chunks,
             max_chunks_per_document=max_chunks_per_document,
             allow_additional_documents=allow_additional_documents,
+            allow_scoped_fallback=bool(document_ids),
         )
 
     @staticmethod
@@ -355,6 +361,7 @@ class RetrievalService:
         allow_semantic_context_chunks: bool = False,
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         allow_additional_documents: bool = False,
+        allow_scoped_fallback: bool = False,
     ) -> list[tuple[DocumentChunk, float]]:
         if not ranked_chunks:
             return []
@@ -454,7 +461,7 @@ class RetrievalService:
             document = chunk.document
             if document is None or document.is_deleted:
                 continue
-            if item.score < _ABSOLUTE_MIN_SCORE:
+            if item.score < _ABSOLUTE_MIN_SCORE and not allow_scoped_fallback:
                 break
             return [(chunk, item.score)]
 

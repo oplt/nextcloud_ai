@@ -72,7 +72,11 @@ class DocumentIngestionService:
                 source_type=document.source_type,
                 exclude_document_id=document.id,
             )
-            if duplicate and document.parse_status == "indexed":
+            if (
+                duplicate
+                and document.parse_status == "indexed"
+                and not await self.document_repo.has_unusable_chunks(document.id)
+            ):
                 document.ingestion_events_json = [
                     *(document.ingestion_events_json or []),
                     {

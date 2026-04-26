@@ -1,5 +1,6 @@
 import { useCallback, useMemo, useState } from 'react';
 import Alert from '@mui/material/Alert';
+import Drawer from '@mui/material/Drawer';
 
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
@@ -67,6 +68,7 @@ export function DocumentsPage({
   const [sortColumn, setSortColumn] = useState<DocumentSortColumn>('updated');
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
+  const [viewerOpen, setViewerOpen] = useState(false);
 
   const availableMimeTypes = useMemo(
     () =>
@@ -178,8 +180,20 @@ export function DocumentsPage({
     setFilters((current) => ({ ...current, ...patch }));
   }, []);
 
+  const handleSelectDocument = useCallback(
+    async (document: DocumentSummary) => {
+      await onSelect(document);
+      setViewerOpen(true);
+    },
+    [onSelect],
+  );
+
+  const handleCloseViewer = useCallback(() => {
+    setViewerOpen(false);
+  }, []);
+
   return (
-    <section className="split-layout split-layout--wide">
+    <section className="documents-page">
       <div className="documents-panel">
         {viewError ? (
           <Alert severity="error" className="page-alert">
@@ -315,11 +329,24 @@ export function DocumentsPage({
           sectionCollapsible
           onPageChange={setCurrentPage}
           onSort={handleSort}
-          onSelect={(document) => void onSelect(document)}
+          onSelect={(document) => void handleSelectDocument(document)}
         />
       </div>
 
-      <DocumentViewer document={selectedDocument} onReindex={onReindex} />
+      <Drawer
+        anchor="right"
+        open={viewerOpen && Boolean(selectedDocument)}
+        onClose={handleCloseViewer}
+        sx={{
+          '& .MuiDrawer-paper': {
+            width: 'min(80rem, 100vw)',
+            maxWidth: '100vw',
+          },
+        }}
+        slotProps={{ paper: { className: 'document-viewer-drawer__paper' } }}
+      >
+        <DocumentViewer document={selectedDocument} onReindex={onReindex} onClose={handleCloseViewer} />
+      </Drawer>
     </section>
   );
 }

@@ -310,7 +310,7 @@ export function OverviewPage({
         <AppCard component="aside" className="card session-list">
           <header className="panel-header">
             <div className="session-list__heading">
-              <h3>Chatbot</h3>
+
               {sessions.length > 0 ? (
                 <AppCheckbox
                   onChange={() =>
@@ -322,6 +322,7 @@ export function OverviewPage({
                   aria-label="Select all sessions"
                 />
               ) : null}
+              <h3>Chatbot</h3>
             </div>
             <div className="session-list__actions">
               {isSelectionMode ? (

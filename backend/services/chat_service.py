@@ -36,7 +36,32 @@ from .document_search_service import DocumentSearchService
 from .retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
-_CITATION_RE = re.compile(r"\[(\d+)\]")
+_CITATION_RE = re.compile(r"\[(?:source\s*)?(\d+)\]", flags=re.IGNORECASE)
+_AMOUNT_QUERY_RE = re.compile(
+    r"\b(amount|total|balance|due|pay|payable|paid|cost|price|invoice|factuur|bill|charge)\b",
+    flags=re.IGNORECASE,
+)
+_MONEY_RE = re.compile(
+    r"(?:€\s*\d[\d.,]*|\d[\d.,]*\s*(?:eur|euro|€))",
+    flags=re.IGNORECASE,
+)
+_AMOUNT_CONTEXT_RE = re.compile(
+    r"\b(total|amount|balance|due|payable|pay|invoice|factuur|bill|charge|incl|btw|vat|te betalen|bedrag)\b",
+    flags=re.IGNORECASE,
+)
+_DUE_DATE_QUERY_RE = re.compile(
+    r"\b(due date|deadline|payment date|pay before|pay by|te betalen voor|vervaldatum)\b|\bwhen\b.*\b(due|pay|payable)\b",
+    flags=re.IGNORECASE,
+)
+_DATE_VALUE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b")
+_DUE_DATE_CONTEXT_RE = re.compile(
+    r"\b(due|deadline|payable|pay before|pay by|payment|te betalen voor|vervaldatum)\b",
+    flags=re.IGNORECASE,
+)
+_TITLE_QUERY_RE = re.compile(
+    r"\b(name|title|article|paper|publication|write|wrote|written|publish|published)\b",
+    flags=re.IGNORECASE,
+)
 _INSUFFICIENT_MARKERS = (
     'could not verify',
     'could not find',
@@ -55,6 +80,63 @@ _YEAR_RANGE_RE = re.compile(
     r"\b((?:19|20)\d{2})\b.{0,48}?(?:-|to|through|until|–|—).{0,48}?\b((?:19|20)\d{2}|present|current|now)\b",
     flags=re.IGNORECASE,
 )
+_PIPE_RANGE_ROW_RE = re.compile(
+    r"(?P<label>[^|\n]{2,120}?)\s*\|\s*(?P<context>[^|\n]{2,100}?)\s*\|\s*(?P<start>(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})\s*[-–—]\s*(?P<end>(?:(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})|present|current|now)",
+    flags=re.IGNORECASE,
+)
+_GENERIC_QUERY_STOPWORDS = {
+    "about",
+    "after",
+    "before",
+    "could",
+    "does",
+    "did",
+    "from",
+    "give",
+    "have",
+    "into",
+    "list",
+    "show",
+    "tell",
+    "that",
+    "the",
+    "this",
+    "what",
+    "when",
+    "where",
+    "which",
+    "with",
+    "name",
+    "title",
+    "article",
+    "paper",
+    "publication",
+    "write",
+    "wrote",
+    "written",
+    "publish",
+    "published",
+    "date",
+    "due",
+    "deadline",
+    "payment",
+    "payable",
+}
+_AMOUNT_QUERY_TERMS = {
+    "amount",
+    "total",
+    "balance",
+    "due",
+    "pay",
+    "payable",
+    "paid",
+    "cost",
+    "price",
+    "invoice",
+    "factuur",
+    "bill",
+    "charge",
+}
 
 
 def _same_question_text(left: str, right: str) -> bool:
@@ -320,6 +402,122 @@ class ChatService:
 
         return sources
 
+    async def _augment_question_sources_from_same_documents(
+        self,
+        *,
+        question: str,
+        sources: list[ChatSource],
+        max_sources: int,
+    ) -> list[ChatSource]:
+        if not sources:
+            return sources
+        years = self._requested_years(question)
+        query_terms = self._generic_query_terms(question)
+        if not years and not query_terms:
+            return sources
+
+        chunk_repo = DocumentChunkRepository(self.session)
+        existing_ids = {str(source.chunk_id) for source in sources}
+        document_ids: list[UUID] = []
+        seen_documents: set[str] = set()
+        source_chunk_ids_by_document: dict[str, set[str]] = {}
+        for source in sources:
+            document_key = str(source.document_id)
+            source_chunk_ids_by_document.setdefault(document_key, set()).add(
+                str(source.chunk_id)
+            )
+            if document_key in seen_documents:
+                continue
+            seen_documents.add(document_key)
+            document_ids.append(UUID(document_key))
+
+        boosted_sources: list[tuple[float, ChatSource]] = []
+        base_score = max((source.score for source in sources), default=0.72)
+        for document_id in document_ids[:3]:
+            chunks = await chunk_repo.list_by_document(document_id)
+            document_key = str(document_id)
+            anchor_chunk_ids = source_chunk_ids_by_document.get(document_key, set())
+            anchor_indexes = {
+                chunk.chunk_index for chunk in chunks if str(chunk.id) in anchor_chunk_ids
+            }
+            for chunk in chunks:
+                chunk_key = str(chunk.id)
+                if chunk_key in existing_ids:
+                    continue
+                source = self._source_from_chunk(chunk, score=max(0.5, base_score - 0.01))
+                relevance = self._same_document_chunk_relevance(
+                    question_terms=query_terms,
+                    years=years,
+                    source=source,
+                    chunk=chunk,
+                    anchor_indexes=anchor_indexes,
+                )
+                if years and self._source_supports_years(source, years):
+                    boosted_sources.append((relevance + 10.0, source))
+                    existing_ids.add(chunk_key)
+                    continue
+                if relevance > 0:
+                    boosted_sources.append((relevance, source))
+                    existing_ids.add(chunk_key)
+
+        if not boosted_sources:
+            return sources
+        boosted_sources.sort(key=lambda item: item[0], reverse=True)
+        return [source for _, source in boosted_sources[:max_sources]] + sources
+
+    @staticmethod
+    def _generic_query_terms(question: str) -> list[str]:
+        terms: list[str] = []
+        seen: set[str] = set()
+        for token in re.findall(r"[^\W\s]+", question.lower(), flags=re.UNICODE):
+            if token in _GENERIC_QUERY_STOPWORDS:
+                continue
+            if len(token) < 3 and not any(ch.isdigit() for ch in token):
+                continue
+            if token in seen:
+                continue
+            seen.add(token)
+            terms.append(token)
+        return terms
+
+    @classmethod
+    def _same_document_chunk_relevance(
+        cls,
+        *,
+        question_terms: list[str],
+        years: list[int],
+        source: ChatSource,
+        chunk: DocumentChunk,
+        anchor_indexes: set[int],
+    ) -> float:
+        text = " ".join(
+            [
+                chunk.content or "",
+                chunk.section_title or "",
+                chunk.heading_path or "",
+                source.file_name or "",
+                source.file_path or "",
+            ]
+        ).lower()
+        score = 0.0
+        if question_terms:
+            score += sum(1.0 for term in question_terms if term in text)
+        if years and cls._source_supports_years(source, years):
+            score += 4.0
+        if _AMOUNT_QUERY_RE.search(" ".join(question_terms)) and _MONEY_RE.search(text):
+            score += 3.0
+            if _AMOUNT_CONTEXT_RE.search(text):
+                score += 2.0
+        if anchor_indexes:
+            nearest = min(
+                abs(chunk.chunk_index - anchor)
+                for anchor in anchor_indexes
+                if anchor >= 0
+            ) if any(anchor >= 0 for anchor in anchor_indexes) else None
+            if nearest is not None and nearest <= 16:
+                score += max(0.2, 2.0 / (nearest + 1))
+        return score
+
     @staticmethod
     def _parse_active_context_document_ids(document_ids: list[str] | None) -> list[UUID]:
         parsed_ids: list[UUID] = []
@@ -494,6 +692,289 @@ class ChatService:
         return normalized_answer, filtered_sources
 
     @staticmethod
+    def _answer_style_rules(question: str) -> list[str]:
+        if not _AMOUNT_QUERY_RE.search(question):
+            return []
+        return [
+            "For amount, total, balance, payable, invoice, bill, cost, or price questions: answer with the exact amount first.",
+            "Prefer the payable/total/invoice amount over tariffs, rates, fees, background, or explanatory text unless the user asks for those.",
+            "Keep amount answers to one short sentence when one amount directly answers the question.",
+        ]
+
+    @staticmethod
+    def _source_evidence_text(source: ChatSource) -> str:
+        return " ".join(
+            [
+                source.content or "",
+                source.snippet or "",
+                source.section_title or "",
+                source.heading_path or "",
+                source.file_name or "",
+                source.file_path or "",
+            ]
+        )
+
+    @classmethod
+    def _source_evidence_lines(cls, source: ChatSource) -> list[str]:
+        text = "\n".join(
+            [
+                source.content or "",
+                source.snippet or "",
+                source.section_title or "",
+                source.heading_path or "",
+            ]
+        )
+        lines: list[str] = []
+        for raw_line in text.splitlines():
+            line = " ".join(raw_line.split()).strip()
+            if line:
+                lines.append(line)
+        if not lines and text.strip():
+            lines.append(" ".join(text.split()))
+        return lines
+
+    @classmethod
+    def _build_direct_answer(
+        cls, *, question: str, sources: list[ChatSource], trace_id: str
+    ) -> tuple[str, list[ChatSource], dict[str, object]] | None:
+        title_answer = cls._build_direct_title_answer(question=question, sources=sources)
+        if title_answer is not None:
+            answer, cited_sources = title_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "title",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+
+        due_date_answer = cls._build_direct_due_date_answer(question=question, sources=sources)
+        if due_date_answer is not None:
+            answer, cited_sources = due_date_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "due_date",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+
+        amount_answer = cls._build_direct_amount_answer(question=question, sources=sources)
+        if amount_answer is not None:
+            answer, cited_sources = amount_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "amount",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+
+        range_answer = cls._build_direct_range_answer(question=question, sources=sources)
+        if range_answer is not None:
+            answer, cited_sources = range_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "date_range_rows",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+        return None
+
+    @classmethod
+    def _build_direct_due_date_answer(
+        cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        if not _DUE_DATE_QUERY_RE.search(question):
+            return None
+        entity_terms = cls._direct_answer_entity_terms(question)
+        best: tuple[float, str, ChatSource] | None = None
+        for source in sources:
+            text = cls._source_evidence_text(source)
+            if not text:
+                continue
+            entity_score = cls._entity_match_score(entity_terms, text)
+            if entity_terms and entity_score <= 0:
+                continue
+            for match in _DATE_VALUE_RE.finditer(text):
+                start = max(0, match.start() - 90)
+                end = min(len(text), match.end() + 90)
+                context = text[start:end]
+                score = source.score + entity_score * 5.0
+                if _DUE_DATE_CONTEXT_RE.search(context):
+                    score += 5.0
+                if re.search(r"\b(te betalen voor|pay before|pay by|due date|vervaldatum)\b", context, flags=re.IGNORECASE):
+                    score += 10.0
+                if re.search(r"\bfactuurdatum\b", context, flags=re.IGNORECASE):
+                    score -= 6.0
+                candidate = (score, match.group(0), source)
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+        if best is None:
+            return None
+        _score, due_date, source = best
+        return f"{due_date} [1]", [source]
+
+    @classmethod
+    def _build_direct_title_answer(
+        cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        if not _TITLE_QUERY_RE.search(question):
+            return None
+        years = cls._requested_years(question)
+        best: tuple[float, str, ChatSource] | None = None
+        for source in sources:
+            if years and not cls._source_supports_years(source, years):
+                continue
+            title = cls._title_from_source(source)
+            if title is None:
+                continue
+            score = source.score
+            if years:
+                score += 3.0
+            if re.search(r"\b(article|paper|journal|publication)\b", cls._source_evidence_text(source), flags=re.IGNORECASE):
+                score += 2.0
+            candidate = (score, title, source)
+            if best is None or candidate[0] > best[0]:
+                best = candidate
+        if best is None:
+            return None
+        _score, title, source = best
+        return f"{title} [1]", [source]
+
+    @staticmethod
+    def _title_from_source(source: ChatSource) -> str | None:
+        candidates = [source.file_name or "", source.heading_path or "", source.section_title or ""]
+        for candidate in candidates:
+            value = candidate.strip()
+            if not value:
+                continue
+            if "/" in value:
+                value = value.split("/")[-1].strip()
+            value = re.sub(r"\.(pdf|docx?|odt|txt|md)$", "", value, flags=re.IGNORECASE).strip()
+            value = re.split(r"\s*>\s*", value)[0].strip()
+            value = re.sub(r"\s*-\s+", ": ", value).strip(" :-")
+            if len(value) >= 8 and not value.lower() in {"introduction", "appendix"}:
+                return value
+        return None
+
+    @classmethod
+    def _build_direct_amount_answer(
+        cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        if _DUE_DATE_QUERY_RE.search(question):
+            return None
+        if not _AMOUNT_QUERY_RE.search(question):
+            return None
+        entity_terms = cls._direct_answer_entity_terms(question)
+        best: tuple[float, str, ChatSource] | None = None
+        for source in sources:
+            text = cls._source_evidence_text(source)
+            if not text:
+                continue
+            entity_score = cls._entity_match_score(entity_terms, text)
+            if entity_terms and entity_score <= 0:
+                continue
+            for match in _MONEY_RE.finditer(text):
+                amount = " ".join(match.group(0).replace("€", " EUR").split())
+                start = max(0, match.start() - 80)
+                end = min(len(text), match.end() + 80)
+                context = text[start:end]
+                score = source.score + entity_score * 5.0
+                if _AMOUNT_CONTEXT_RE.search(context):
+                    score += 3.0
+                if re.search(r"\b(te betalen|payable|total|invoice total|factuur.*bedrag|bedrag)\b", context, flags=re.IGNORECASE):
+                    score += 4.0
+                if amount.lower().startswith("eur"):
+                    amount = amount[3:].strip() + " EUR"
+                candidate = (score, amount, source)
+                if best is None or candidate[0] > best[0]:
+                    best = candidate
+        if best is None:
+            return None
+        _score, amount, source = best
+        return f"{amount} [1]", [source]
+
+    @classmethod
+    def _build_direct_range_answer(
+        cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        years = cls._requested_years(question)
+        if len(years) < 2:
+            return None
+        query_start, query_end = min(years), max(years)
+        matches: list[tuple[str, str, str, ChatSource, int, int]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for source in sources:
+            for line in cls._source_evidence_lines(source):
+                for match in _PIPE_RANGE_ROW_RE.finditer(line):
+                    label = " ".join(match.group("label").split()).strip(":- ")
+                    context = " ".join(match.group("context").split()).strip(":- ")
+                    if not cls._looks_like_clean_range_label(label):
+                        continue
+                    if not cls._looks_like_clean_range_label(context, allow_short=True):
+                        continue
+                    start_year = cls._first_year(match.group("start"))
+                    end_year = cls._first_year(match.group("end")) or 9999
+                    if start_year is None:
+                        continue
+                    if end_year < query_start or start_year > query_end:
+                        continue
+                    date_range = f"{match.group('start').strip()} - {match.group('end').strip()}"
+                    key = (label.lower(), context.lower(), date_range.lower())
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    matches.append((label, context, date_range, source, start_year, end_year))
+        if not matches:
+            return None
+        matches.sort(key=lambda item: (item[4], item[5], item[0].lower()))
+        matches = matches[:6]
+        cited_sources = [item[3] for item in matches]
+        lines = [
+            f"- {label} ({context}, {date_range}) [{index}]"
+            for index, (label, context, date_range, _source, _start, _end) in enumerate(matches, start=1)
+        ]
+        return "\n".join(lines), cited_sources
+
+    @classmethod
+    def _direct_answer_entity_terms(cls, question: str) -> list[str]:
+        return [
+            term
+            for term in cls._generic_query_terms(question)
+            if term not in _AMOUNT_QUERY_TERMS
+        ]
+
+    @staticmethod
+    def _entity_match_score(entity_terms: list[str], text: str) -> float:
+        if not entity_terms:
+            return 0.0
+        normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
+        score = 0.0
+        for term in entity_terms:
+            compact = re.sub(r"[^a-z0-9]+", "", term.lower())
+            if not compact:
+                continue
+            if compact in normalized:
+                score += 1.0
+            elif len(compact) >= 6 and compact[:6] in normalized:
+                score += 0.7
+        return score
+
+    @staticmethod
+    def _looks_like_clean_range_label(value: str, *, allow_short: bool = False) -> bool:
+        cleaned = value.strip()
+        if len(cleaned) < (2 if allow_short else 3) or len(cleaned) > 90:
+            return False
+        if any(marker in cleaned for marker in ("●", "Context above", "Context below", "Extracted table facts")):
+            return False
+        return True
+
+    @staticmethod
+    def _first_year(text: str) -> int | None:
+        match = _YEAR_RE.search(text)
+        if match is None:
+            return None
+        return int(match.group(0))
+
+    @staticmethod
     def _is_insufficient_answer(answer: str) -> bool:
         lowered = f" {answer.lower()} "
         return any(marker in lowered for marker in _INSUFFICIENT_MARKERS)
@@ -615,6 +1096,14 @@ class ChatService:
         filtered = [
             source for source in sources if cls._source_supports_years(source, years)
         ]
+        if not filtered:
+            return sources, {
+                "time_filter_applied": False,
+                "time_filter_relaxed": True,
+                "requested_years": years,
+                "before": len(sources),
+                "after": 0,
+            }
         return filtered, {
             "time_filter_applied": True,
             "requested_years": years,
@@ -817,7 +1306,13 @@ class ChatService:
         normalized_answer, cited_sources = self._filter_sources_to_citations(answer, sources)
         if self._is_insufficient_answer(normalized_answer):
             verification['result'] = 'insufficient_answer'
-            return normalized_answer, [], verification
+            supporting_sources = cited_sources or self._select_supporting_sources(
+                question=question,
+                answer=normalized_answer,
+                sources=sources,
+                max_sources=4,
+            )
+            return normalized_answer, supporting_sources, verification
 
         if not cited_sources:
             supporting_sources = self._select_supporting_sources(
@@ -1142,6 +1637,7 @@ class ChatService:
                             sources=fallback_sources,
                             history=history if history else None,
                             memory_block=memory_note or None,
+                            extra_rules=self._answer_style_rules(question),
                         )
                         raw_answer = (await self.llm_client.generate(prompt)).strip()
                     except Exception as llm_exc:
@@ -1207,6 +1703,11 @@ class ChatService:
                             sources=candidate_sources,
                             preferred_chunk_refs=preferred_chunk_refs,
                         )
+                    candidate_sources = await self._augment_question_sources_from_same_documents(
+                        question=question,
+                        sources=candidate_sources,
+                        max_sources=max(20, request.top_k * 3),
+                    )
                     candidate_sources, constraint_debug = self._filter_sources_for_question_constraints(
                         question=question,
                         sources=candidate_sources,
@@ -1230,58 +1731,67 @@ class ChatService:
                             'trace_id': trace_id,
                         }
                     else:
-                        try:
-                            memory_note = chat_memory.build_memory_prompt_block(mem)
-                            prompt = build_grounded_prompt(
-                                question=question,
-                                sources=candidate_sources,
-                                history=history if history else None,
-                                memory_block=memory_note or None,
-                            )
-                            raw_answer = (await self.llm_client.generate(prompt)).strip()
-                        except Exception as exc:
-                            llm_error_type = type(exc).__name__
-                            logger.exception(
-                                'chat.llm_failed session=%s trace=%s',
-                                chat_session.id,
-                                trace_id,
-                            )
-                            if isinstance(exc, httpx.TimeoutException):
-                                sources = candidate_sources[:2]
-                                answer = self._build_source_fallback_answer(sources)
-                                verification_summary = {
-                                    'result': 'llm_timeout_source_fallback',
-                                    'error_type': llm_error_type,
-                                    'shadow_mode': shadow_mode,
-                                    'trace_id': trace_id,
-                                }
-                            else:
-                                answer = self._build_failure_answer(exc)
-                                sources = []
-                                verification_summary = {
-                                    'result': 'llm_failed',
-                                    'error_type': llm_error_type,
-                                    'shadow_mode': shadow_mode,
-                                    'trace_id': trace_id,
-                                }
-                            observability.record_rag_stage_error(stage='llm')
+                        direct_answer = self._build_direct_answer(
+                            question=question,
+                            sources=candidate_sources,
+                            trace_id=trace_id,
+                        )
+                        if direct_answer is not None:
+                            answer, sources, verification_summary = direct_answer
                         else:
-                            if not raw_answer:
-                                answer = self._build_empty_answer()
-                                sources = candidate_sources
-                                verification_summary = {
-                                    'result': 'empty_llm',
-                                    'shadow_mode': shadow_mode,
-                                    'trace_id': trace_id,
-                                }
-                            else:
-                                answer, sources, verification_summary = self._verify_and_normalize_answer(
+                            try:
+                                memory_note = chat_memory.build_memory_prompt_block(mem)
+                                prompt = build_grounded_prompt(
                                     question=question,
-                                    answer=raw_answer,
                                     sources=candidate_sources,
-                                    shadow_mode=shadow_mode,
-                                    trace_id=trace_id,
+                                    history=history if history else None,
+                                    memory_block=memory_note or None,
+                                    extra_rules=self._answer_style_rules(question),
                                 )
+                                raw_answer = (await self.llm_client.generate(prompt)).strip()
+                            except Exception as exc:
+                                llm_error_type = type(exc).__name__
+                                logger.exception(
+                                    'chat.llm_failed session=%s trace=%s',
+                                    chat_session.id,
+                                    trace_id,
+                                )
+                                if isinstance(exc, httpx.TimeoutException):
+                                    sources = candidate_sources[:2]
+                                    answer = self._build_source_fallback_answer(sources)
+                                    verification_summary = {
+                                        'result': 'llm_timeout_source_fallback',
+                                        'error_type': llm_error_type,
+                                        'shadow_mode': shadow_mode,
+                                        'trace_id': trace_id,
+                                    }
+                                else:
+                                    answer = self._build_failure_answer(exc)
+                                    sources = []
+                                    verification_summary = {
+                                        'result': 'llm_failed',
+                                        'error_type': llm_error_type,
+                                        'shadow_mode': shadow_mode,
+                                        'trace_id': trace_id,
+                                    }
+                                observability.record_rag_stage_error(stage='llm')
+                            else:
+                                if not raw_answer:
+                                    answer = self._build_empty_answer()
+                                    sources = candidate_sources
+                                    verification_summary = {
+                                        'result': 'empty_llm',
+                                        'shadow_mode': shadow_mode,
+                                        'trace_id': trace_id,
+                                    }
+                                else:
+                                    answer, sources, verification_summary = self._verify_and_normalize_answer(
+                                        question=question,
+                                        answer=raw_answer,
+                                        sources=candidate_sources,
+                                        shadow_mode=shadow_mode,
+                                        trace_id=trace_id,
+                                    )
 
         cited_document_ids = self._extract_document_ids_from_sources(sources)
         if cited_document_ids:

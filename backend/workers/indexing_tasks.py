@@ -300,7 +300,7 @@ def _celery_worker_is_available() -> bool:
     available = False
     try:
         # Use shorter timeout for faster failure detection
-        responses = celery_app.control.inspect(timeout=0.3).ping()
+        responses = celery_app.control.inspect(timeout=2.0).ping()
         available = bool(responses and len(responses) > 0)
     except Exception:
         logger.debug("Celery worker availability check failed")

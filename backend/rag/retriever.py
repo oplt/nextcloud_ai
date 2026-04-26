@@ -10,7 +10,6 @@ from ..db.repo.document import DocumentChunkRepository
 from ..schemas.chat_schema import RetrievalFilters
 from .reranker import ContextReranker
 from .stores import KeywordSearchStore, PgVectorStore, RetrievalCandidate
-import asyncio
 
 
 @dataclass(slots=True)
@@ -76,21 +75,19 @@ class HybridRetriever:
         keyword_limit = keyword_top_k or settings.RAG_KEYWORD_TOP_K
         rerank_limit = rerank_top_k or settings.RAG_RERANK_TOP_K
         final_limit = final_top_n or settings.RAG_FINAL_TOP_N
-        semantic, keyword = await asyncio.gather(
-            self.vector_store.search(
-                embedding=query_embedding,
-                auth=auth,
-                limit=vector_limit,
-                document_ids=document_ids,
-                filters=filters,
-            ),
-            self.keyword_store.search(
-                terms=keyword_terms,
-                auth=auth,
-                limit=keyword_limit,
-                document_ids=document_ids,
-                filters=filters,
-            ),
+        semantic = await self.vector_store.search(
+            embedding=query_embedding,
+            auth=auth,
+            limit=vector_limit,
+            document_ids=document_ids,
+            filters=filters,
+        )
+        keyword = await self.keyword_store.search(
+            terms=keyword_terms,
+            auth=auth,
+            limit=keyword_limit,
+            document_ids=document_ids,
+            filters=filters,
         )
         merged = _merge_candidates(semantic, keyword)
         merged_count = len(merged)

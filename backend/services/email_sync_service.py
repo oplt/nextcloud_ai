@@ -62,8 +62,11 @@ class EmailConnectorSyncService:
                     )
                     seen_external_ids.append(email_document.external_id)
 
-                    if full_reindex or self._document_needs_reindex(
-                        email_document, email_previous_version, email_document.version_tag
+                    if await self._should_reindex_document(
+                        email_document,
+                        email_previous_version,
+                        email_document.version_tag,
+                        full_reindex=full_reindex,
                     ):
                         await self.ingestion.ingest_document_bytes(
                             email_document, message.raw_message
@@ -82,10 +85,11 @@ class EmailConnectorSyncService:
                             )
                         )
                         seen_external_ids.append(attachment_document.external_id)
-                        if full_reindex or self._document_needs_reindex(
+                        if await self._should_reindex_document(
                             attachment_document,
                             attachment_previous_version,
                             attachment_document.version_tag,
+                            full_reindex=full_reindex,
                         ):
                             await self.ingestion.ingest_document_bytes(
                                 attachment_document,
@@ -290,9 +294,32 @@ class EmailConnectorSyncService:
     ) -> bool:
         if document.indexed_at is None:
             return True
-        if document.parse_status in {"failed", "pending", "unsupported", "unsupported_type", "needs_ocr"}:
+        if document.parse_status in {
+            "failed",
+            "pending",
+            "partially_parsed",
+            "unsupported",
+            "unsupported_type",
+            "needs_ocr",
+        }:
             return True
         return previous_version_tag != new_version_tag
+
+    async def _should_reindex_document(
+        self,
+        document: Document,
+        previous_version_tag: str | None,
+        new_version_tag: str | None,
+        *,
+        full_reindex: bool = False,
+    ) -> bool:
+        if full_reindex:
+            return True
+        if self._document_needs_reindex(document, previous_version_tag, new_version_tag):
+            return True
+        if document.parse_status != "indexed":
+            return False
+        return await self.document_repo.has_unusable_chunks(document.id)
 
     @staticmethod
     def _message_file_path(

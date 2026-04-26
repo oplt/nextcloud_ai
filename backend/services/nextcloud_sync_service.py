@@ -169,8 +169,12 @@ class NextcloudConnectorSyncService:
                     document_repo=document_repo,
                     item=item,
                 )
-                should_reindex = full_reindex or self._document_needs_reindex(
-                    document, previous_version_tag, item.node.etag
+                should_reindex = (
+                    full_reindex
+                    or self._document_needs_reindex(
+                        document, previous_version_tag, item.node.etag
+                    )
+                    or await self._document_has_unusable_chunks(document, document_repo)
                 )
                 if not should_reindex:
                     await task_session.commit()
@@ -265,6 +269,21 @@ class NextcloudConnectorSyncService:
     ) -> bool:
         if document.indexed_at is None:
             return True
-        if document.parse_status in {"failed", "pending", "unsupported", "unsupported_type", "needs_ocr"}:
+        if document.parse_status in {
+            "failed",
+            "pending",
+            "partially_parsed",
+            "unsupported",
+            "unsupported_type",
+            "needs_ocr",
+        }:
             return True
         return previous_version_tag != new_etag
+
+    @staticmethod
+    async def _document_has_unusable_chunks(
+        document: Document, document_repo: DocumentRepository
+    ) -> bool:
+        if document.parse_status != "indexed":
+            return False
+        return await document_repo.has_unusable_chunks(document.id)

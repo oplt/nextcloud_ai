@@ -244,20 +244,16 @@ export function JobsPage({
                     <p>{describeJob(job)}</p>
                     <dl className="jobs-page__details">
                       <div>
-                        <dt>Queued</dt>
-                        <dd>{formatTimestamp(job.created_at)}</dd>
+                        <dt>Queued -- {formatTimestamp(job.created_at)}</dt>
                       </div>
                       <div>
-                        <dt>Started</dt>
-                        <dd>{formatTimestamp(job.started_at)}</dd>
+                        <dt>Started -- {formatTimestamp(job.started_at)}</dt>
                       </div>
                       <div>
-                        <dt>Completed</dt>
-                        <dd>{formatTimestamp(job.completed_at)}</dd>
+                        <dt>Completed -- {formatTimestamp(job.completed_at)}</dt>
                       </div>
                       <div>
-                        <dt>Task</dt>
-                        <dd>{job.worker_task_id ?? 'Pending assignment'}</dd>
+                        <dt>Task: {job.worker_task_id ?? 'Pending assignment'}</dt>
                       </div>
                     </dl>
                     {job.error_message ? (

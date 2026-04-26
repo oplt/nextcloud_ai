@@ -1,3 +1,15 @@
+![DocuMind Banner](./docs/banner.png)
+
+
+![Python](https://img.shields.io/badge/Python-3.12-blue?style=for-the-badge)
+![React](https://img.shields.io/badge/React-19-61dafb?style=for-the-badge)
+![Postgres](https://img.shields.io/badge/Postgres-pgvector-blue?style=for-the-badge)
+![Ollama](https://img.shields.io/badge/LLM-Ollama-black?style=for-the-badge)
+
+![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen?style=for-the-badge)
+![Maintained](https://img.shields.io/badge/Maintained-yes-green?style=for-the-badge)
+
+
 # 🚀 DocuMind
 
 ### Private AI for Your Documents (Nextcloud + RAG)
@@ -5,6 +17,7 @@
 > Ask questions to your private files — get **accurate answers with sources**, fully self-hosted.
 
 ---
+
 
 ## ✨ Why DocuMind?
 
@@ -16,6 +29,16 @@ Most AI tools require uploading sensitive data to external APIs.
 * 🧠 AI-powered search across documents
 * 📎 Answers with **source citations**
 * 🏢 Built for teams, companies, and power users
+
+---
+
+
+## 🎯 Who is this for?
+
+- 🧑‍💻 Developers building RAG / AI systems
+- 🏢 Companies with sensitive documents
+- 🔐 Privacy-focused teams avoiding SaaS AI
+- ☁️ Nextcloud users wanting AI search
 
 ---
 
@@ -63,10 +86,15 @@ flowchart LR
 ---
 
 ## 🚀 Quick Start (1 command)
-
+Docker:
 ```bash
 make docker-dev
 ```
+Local:
+```bash
+make local-dev
+```
+
 
 Then open:
 
@@ -76,9 +104,11 @@ Then open:
 
 **Login:**
 
+Backend credentials (set in backend/.env):
+
 ```text
-Nextcloud → admin / admin
-Backend → admin@admin.com / 12345678
+FIRST_SUPERUSER_EMAIL=admin@admin.com
+FIRST_SUPERUSER_PASSWORD=12345678
 ```
 
 ---

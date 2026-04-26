@@ -33,6 +33,20 @@ class AuthContext(BaseModel):
     role_name: str | None = None
 
 
+def auth_user_identifiers(auth: AuthContext) -> list[str]:
+    identifiers: list[str] = []
+    seen: set[str] = set()
+    for value in (auth.user_id, auth.external_subject, auth.username, auth.email):
+        if not value:
+            continue
+        normalized = str(value).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        identifiers.append(normalized)
+    return identifiers
+
+
 class ConnectorSecretCipher:
     def __init__(self, secret_key: bytes) -> None:
         self._fernet = Fernet(secret_key)

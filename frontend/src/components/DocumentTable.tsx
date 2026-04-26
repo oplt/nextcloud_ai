@@ -144,37 +144,37 @@ export function DocumentTable({
               <SkeletonRows />
             ) : (
               documents.map((doc) => (
-                <tr
-                  key={doc.id}
-                  className={selectedDocumentId === doc.id ? 'is-selected' : ''}
-                  onClick={() => onSelect(doc)}
-                  onKeyDown={(e) => {
-                    if (e.key === 'Enter' || e.key === ' ') {
-                      e.preventDefault();
-                      onSelect(doc);
-                    }
-                  }}
-                  tabIndex={0}
-                  role="button"
-                  aria-selected={selectedDocumentId === doc.id}
-                >
-                  <td>
-                    <strong>{doc.file_name}</strong>
-                    <small title={doc.file_path}>{doc.file_path}</small>
-                  </td>
-                  <td>
-                    <strong title={doc.mime_type ?? 'Unknown document type'}>
-                      {getDocumentTypeLabel(doc)}
-                    </strong>
-                  </td>
-                  <td>{getBusinessDomainLabel(doc)}</td>
-                  <td>
-                    <span className={`pill pill--${doc.parse_status}`}>{doc.parse_status}</span>
-                    {doc.needs_review ? <span className="pill pill--warning">Needs review</span> : null}
-                  </td>
-                  <td title={doc.document_type_reason ?? undefined}>{formatConfidence(Math.min(doc.document_type_confidence, doc.business_domain_confidence))}</td>
-                  <td>{formatDateTime(doc.indexed_at ?? doc.modified_at)}</td>
-                </tr>
+                  <tr
+                    key={doc.id}
+                    className={selectedDocumentId === doc.id ? 'is-selected' : ''}
+                    onClick={() => onSelect(doc)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter' || e.key === ' ') {
+                        e.preventDefault();
+                        onSelect(doc);
+                      }
+                    }}
+                    tabIndex={0}
+                    role="button"
+                    aria-selected={selectedDocumentId === doc.id}
+                  >
+                    <td>
+                      <strong>{doc.file_name}</strong>
+                      <small title={doc.file_path}>{doc.file_path}</small>
+                    </td>
+                    <td>
+                      <strong title={doc.mime_type ?? 'Unknown document type'}>
+                        {getDocumentTypeLabel(doc)}
+                      </strong>
+                    </td>
+                    <td>{getBusinessDomainLabel(doc)}</td>
+                    <td>
+                      <span className={`pill pill--${doc.parse_status}`}>{doc.parse_status}</span>
+                      {doc.needs_review ? <span className="pill pill--warning">Needs review</span> : null}
+                    </td>
+                    <td title={doc.document_type_reason ?? undefined}>{formatConfidence(Math.min(doc.document_type_confidence, doc.business_domain_confidence))}</td>
+                    <td>{formatDateTime(doc.indexed_at ?? doc.modified_at)}</td>
+                  </tr>
               ))
             )}
           </tbody>

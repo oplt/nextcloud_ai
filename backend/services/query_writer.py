@@ -19,6 +19,10 @@ _MAX_HISTORY_MESSAGES = 8
 _MAX_HISTORY_MESSAGE_CHARS = 420
 _MAX_REWRITE_CHARS = 500
 _MAX_REWRITE_WORDS = 70
+_STRICT_CONTEXT_REFERENCE_RE = re.compile(
+    r"\b(it|its|they|them|this|that|these|those|same|previous|prior|next|above|below|there|here)\b|^\s*(what|how)\s+about\b",
+    flags=re.IGNORECASE,
+)
 
 
 @dataclass(slots=True)
@@ -120,6 +124,10 @@ def _looks_like_bad_rewrite(*, original_question: str, rewritten: str) -> bool:
     return False
 
 
+def _has_strict_context_reference(question: str) -> bool:
+    return bool(_STRICT_CONTEXT_REFERENCE_RE.search(question))
+
+
 async def build_retrieval_query(
         *,
         question: str,
@@ -139,16 +147,17 @@ async def plan_retrieval_query(
 ) -> RetrievalQueryPlan:
     structured = classify_follow_up(question, has_history=bool(history))
     contextual_signal = bool(history) and (
-            has_contextual_reference(question) or is_challenge_turn(question)
+            _has_strict_context_reference(question) or is_challenge_turn(question)
     )
 
-    is_follow_up = structured.is_follow_up or contextual_signal
-    if not is_follow_up:
+    if not contextual_signal:
         return RetrievalQueryPlan(
             retrieval_query=question,
             is_follow_up=False,
             follow_up=structured,
         )
+
+    is_follow_up = True
 
     history_text = _format_history_for_rewrite(history)
     if not history_text:

@@ -1,8 +1,10 @@
 import { useState } from 'react';
 
 import { getDocumentOriginalUrl, updateDocumentClassification } from '../api/client';
+import CloseIcon from '@mui/icons-material/Close';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
 import Alert from '@mui/material/Alert';
+import IconButton from '@mui/material/IconButton';
 
 import { AppButton } from './ui/AppButton';
 import { AppCard } from './ui/AppCard';
@@ -19,6 +21,7 @@ import {
 type DocumentViewerProps = {
   document: DocumentDetail | null;
   onReindex?: (documentId: string) => Promise<void>;
+  onClose?: () => void;
 };
 
 function EmptyState() {
@@ -34,13 +37,27 @@ function EmptyState() {
   );
 }
 
-export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
+const BROWSER_PREVIEW_EXTENSIONS = new Set(['.pdf', '.txt', '.md', '.markdown', '.csv']);
+
+function getExtractedPreview(document: DocumentDetail): string {
+  return document.chunks
+    .slice()
+    .sort((a, b) => a.chunk_index - b.chunk_index)
+    .map((chunk) => chunk.content.trim())
+    .filter(Boolean)
+    .join('\n\n')
+    .slice(0, 12000);
+}
+
+export function DocumentViewer({ document, onReindex, onClose }: DocumentViewerProps) {
   const [manualType, setManualType] = useState('');
   const [manualDomain, setManualDomain] = useState('');
   const [manualStatus, setManualStatus] = useState<string | null>(null);
   if (!document) return <EmptyState />;
   const originalUrl = getDocumentOriginalUrl(document.id);
   const isEmailDocument = document.mime_type === 'message/rfc822';
+  const extractedPreview = getExtractedPreview(document);
+  const canBrowserPreviewOriginal = BROWSER_PREVIEW_EXTENSIONS.has(document.file_extension ?? '');
 
   return (
     <AppCard className="card detail-card">
@@ -57,6 +74,11 @@ export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
           >
             Reindex
           </AppButton>
+        ) : null}
+        {onClose ? (
+          <IconButton type="button" aria-label="Close document details" onClick={onClose} size="small">
+            <CloseIcon fontSize="small" />
+          </IconButton>
         ) : null}
       </header>
 
@@ -142,9 +164,11 @@ export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
       <section className="document-preview">
         <div className="document-preview__header">
           <div>
-            <h4>Original Preview</h4>
+            <h4>{canBrowserPreviewOriginal ? 'Original Preview' : 'Extracted Preview'}</h4>
             <p>
-              {isEmailDocument
+              {!canBrowserPreviewOriginal
+                ? 'Rendered from indexed text because this file type has no browser preview.'
+                : isEmailDocument
                 ? 'Rendered from the stored email payload or synced original.'
                 : 'Previewed directly from the source connector.'}
             </p>
@@ -154,13 +178,19 @@ export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
           </a>
         </div>
 
-        <iframe
-          key={document.id}
-          className="document-preview__frame"
-          src={originalUrl}
-          title={`Preview of ${document.file_name}`}
-          loading="lazy"
-        />
+        {canBrowserPreviewOriginal ? (
+          <iframe
+            key={document.id}
+            className="document-preview__frame"
+            src={originalUrl}
+            title={`Preview of ${document.file_name}`}
+            loading="lazy"
+          />
+        ) : (
+          <pre className="document-preview__text">
+            {extractedPreview || 'No extracted text preview available. Reindex this document.'}
+          </pre>
+        )}
       </section>
 
       <section className="intelligence-section">

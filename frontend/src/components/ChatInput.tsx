@@ -32,7 +32,7 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLDivElement>) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+      if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         void handleSubmit();
       }
@@ -49,7 +49,7 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
         value={question}
         onChange={(e) => setQuestion(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="Ask a question about your company knowledge… (⌘↵ to send)"
+        placeholder="Ask a question about your company knowledge..."
         rows={2}
         disabled={disabled}
         aria-label="Message input"
@@ -67,7 +67,7 @@ export function ChatInput({ onSubmit, disabled = false }: ChatInputProps) {
         className="chat-input-send"
         disabled={!canSend}
         aria-label="Send message"
-        title="Send (⌘↵)"
+        title="Send"
         color="primary"
       >
         <SendIcon />

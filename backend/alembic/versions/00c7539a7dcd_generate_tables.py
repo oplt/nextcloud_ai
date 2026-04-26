@@ -1,19 +1,19 @@
 """generate tables
 
-Revision ID: 9c0f715215f5
+Revision ID: 00c7539a7dcd
 Revises: 
-Create Date: 2026-04-25 15:14:09.295473
+Create Date: 2026-04-26 16:58:57.070115
 
 """
 from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from pgvector.sqlalchemy import Vector
 from sqlalchemy.dialects import postgresql
+import pgvector.sqlalchemy.vector
 
 # revision identifiers, used by Alembic.
-revision: str = '9c0f715215f5'
+revision: str = '00c7539a7dcd'
 down_revision: Union[str, Sequence[str], None] = None
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
@@ -121,13 +121,15 @@ def upgrade() -> None:
     )
     op.create_index(op.f('ix_chat_messages_session_id'), 'chat_messages', ['session_id'], unique=False)
     op.create_table('documents',
-    sa.Column('connector_id', sa.UUID(), nullable=False),
-    sa.Column('external_id', sa.String(length=512), nullable=False),
+    sa.Column('connector_id', sa.UUID(), nullable=True),
+    sa.Column('external_id', sa.String(length=512), nullable=True),
     sa.Column('file_path', sa.Text(), nullable=False),
     sa.Column('file_name', sa.String(length=255), nullable=False),
+    sa.Column('file_extension', sa.String(length=32), nullable=True),
     sa.Column('mime_type', sa.String(length=255), nullable=True),
     sa.Column('checksum', sa.String(length=128), nullable=True),
     sa.Column('size_bytes', sa.Integer(), nullable=True),
+    sa.Column('source_type', sa.String(length=50), nullable=False),
     sa.Column('version_tag', sa.String(length=255), nullable=True),
     sa.Column('source_url', sa.Text(), nullable=True),
     sa.Column('modified_at', sa.DateTime(timezone=True), nullable=True),
@@ -135,28 +137,54 @@ def upgrade() -> None:
     sa.Column('sync_error', sa.Text(), nullable=True),
     sa.Column('parse_status', sa.String(length=50), nullable=False),
     sa.Column('parse_error', sa.Text(), nullable=True),
+    sa.Column('language', sa.String(length=32), nullable=True),
+    sa.Column('page_count', sa.Integer(), nullable=True),
+    sa.Column('word_count', sa.Integer(), nullable=True),
+    sa.Column('token_count', sa.Integer(), nullable=True),
     sa.Column('indexed_at', sa.DateTime(timezone=True), nullable=True),
+    sa.Column('classified_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('last_seen_at', sa.DateTime(timezone=True), nullable=True),
     sa.Column('is_deleted', sa.Boolean(), nullable=False),
     sa.Column('owner_external_id', sa.String(length=255), nullable=True),
+    sa.Column('owner_id', sa.UUID(), nullable=True),
+    sa.Column('permission_scope', sa.String(length=100), nullable=True),
     sa.Column('allowed_user_ids', postgresql.ARRAY(sa.String()), nullable=False),
     sa.Column('allowed_group_ids', postgresql.ARRAY(sa.String()), nullable=False),
     sa.Column('public_link_enabled', sa.Boolean(), nullable=False),
     sa.Column('acl_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('metadata_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('extracted_fields_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('intelligence_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('ingestion_events_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
+    sa.Column('document_type', sa.String(length=100), nullable=False),
+    sa.Column('document_type_confidence', sa.Float(), nullable=False),
+    sa.Column('document_type_reason', sa.Text(), nullable=True),
+    sa.Column('document_type_source', sa.String(length=20), nullable=False),
+    sa.Column('business_domain', sa.String(length=100), nullable=False),
+    sa.Column('business_domain_confidence', sa.Float(), nullable=False),
+    sa.Column('business_domain_reason', sa.Text(), nullable=True),
+    sa.Column('business_domain_source', sa.String(length=20), nullable=False),
+    sa.Column('manual_category_override', sa.Boolean(), nullable=False),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.Column('updated_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
     sa.ForeignKeyConstraint(['connector_id'], ['connectors.id'], name=op.f('fk_documents_connector_id_connectors'), ondelete='CASCADE'),
+    sa.ForeignKeyConstraint(['owner_id'], ['users.id'], name=op.f('fk_documents_owner_id_users'), ondelete='SET NULL'),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_documents')),
     sa.UniqueConstraint('connector_id', 'external_id', name='uq_documents_connector_external')
     )
+    op.create_index('ix_documents_business_domain', 'documents', ['business_domain'], unique=False)
     op.create_index(op.f('ix_documents_checksum'), 'documents', ['checksum'], unique=False)
     op.create_index('ix_documents_connector_file_path', 'documents', ['connector_id', 'file_path'], unique=False)
     op.create_index(op.f('ix_documents_connector_id'), 'documents', ['connector_id'], unique=False)
     op.create_index('ix_documents_connector_sync_status', 'documents', ['connector_id', 'sync_status'], unique=False)
+    op.create_index('ix_documents_document_type', 'documents', ['document_type'], unique=False)
+    op.create_index(op.f('ix_documents_file_extension'), 'documents', ['file_extension'], unique=False)
     op.create_index(op.f('ix_documents_file_name'), 'documents', ['file_name'], unique=False)
     op.create_index(op.f('ix_documents_owner_external_id'), 'documents', ['owner_external_id'], unique=False)
+    op.create_index(op.f('ix_documents_owner_id'), 'documents', ['owner_id'], unique=False)
+    op.create_index('ix_documents_parse_status', 'documents', ['parse_status'], unique=False)
+    op.create_index('ix_documents_source_type', 'documents', ['source_type'], unique=False)
     op.create_table('sync_jobs',
     sa.Column('connector_id', sa.UUID(), nullable=False),
     sa.Column('requested_by_id', sa.UUID(), nullable=True),
@@ -193,7 +221,10 @@ def upgrade() -> None:
     sa.Column('section_title', sa.String(length=500), nullable=True),
     sa.Column('heading_path', sa.Text(), nullable=True),
     sa.Column('content_hash', sa.String(length=128), nullable=True),
-    sa.Column('embedding', Vector(1024), nullable=True),
+    sa.Column('chunk_type', sa.String(length=50), nullable=False),
+    sa.Column('embedding_status', sa.String(length=50), nullable=False),
+    sa.Column('embedding_model', sa.String(length=255), nullable=True),
+    sa.Column('embedding', pgvector.sqlalchemy.vector.VECTOR(dim=1024), nullable=True),
     sa.Column('metadata_json', postgresql.JSONB(astext_type=sa.Text()), nullable=True),
     sa.Column('id', sa.UUID(), nullable=False),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('now()'), nullable=False),
@@ -206,6 +237,7 @@ def upgrade() -> None:
     op.create_index(op.f('ix_document_chunks_document_id'), 'document_chunks', ['document_id'], unique=False)
     op.create_index('ix_document_chunks_document_page', 'document_chunks', ['document_id', 'page_number'], unique=False)
     op.create_index('ix_document_chunks_embedding_ann', 'document_chunks', ['embedding'], unique=False, postgresql_using='ivfflat', postgresql_ops={'embedding': 'vector_cosine_ops'}, postgresql_with={'lists': 100}, postgresql_where=sa.text('embedding IS NOT NULL'))
+    op.create_index(op.f('ix_document_chunks_embedding_status'), 'document_chunks', ['embedding_status'], unique=False)
     op.create_table('document_insights',
     sa.Column('document_id', sa.UUID(), nullable=False),
     sa.Column('insight_type', sa.String(length=100), nullable=False),
@@ -315,6 +347,7 @@ def downgrade() -> None:
     op.drop_index('ix_document_insights_document_type', table_name='document_insights')
     op.drop_index(op.f('ix_document_insights_document_id'), table_name='document_insights')
     op.drop_table('document_insights')
+    op.drop_index(op.f('ix_document_chunks_embedding_status'), table_name='document_chunks')
     op.drop_index('ix_document_chunks_embedding_ann', table_name='document_chunks', postgresql_using='ivfflat', postgresql_ops={'embedding': 'vector_cosine_ops'}, postgresql_with={'lists': 100}, postgresql_where=sa.text('embedding IS NOT NULL'))
     op.drop_index('ix_document_chunks_document_page', table_name='document_chunks')
     op.drop_index(op.f('ix_document_chunks_document_id'), table_name='document_chunks')
@@ -323,12 +356,18 @@ def downgrade() -> None:
     op.drop_index(op.f('ix_sync_jobs_requested_by_id'), table_name='sync_jobs')
     op.drop_index(op.f('ix_sync_jobs_connector_id'), table_name='sync_jobs')
     op.drop_table('sync_jobs')
+    op.drop_index('ix_documents_source_type', table_name='documents')
+    op.drop_index('ix_documents_parse_status', table_name='documents')
+    op.drop_index(op.f('ix_documents_owner_id'), table_name='documents')
     op.drop_index(op.f('ix_documents_owner_external_id'), table_name='documents')
     op.drop_index(op.f('ix_documents_file_name'), table_name='documents')
+    op.drop_index(op.f('ix_documents_file_extension'), table_name='documents')
+    op.drop_index('ix_documents_document_type', table_name='documents')
     op.drop_index('ix_documents_connector_sync_status', table_name='documents')
     op.drop_index(op.f('ix_documents_connector_id'), table_name='documents')
     op.drop_index('ix_documents_connector_file_path', table_name='documents')
     op.drop_index(op.f('ix_documents_checksum'), table_name='documents')
+    op.drop_index('ix_documents_business_domain', table_name='documents')
     op.drop_table('documents')
     op.drop_index(op.f('ix_chat_messages_session_id'), table_name='chat_messages')
     op.drop_table('chat_messages')

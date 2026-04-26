@@ -15,7 +15,7 @@ _DISCOVERY_RE = re.compile(
 )
 _TOKEN_RE = re.compile(r"[^\W\s]+(?:[-./_][^\W\s]+)*", flags=re.UNICODE)
 _FILE_REFERENCE_RE = re.compile(
-    r"\b[^\W\s][\w._-]{1,180}\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|md|eml|odt)\b",
+    r"\b[^\W\s][\w._-]{1,180}\.(?:pdf|docx?|xlsx?|pptx?|txt|csv|md|eml|od[pts])\b",
     flags=re.IGNORECASE,
 )
 _STOPWORDS = {
