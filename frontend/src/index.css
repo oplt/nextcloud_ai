@@ -2175,7 +2175,7 @@ label > small,
 .message-bubble {
   position: relative;
   display: grid;
-  gap: 0.55rem;
+  gap: 0.5rem;
   max-width: min(48rem, 100%);
   padding: 0.95rem 1rem;
 }

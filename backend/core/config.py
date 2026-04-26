@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     METRICS_PATH: str = "/metrics"
     REQUEST_ID_HEADER_NAME: str = "X-Request-ID"
     TRACE_ID_HEADER_NAME: str = "X-Trace-ID"
-
+    SYNC_TIMEOUT_SECONDS: int = 900
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
 
 
