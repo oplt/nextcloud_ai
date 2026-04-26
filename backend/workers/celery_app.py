@@ -14,6 +14,8 @@ celery_app = Celery(
     broker=settings.effective_celery_broker_url,
     backend=settings.effective_celery_result_backend,
     include=["backend.workers.indexing_tasks"],
+    pool=asyncio,
+    concurrency=10
 )
 
 celery_app.conf.update(

@@ -111,9 +111,9 @@ export function AppShell({
 
       <aside id="workspace-sidebar" className="sidebar" aria-label="Workspace">
         <div className="sidebar__brand">
-          <div className="sidebar__logo">NC</div>
+          <div className="sidebar__logo">DM</div>
           <div className="sidebar__brand-text">
-            <strong>Nextcloud AI</strong>
+            <strong>DocuMind</strong>
             <p>Knowledge cockpit</p>
           </div>
         </div>
@@ -184,7 +184,6 @@ export function AppShell({
               )}
             </IconButton>
             <div className="app-header__titles">
-              <span className="eyebrow">Workspace</span>
               <h1>{current.heading}</h1>
               <p>{current.description}</p>
             </div>

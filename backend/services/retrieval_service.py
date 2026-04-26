@@ -45,10 +45,30 @@ _STOPWORDS = {
     "work",
     "worked",
 }
-_ABSOLUTE_MIN_SCORE = 0.20
-_NARROW_CONFIDENCE_THRESHOLD = 0.20
-_MAX_CHUNKS_PER_DOCUMENT = 1
+_ABSOLUTE_MIN_SCORE = 0.35
+_NARROW_CONFIDENCE_THRESHOLD = 0.42
+_MAX_CHUNKS_PER_DOCUMENT = 3
 _MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT = 4
+
+
+def _looks_like_filename_query(question: str) -> bool:
+    lowered = question.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "invoice",
+            "factuur",
+            "receipt",
+            "contract",
+            "agreement",
+            "document",
+            "file",
+            "pdf",
+            ".pdf",
+            ".docx",
+            ".xlsx",
+        )
+    )
 
 
 @dataclass(slots=True)
@@ -106,7 +126,8 @@ class RetrievalService:
 
         expanded_preferred, meta_p = await self._expand_document_scope(preferred_document_ids)
         retrieval_debug["graph_expansion_preferred"] = meta_p
-        expanded_document_ids, meta_b = await self._expand_document_scope(document_ids)
+        expanded_document_ids = document_ids
+        meta_b = {"applied": False, "related_documents_added": 0}
         retrieval_debug["graph_expansion_broad"] = meta_b
 
         max_chunks_narrow = self._max_chunks_per_document(
@@ -179,6 +200,8 @@ class RetrievalService:
             base = max(base, min(4, top_k))
         return base
 
+
+
     async def _run_retrieval(
         self,
         *,
@@ -194,14 +217,16 @@ class RetrievalService:
         retrieval_debug: dict[str, object] | None = None,
         allow_additional_documents: bool = False,
     ) -> list[tuple[DocumentChunk, float]]:
-        candidate_limit = min(max(top_k * 8, 32), 64)
         retriever = HybridRetriever(self.chunk_repo)
         candidates, _debug = await retriever.retrieve(
             question=question,
             query_embedding=query_embedding,
             keyword_terms=keyword_terms,
             auth=auth,
-            limit=candidate_limit,
+            vector_top_k=settings.RAG_VECTOR_TOP_K,
+            keyword_top_k=settings.RAG_KEYWORD_TOP_K,
+            rerank_top_k=settings.RAG_RERANK_TOP_K,
+            final_top_n=max(settings.RAG_FINAL_TOP_N, top_k),
             document_ids=document_ids,
             filters=filters,
         )
@@ -260,7 +285,9 @@ class RetrievalService:
 
     @staticmethod
     def _extract_keyword_terms(question: str) -> list[str]:
-        raw_tokens = re.findall(r"[^\W\s]+", question, flags=re.UNICODE)
+        raw_tokens = re.findall(
+            r"[^\W\s]+(?:[-./][^\W\s]+)*", question, flags=re.UNICODE
+        )
         tokens: list[str] = []
         for token in raw_tokens:
             lowered = token.lower()
@@ -269,6 +296,17 @@ class RetrievalService:
             if len(lowered) >= 3 and lowered in _STOPWORDS:
                 continue
             tokens.append(lowered)
+            for part in re.split(r"[-./_]+", lowered):
+                if (
+                    part
+                    and part != lowered
+                    and (len(part) >= 2 or any(ch.isdigit() for ch in part))
+                ):
+                    tokens.append(part)
+        for left, right in zip(raw_tokens, raw_tokens[1:]):
+            phrase = f"{left.lower()} {right.lower()}"
+            if len(phrase) <= 80:
+                tokens.append(phrase)
         terms: list[str] = []
         seen: set[str] = set()
         for term in tokens:
@@ -323,7 +361,7 @@ class RetrievalService:
 
         has_lexical_hits = any(item.lexical_score > 0 for item in ranked_chunks)
         best_score = ranked_chunks[0].score
-        min_score = max(_ABSOLUTE_MIN_SCORE, best_score * 0.55)
+        min_score = max(_ABSOLUTE_MIN_SCORE, best_score * 0.72)
 
         selected: list[tuple[DocumentChunk, float]] = []
         selected_chunk_ids: set[str] = set()
@@ -334,7 +372,19 @@ class RetrievalService:
             document = chunk.document
             if document is None or document.is_deleted:
                 continue
-            if item.score < _ABSOLUTE_MIN_SCORE or item.score < min_score:
+            filename_query = _looks_like_filename_query(" ".join(keyword_terms))
+            document_text = " ".join(
+                [
+                    document.file_name or "",
+                    document.file_path or "",
+                    document.document_type or "",
+                    document.business_domain or "",
+                    ]
+            ).lower()
+            metadata_hit = any(term.lower() in document_text for term in keyword_terms)
+            if filename_query and metadata_hit:
+                pass
+            elif item.score < _ABSOLUTE_MIN_SCORE or item.score < min_score:
                 continue
             if (
                 has_lexical_hits

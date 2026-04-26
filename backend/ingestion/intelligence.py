@@ -46,13 +46,27 @@ class IntelligenceExtractionResult:
 
 
 def extract_intelligence(parsed: ParsedDocument) -> IntelligenceExtractionResult:
-    text = parsed.text
+    # Cap synchronous regex work. Full-document extraction should move to a worker/LLM job.
+    text = (parsed.text or "")[:120_000]
     sentences = _sentences(text)
-    dates = _unique(re.findall(r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})\b", text, re.I))
-    amounts = _unique(re.findall(r"(?:[$€£]\s?\d[\d,]*(?:\.\d{2})?|\b\d[\d,]*(?:\.\d{2})?\s?(?:USD|EUR|GBP)\b)", text, re.I))
-    companies = _unique(re.findall(r"\b[A-Z][A-Za-z0-9&.,' -]{2,80}\s(?:Inc|LLC|Ltd|GmbH|SAS|SA|Corp|Corporation|Company)\b", text))
+
+    dates = _unique(re.findall(
+        r"\b(?:\d{4}-\d{2}-\d{2}|\d{1,2}/\d{1,2}/\d{2,4}|"
+        r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\s+\d{1,2},?\s+\d{4})\b",
+        text,
+        re.I,
+    ))[:50]
+    amounts = _unique(re.findall(
+        r"(?:[$€£]\s?\d[\d,]*(?:\.\d{2})?|\b\d[\d,]*(?:\.\d{2})?\s?(?:USD|EUR|GBP)\b)",
+        text,
+        re.I,
+    ))[:50]
+    companies = _unique(re.findall(
+        r"\b[A-Z][A-Za-z0-9&.,' -]{2,80}\s(?:Inc|LLC|Ltd|GmbH|SAS|SA|Corp|Corporation|Company)\b",
+        text,
+    ))[:30]
     people = _unique(re.findall(r"\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,2}\b", text))[:25]
-    projects = _unique(re.findall(r"\b(?:Project|Program|Initiative)\s+[A-Z][A-Za-z0-9_-]+\b", text))
+    projects = _unique(re.findall(r"\b(?:Project|Program|Initiative)\s+[A-Z][A-Za-z0-9_-]+\b", text))[:30]
     locations = _unique(re.findall(r"\b(?:in|at)\s+([A-Z][A-Za-z]+(?:\s+[A-Z][A-Za-z]+){0,2})\b", text))[:20]
 
     obligations = _matching(sentences, ("shall", "must", "required to", "responsible for", "obligated"))

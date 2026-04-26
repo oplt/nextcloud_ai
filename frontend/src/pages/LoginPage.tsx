@@ -1,5 +1,10 @@
 import { useState } from 'react';
 import type { FormEvent } from 'react';
+import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined';
+import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
+import Alert from '@mui/material/Alert';
+import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
 
@@ -15,6 +20,7 @@ type LoginPageProps = {
 export function LoginPage({ onLogin, error, onDismissError }: LoginPageProps) {
   const [email, setEmail]         = useState('');
   const [password, setPassword]   = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   const isDisabled = submitting || !email.trim() || !password;
@@ -70,7 +76,7 @@ export function LoginPage({ onLogin, error, onDismissError }: LoginPageProps) {
 
             <AppTextField
               id="login-password"
-              type="password"
+              type={showPassword ? 'text' : 'password'}
               label="Password"
               value={password}
               onChange={(e) => {
@@ -80,13 +86,29 @@ export function LoginPage({ onLogin, error, onDismissError }: LoginPageProps) {
               placeholder="Your password"
               autoComplete="current-password"
               disabled={submitting}
+              InputProps={{
+                endAdornment: (
+                  <InputAdornment position="end">
+                    <IconButton
+                      type="button"
+                      aria-label={showPassword ? 'Hide password' : 'Show password'}
+                      title={showPassword ? 'Hide password' : 'Show password'}
+                      edge="end"
+                      onClick={() => setShowPassword((visible) => !visible)}
+                      disabled={submitting}
+                    >
+                      {showPassword ? <VisibilityOffOutlinedIcon fontSize="small" /> : <VisibilityOutlinedIcon fontSize="small" />}
+                    </IconButton>
+                  </InputAdornment>
+                ),
+              }}
             />
           </Stack>
 
           {error ? (
-            <p className="error-banner" role="alert">
+            <Alert severity="error" className="error-banner">
               {error}
-            </p>
+            </Alert>
           ) : null}
 
           <AppButton type="submit" disabled={isDisabled}>

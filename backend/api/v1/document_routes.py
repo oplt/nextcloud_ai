@@ -219,10 +219,12 @@ def _needs_review(document) -> bool:
 
 
 def _document_read(document) -> DocumentRead:
+    metadata = dict(document.metadata_json or {})
     return DocumentRead.model_validate(
         {
             **document.__dict__,
             "chunk_count": len(getattr(document, "chunks", []) or []),
+            "ingestion_quality": metadata.get("ingestion_quality"),
             "signal_counts": _signal_counts(document),
             "needs_review": _needs_review(document),
         }
@@ -231,7 +233,9 @@ def _document_read(document) -> DocumentRead:
 
 def _document_detail(document: DocumentDetail) -> DocumentDetail:
     payload = document.model_dump()
+    metadata = dict(payload.get("metadata_json") or {})
     payload["chunk_count"] = len(document.chunks)
+    payload["ingestion_quality"] = metadata.get("ingestion_quality")
     payload["signal_counts"] = _signal_counts(document)
     payload["needs_review"] = _needs_review(document)
     return DocumentDetail.model_validate(payload)

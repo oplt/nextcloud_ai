@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, and_, delete, func, or_, select, update
+from sqlalchemy import Select, Text, and_, cast, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, selectinload
 
@@ -164,6 +164,60 @@ class DocumentRepository(BaseRepository[Document]):
         )
         return list(result.scalars().all())
 
+    async def search_documents(
+            self,
+            *,
+            auth: AuthContext,
+            terms: Sequence[str],
+            connector_ids: Sequence[UUID | str] | None = None,
+            path_prefixes: Sequence[str] | None = None,
+            modified_after: datetime | None = None,
+            modified_before: datetime | None = None,
+            document_types: Sequence[str] | None = None,
+            business_domains: Sequence[str] | None = None,
+            source_types: Sequence[str] | None = None,
+            limit: int = 20,
+    ) -> list[Document]:
+        normalized_terms = [term.strip() for term in terms if term.strip()]
+        if not normalized_terms:
+            return []
+
+        clauses = []
+        for term in normalized_terms:
+            pattern = f"%{term}%"
+            clauses.extend(
+                [
+                    Document.file_name.ilike(pattern),
+                    Document.file_path.ilike(pattern),
+                    Document.document_type.ilike(pattern),
+                    Document.business_domain.ilike(pattern),
+                    cast(Document.metadata_json, Text).ilike(pattern),
+                    cast(Document.extracted_fields_json, Text).ilike(pattern),
+                    DocumentChunk.content.ilike(pattern),
+                ]
+            )
+
+        stmt = (
+            select(Document)
+            .outerjoin(Document.chunks)
+            .options(selectinload(Document.chunks))
+            .where(DocumentRepository.visibility_clause(auth), or_(*clauses))
+            .order_by(Document.modified_at.desc().nullslast(), Document.updated_at.desc())
+            .limit(limit)
+        )
+        stmt = self._apply_document_filters(
+            stmt,
+            connector_ids=connector_ids,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            document_types=document_types,
+            business_domains=business_domains,
+            source_types=source_types,
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
     async def mark_deleted_missing_from_external_ids(
             self, *, connector_id: UUID, external_ids: Sequence[str]
     ) -> int:
@@ -214,6 +268,42 @@ class DocumentRepository(BaseRepository[Document]):
         if auth.groups:
             visibility.append(Document.allowed_group_ids.overlap(auth.groups))
         return and_(Document.is_deleted.is_(False), or_(*visibility))
+
+    @staticmethod
+    def _apply_document_filters(
+        stmt: Select,
+        *,
+        connector_ids: Sequence[UUID | str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+    ) -> Select:
+        if connector_ids:
+            stmt = stmt.where(Document.connector_id.in_(list(connector_ids)))
+        if path_prefixes:
+            stmt = stmt.where(
+                or_(
+                    *[
+                        Document.file_path.ilike(f"{path_prefix.rstrip('%')}%")
+                        for path_prefix in path_prefixes
+                        if path_prefix
+                    ]
+                )
+            )
+        if modified_after is not None:
+            stmt = stmt.where(Document.modified_at >= modified_after)
+        if modified_before is not None:
+            stmt = stmt.where(Document.modified_at <= modified_before)
+        if document_types:
+            stmt = stmt.where(Document.document_type.in_(list(document_types)))
+        if business_domains:
+            stmt = stmt.where(Document.business_domain.in_(list(business_domains)))
+        if source_types:
+            stmt = stmt.where(Document.source_type.in_(list(source_types)))
+        return stmt
 
 
 class DocumentChunkRepository(BaseRepository[DocumentChunk]):
@@ -326,6 +416,10 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
                     DocumentChunk.section_title.ilike(pattern),
                     Document.file_name.ilike(pattern),
                     Document.file_path.ilike(pattern),
+                    Document.document_type.ilike(pattern),
+                    Document.business_domain.ilike(pattern),
+                    cast(Document.metadata_json, Text).ilike(pattern),
+                    cast(Document.extracted_fields_json, Text).ilike(pattern),
                 ]
             )
 

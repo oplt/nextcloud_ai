@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
+import Alert from '@mui/material/Alert';
 import ButtonBase from '@mui/material/ButtonBase';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
@@ -208,9 +209,9 @@ export function OverviewPage({
   return (
     <div className="overview-stack">
       {workspaceError ? (
-        <div className="page-alert page-alert--error" role="alert">
+        <Alert severity="error" className="page-alert">
           {workspaceError}
-        </div>
+        </Alert>
       ) : null}
       {workspaceLoading ? (
         <span className="visually-hidden" role="status" aria-live="polite">
@@ -218,9 +219,9 @@ export function OverviewPage({
         </span>
       ) : null}
       {chatError ? (
-        <div className="page-alert page-alert--error" role="alert">
+        <Alert severity="error" className="page-alert">
           {chatError}
-        </div>
+        </Alert>
       ) : null}
 
       <section className="overview-grid overview-grid--summary" aria-label="Summary statistics">

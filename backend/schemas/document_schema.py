@@ -80,6 +80,7 @@ class DocumentRead(TimestampedSchema):
     public_link_enabled: bool
     acl_json: dict[str, Any] | None = None
     metadata_json: dict[str, Any] | None = None
+    extracted_fields_json: dict[str, Any] | None = None
     intelligence_json: dict[str, Any] | None = None
     ingestion_events_json: list[dict[str, Any]] | None = None
     document_type: str = "unclassified"
@@ -92,6 +93,7 @@ class DocumentRead(TimestampedSchema):
     business_domain_source: str = "fallback"
     manual_category_override: bool = False
     chunk_count: int = 0
+    ingestion_quality: dict[str, Any] | None = None
     signal_counts: dict[str, int] = Field(default_factory=dict)
     needs_review: bool = False
 

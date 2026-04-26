@@ -27,10 +27,12 @@ from ..db.repo.document import DocumentChunkRepository
 from ..schemas.chat_schema import (
     ChatAskRequest,
     ChatAskResponse,
+    ChatDocumentResult,
     ChatMemoryPatchRequest,
     ChatSource,
 )
 from .audit_service import AuditService
+from .document_search_service import DocumentSearchService
 from .retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
@@ -46,6 +48,11 @@ _INSUFFICIENT_MARKERS = (
 )
 _DEICTIC_FOLLOW_UP_RE = re.compile(
     r"\b(it|its|they|them|this|that|these|those|there|here|same)\b",
+    flags=re.IGNORECASE,
+)
+_YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
+_YEAR_RANGE_RE = re.compile(
+    r"\b((?:19|20)\d{2})\b.{0,48}?(?:-|to|through|until|–|—).{0,48}?\b((?:19|20)\d{2}|present|current|now)\b",
     flags=re.IGNORECASE,
 )
 
@@ -388,6 +395,13 @@ class ChatService:
         )
 
     @staticmethod
+    def _build_document_search_answer(results: list[ChatDocumentResult]) -> str:
+        lines = ["I found these matching documents:"]
+        for index, item in enumerate(results[:8], start=1):
+            lines.append(f"[{index}] {item.file_name} - {item.file_path}")
+        return "\n".join(lines)
+
+    @staticmethod
     def _build_empty_answer() -> str:
         return (
             'I could not produce an answer because the language model returned an empty response. '
@@ -546,6 +560,68 @@ class ChatService:
                 texts.append(f" {source_text.lower()} ")
         return texts
 
+    @staticmethod
+    def _requested_years(question: str) -> list[int]:
+        years: list[int] = []
+        seen: set[int] = set()
+        for match in _YEAR_RE.finditer(question):
+            year = int(match.group(0))
+            if year in seen:
+                continue
+            seen.add(year)
+            years.append(year)
+        return years
+
+    @staticmethod
+    def _source_supports_years(source: ChatSource, years: list[int]) -> bool:
+        if not years:
+            return True
+        text = " ".join(
+            [
+                source.content or "",
+                source.snippet or "",
+                source.file_name or "",
+                source.file_path or "",
+                source.section_title or "",
+                source.heading_path or "",
+            ]
+        ).lower()
+        if not text:
+            return False
+        exact_years = {int(match.group(0)) for match in _YEAR_RE.finditer(text)}
+        ranges: list[tuple[int, int]] = []
+        for match in _YEAR_RANGE_RE.finditer(text):
+            start = int(match.group(1))
+            end_raw = match.group(2).lower()
+            end = 9999 if end_raw in {"present", "current", "now"} else int(end_raw)
+            if end < start:
+                start, end = end, start
+            ranges.append((start, end))
+        for year in years:
+            if year in exact_years:
+                continue
+            if any(start <= year <= end for start, end in ranges):
+                continue
+            return False
+        return True
+
+    @classmethod
+    def _filter_sources_for_question_constraints(
+        cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[list[ChatSource], dict[str, object]]:
+        years = cls._requested_years(question)
+        if not years:
+            return sources, {"time_filter_applied": False}
+        filtered = [
+            source for source in sources if cls._source_supports_years(source, years)
+        ]
+        return filtered, {
+            "time_filter_applied": True,
+            "requested_years": years,
+            "before": len(sources),
+            "after": len(filtered),
+        }
+
     def _answer_is_supported(
         self,
         *,
@@ -562,7 +638,11 @@ class ChatService:
         if not source_texts:
             return False
 
-        del question
+        years = self._requested_years(question)
+        if years and not all(
+            self._source_supports_years(source, years) for source in cited_sources
+        ):
+            return False
         return True
 
     @classmethod
@@ -585,7 +665,17 @@ class ChatService:
         if not source_texts:
             return []
 
-        del question, answer
+        years = cls._requested_years(question)
+        if years:
+            source_texts = [
+                (text, source)
+                for text, source in source_texts
+                if cls._source_supports_years(source, years)
+            ]
+            if not source_texts:
+                return []
+
+        del answer
         supporting: list[ChatSource] = []
         for text, source in source_texts:
             del text
@@ -845,7 +935,11 @@ class ChatService:
         retrieval_error_type: str | None = None
         llm_error_type: str | None = None
         sources: list[ChatSource] = []
+        document_results: list[ChatDocumentResult] = []
         active_context_document_ids = follow_up_document_ids
+        filename_scoped_document_ids: list[UUID] = []
+        filename_references: list[str] = []
+        filename_scope_attempted = False
         answer = ''
         retrieval_debug_payload: dict[str, object] = {}
         memory_applied_payload: dict[str, object] = {
@@ -894,6 +988,75 @@ class ChatService:
                     preferred_document_ids,
                 )
 
+            if DocumentSearchService.is_document_discovery_query(retrieval_query):
+                search_results = await DocumentSearchService(self.session).search(
+                    query=retrieval_query,
+                    auth=auth,
+                    filters=request.retrieval_filters,
+                    limit=settings.RAG_FINAL_TOP_N,
+                )
+                document_results = [
+                    ChatDocumentResult.model_validate(result.as_dict())
+                    for result in search_results
+                ]
+                if document_results:
+                    active_context_document_ids = self._merge_document_ids(
+                        [UUID(str(item.document_id)) for item in document_results],
+                        follow_up_document_ids,
+                    )
+                    answer = self._build_document_search_answer(document_results)
+                    verification_summary = {
+                        'result': 'document_search',
+                        'shadow_mode': shadow_mode,
+                        'trace_id': trace_id,
+                    }
+                    retrieval_debug_payload = {
+                        'document_search': {
+                            'applied': True,
+                            'result_count': len(document_results),
+                        }
+                    }
+                    candidate_sources_for_metrics = []
+
+            if not document_results:
+                filename_references = DocumentSearchService.extract_file_references(
+                    retrieval_query
+                )
+                if filename_references:
+                    filename_scope_attempted = True
+                    search_results = await DocumentSearchService(self.session).search(
+                        query=" ".join(filename_references),
+                        auth=auth,
+                        filters=request.retrieval_filters,
+                        limit=settings.RAG_FINAL_TOP_N,
+                    )
+                    filename_matches = [
+                        result
+                        for result in search_results
+                        if DocumentSearchService.document_matches_file_reference(
+                            result.document, filename_references
+                        )
+                    ]
+                    filename_scoped_document_ids = [
+                        UUID(str(result.document.id)) for result in filename_matches
+                    ]
+                    if filename_matches:
+                        active_context_document_ids = self._merge_document_ids(
+                            filename_scoped_document_ids,
+                            follow_up_document_ids,
+                        )
+                        retrieval_debug_payload["filename_scope"] = {
+                            "applied": True,
+                            "references": filename_references,
+                            "matched_documents": len(filename_scoped_document_ids),
+                        }
+                    else:
+                        retrieval_debug_payload["filename_scope"] = {
+                            "applied": False,
+                            "references": filename_references,
+                            "matched_documents": 0,
+                        }
+
             explicit_document_ids = request.document_ids or None
             retrieval_document_ids = explicit_document_ids
             retrieval_preferred_document_ids = None
@@ -903,24 +1066,49 @@ class ChatService:
             if lock_ids and explicit_document_ids is None:
                 retrieval_document_ids = lock_ids
             if (
+                filename_scoped_document_ids
+                and explicit_document_ids is None
+                and not lock_ids
+            ):
+                retrieval_document_ids = filename_scoped_document_ids
+            if (
                 requested_active_context_document_ids
                 and is_follow_up
                 and explicit_document_ids is None
                 and not lock_ids
+                and not filename_scoped_document_ids
             ):
                 retrieval_document_ids = requested_active_context_document_ids
-            elif follow_up_document_ids and is_follow_up and explicit_document_ids is None and not lock_ids:
+            elif (
+                follow_up_document_ids
+                and is_follow_up
+                and explicit_document_ids is None
+                and not lock_ids
+                and not filename_scoped_document_ids
+            ):
                 retrieval_preferred_document_ids = follow_up_document_ids
 
             try:
-                retrieval = await self.retrieval_service.retrieve(
-                    question=retrieval_query,
-                    auth=auth,
-                    top_k=request.top_k,
-                    document_ids=retrieval_document_ids,
-                    preferred_document_ids=retrieval_preferred_document_ids,
-                    filters=request.retrieval_filters,
-                )
+                if document_results:
+                    retrieval = None
+                elif filename_scope_attempted and not filename_scoped_document_ids:
+                    retrieval = None
+                    answer = self._build_no_sources_answer()
+                    verification_summary = {
+                        'result': 'filename_reference_not_found',
+                        'filename_references': filename_references,
+                        'shadow_mode': shadow_mode,
+                        'trace_id': trace_id,
+                    }
+                else:
+                    retrieval = await self.retrieval_service.retrieve(
+                        question=retrieval_query,
+                        auth=auth,
+                        top_k=request.top_k,
+                        document_ids=retrieval_document_ids,
+                        preferred_document_ids=retrieval_preferred_document_ids,
+                        filters=request.retrieval_filters,
+                    )
             except Exception as exc:
                 retrieval_error_type = type(exc).__name__
                 logger.exception(
@@ -997,92 +1185,103 @@ class ChatService:
                     }
                 observability.record_rag_stage_error(stage='retrieval')
             else:
-                retrieval_debug_payload = dict(
-                    getattr(retrieval, 'retrieval_debug', {}) or {}
-                )
-                candidate_sources = rerank_and_truncate_sources(
-                    question,
-                    self._prioritize_sources_for_question(
-                        question=question,
-                        sources=retrieval.sources,
-                    ),
-                    stats_out=rerank_stats,
-                )
-                if is_follow_up and preferred_chunk_refs:
-                    candidate_sources = await self._augment_follow_up_sources_with_neighbors(
-                        question=question,
-                        sources=candidate_sources,
-                        preferred_chunk_refs=preferred_chunk_refs,
-                    )
-                candidate_sources_for_metrics = candidate_sources
-                grounded_document_ids = getattr(retrieval, 'grounded_document_ids', [])
-                active_context_document_ids = self._merge_document_ids(
-                    list(grounded_document_ids),
-                    self._extract_document_ids_from_sources(candidate_sources),
-                    follow_up_document_ids,
-                )
-
-                if not candidate_sources:
-                    answer = self._build_no_sources_answer()
-                    sources = []
-                    verification_summary = {
-                        'result': 'no_sources',
-                        'shadow_mode': shadow_mode,
-                        'trace_id': trace_id,
-                    }
+                if retrieval is None:
+                    pass
                 else:
-                    try:
-                        memory_note = chat_memory.build_memory_prompt_block(mem)
-                        prompt = build_grounded_prompt(
+                    previous_retrieval_debug = dict(retrieval_debug_payload)
+                    retrieval_debug_payload = dict(
+                        getattr(retrieval, 'retrieval_debug', {}) or {}
+                    )
+                    retrieval_debug_payload.update(previous_retrieval_debug)
+                    candidate_sources = rerank_and_truncate_sources(
+                        question,
+                        self._prioritize_sources_for_question(
+                            question=question,
+                            sources=retrieval.sources,
+                        ),
+                        stats_out=rerank_stats,
+                    )
+                    if is_follow_up and preferred_chunk_refs:
+                        candidate_sources = await self._augment_follow_up_sources_with_neighbors(
                             question=question,
                             sources=candidate_sources,
-                            history=history if history else None,
-                            memory_block=memory_note or None,
+                            preferred_chunk_refs=preferred_chunk_refs,
                         )
-                        raw_answer = (await self.llm_client.generate(prompt)).strip()
-                    except Exception as exc:
-                        llm_error_type = type(exc).__name__
-                        logger.exception(
-                            'chat.llm_failed session=%s trace=%s',
-                            chat_session.id,
-                            trace_id,
-                        )
-                        if isinstance(exc, httpx.TimeoutException):
-                            sources = candidate_sources[:2]
-                            answer = self._build_source_fallback_answer(sources)
-                            verification_summary = {
-                                'result': 'llm_timeout_source_fallback',
-                                'error_type': llm_error_type,
-                                'shadow_mode': shadow_mode,
-                                'trace_id': trace_id,
-                            }
-                        else:
-                            answer = self._build_failure_answer(exc)
-                            sources = []
-                            verification_summary = {
-                                'result': 'llm_failed',
-                                'error_type': llm_error_type,
-                                'shadow_mode': shadow_mode,
-                                'trace_id': trace_id,
-                            }
-                        observability.record_rag_stage_error(stage='llm')
+                    candidate_sources, constraint_debug = self._filter_sources_for_question_constraints(
+                        question=question,
+                        sources=candidate_sources,
+                    )
+                    if constraint_debug.get("time_filter_applied"):
+                        retrieval_debug_payload["question_constraints"] = constraint_debug
+                    candidate_sources_for_metrics = candidate_sources
+                    grounded_document_ids = getattr(retrieval, 'grounded_document_ids', [])
+                    active_context_document_ids = self._merge_document_ids(
+                        list(grounded_document_ids),
+                        self._extract_document_ids_from_sources(candidate_sources),
+                        follow_up_document_ids,
+                    )
+
+                    if not candidate_sources:
+                        answer = self._build_no_sources_answer()
+                        sources = []
+                        verification_summary = {
+                            'result': 'no_sources',
+                            'shadow_mode': shadow_mode,
+                            'trace_id': trace_id,
+                        }
                     else:
-                        if not raw_answer:
-                            answer = self._build_empty_answer()
-                            sources = candidate_sources
-                            verification_summary = {
-                                'result': 'empty_llm',
-                                'shadow_mode': shadow_mode,
-                                'trace_id': trace_id,
-                            }
-                        else:
-                            answer, sources, verification_summary = self._verify_and_normalize_answer(
+                        try:
+                            memory_note = chat_memory.build_memory_prompt_block(mem)
+                            prompt = build_grounded_prompt(
                                 question=question,
-                                answer=raw_answer,
                                 sources=candidate_sources,
-                                shadow_mode=shadow_mode,
-                                trace_id=trace_id,
+                                history=history if history else None,
+                                memory_block=memory_note or None,
                             )
+                            raw_answer = (await self.llm_client.generate(prompt)).strip()
+                        except Exception as exc:
+                            llm_error_type = type(exc).__name__
+                            logger.exception(
+                                'chat.llm_failed session=%s trace=%s',
+                                chat_session.id,
+                                trace_id,
+                            )
+                            if isinstance(exc, httpx.TimeoutException):
+                                sources = candidate_sources[:2]
+                                answer = self._build_source_fallback_answer(sources)
+                                verification_summary = {
+                                    'result': 'llm_timeout_source_fallback',
+                                    'error_type': llm_error_type,
+                                    'shadow_mode': shadow_mode,
+                                    'trace_id': trace_id,
+                                }
+                            else:
+                                answer = self._build_failure_answer(exc)
+                                sources = []
+                                verification_summary = {
+                                    'result': 'llm_failed',
+                                    'error_type': llm_error_type,
+                                    'shadow_mode': shadow_mode,
+                                    'trace_id': trace_id,
+                                }
+                            observability.record_rag_stage_error(stage='llm')
+                        else:
+                            if not raw_answer:
+                                answer = self._build_empty_answer()
+                                sources = candidate_sources
+                                verification_summary = {
+                                    'result': 'empty_llm',
+                                    'shadow_mode': shadow_mode,
+                                    'trace_id': trace_id,
+                                }
+                            else:
+                                answer, sources, verification_summary = self._verify_and_normalize_answer(
+                                    question=question,
+                                    answer=raw_answer,
+                                    sources=candidate_sources,
+                                    shadow_mode=shadow_mode,
+                                    trace_id=trace_id,
+                                )
 
         cited_document_ids = self._extract_document_ids_from_sources(sources)
         if cited_document_ids:
@@ -1148,6 +1347,7 @@ class ChatService:
             answer=answer,
             answer_confidence=answer_confidence_value,
             sources=sources,
+            document_results=document_results,
             user_message_id=user_message.id,
             assistant_message_id=assistant_message.id,
             parent_message_id=request.parent_message_id,

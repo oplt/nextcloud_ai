@@ -7,6 +7,7 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./deployment/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -29,6 +30,11 @@ services:
       - "11434:11434"
     volumes:
       - ollama:/root/.ollama
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 10s
+      timeout: 5s
+      retries: 30
 
   migrate:
     build:
@@ -37,7 +43,7 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       DATABASE_URL: postgresql+asyncpg://nextcloud:123456@postgres:5432/nextcloud
       REDIS_URL: redis://redis:6379/0
@@ -49,7 +55,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
@@ -58,16 +64,33 @@ services:
 
         echo "Running Alembic migrations against: $$DATABASE_URL"
 
-        mkdir -p alembic/versions
+        echo "Ensuring pgvector extension exists..."
+        python - <<'PYVEC'
+        import asyncio
+        import os
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
 
-        if ! find alembic/versions -maxdepth 1 -type f -name "*.py" | grep -q .; then
+        async def main():
+            url = os.environ["DATABASE_URL"]
+            engine = create_async_engine(url, isolation_level="AUTOCOMMIT")
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await engine.dispose()
+
+        asyncio.run(main())
+        PYVEC
+
+        mkdir -p backend/alembic/versions
+
+        if ! find backend/alembic/versions -maxdepth 1 -type f -name "*.py" | grep -q .; then
           echo "No Alembic revision files found. Generating initial migration..."
-          alembic -c alembic.ini revision --autogenerate -m "generate tables"
+          alembic -c backend/alembic.ini revision --autogenerate -m "generate tables"
         else
           echo "Alembic revision files found. Skipping autogenerate."
         fi
 
-        GENERATED_REVISION="$$(ls -t alembic/versions/*.py | head -n 1)"
+        GENERATED_REVISION="$$(ls -t backend/alembic/versions/*.py | head -n 1)"
 
         if grep -q "pgvector.sqlalchemy" "$$GENERATED_REVISION" && ! grep -q "import pgvector" "$$GENERATED_REVISION"; then
           echo "Patching generated migration with pgvector import..."
@@ -80,7 +103,8 @@ services:
         fi
 
         echo "Applying migrations..."
-        alembic -c alembic.ini upgrade head
+        alembic -c backend/alembic.ini upgrade head
+
   backend:
     build:
       context: .
@@ -88,14 +112,15 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       DATABASE_URL: postgresql+asyncpg://nextcloud:123456@postgres:5432/nextcloud
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODE: check
+      OLLAMA_BOOTSTRAP_MODE: ensure
+      NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL: http://nextcloud
       FRONTEND_URL: http://localhost:5173
       AUTH_COOKIE_SECURE: "false"
     depends_on:
@@ -104,10 +129,10 @@ services:
       redis:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    working_dir: /app/backend
+    working_dir: /app
     ports:
       - "8000:8000"
     command:
@@ -115,9 +140,8 @@ services:
       - -c
       - |
         set -eu
-
-        python -m scripts.seed_admin
-        uvicorn main:app --host 0.0.0.0 --port 8000
+        python -m backend.scripts.seed_admin
+        uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
   worker:
     build:
@@ -126,29 +150,30 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       DATABASE_URL: postgresql+asyncpg://nextcloud:123456@postgres:5432/nextcloud
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODE: check
+      OLLAMA_BOOTSTRAP_MODE: ensure
+      NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL: http://nextcloud
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
       - |
-        celery -A workers.celery_app:celery_app worker --loglevel=INFO
+        celery -A backend.workers.celery_app:celery_app worker --loglevel=INFO
 
   scheduler:
     build:
@@ -157,29 +182,30 @@ services:
     env_file:
       - ./backend/.env
     environment:
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       DATABASE_URL: postgresql+asyncpg://nextcloud:123456@postgres:5432/nextcloud
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
       CELERY_RESULT_BACKEND: redis://redis:6379/0
       OLLAMA_BASE_URL: http://ollama:11434
-      OLLAMA_BOOTSTRAP_MODE: check
+      OLLAMA_BOOTSTRAP_MODE: ensure
+      NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL: http://nextcloud
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
       ollama:
-        condition: service_started
+        condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
       - |
-        celery -A workers.celery_app:celery_app beat --loglevel=INFO
+        celery -A backend.workers.celery_app:celery_app beat --loglevel=INFO
 
   frontend:
     build:

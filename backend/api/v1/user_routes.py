@@ -1,9 +1,11 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response, status
+from sqlalchemy import func, select
 
 from ..deps import AuthenticatedUser, DbSessionDep, permission_required
-from ...core.exceptions import NotFoundError
+from ...core.exceptions import BadRequestError, NotFoundError
+from ...db.models import User
 from ...db.repo.user import RoleRepository, UserRepository
 from ...schemas.user_schema import UserCreate, UserRead, UserUpdate
 from ...services.audit_service import AuditService
@@ -49,6 +51,45 @@ async def get_user(
     if user is None:
         raise NotFoundError("User not found")
     return UserRead.model_validate(user)
+
+
+@router.delete("/{user_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_user(
+    user_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("users:write")),
+) -> Response:
+    if str(identity.user.id) == user_id:
+        raise BadRequestError("You cannot delete your own account while signed in.")
+
+    repo = UserRepository(session)
+    user = await repo.get(user_id)
+    if user is None:
+        raise NotFoundError("User not found")
+
+    if user.is_superuser:
+        remaining_superusers = await session.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(
+                User.is_superuser.is_(True),
+                User.is_active.is_(True),
+                User.id != user.id,
+            )
+        )
+        if int(remaining_superusers or 0) == 0:
+            raise BadRequestError("You cannot delete the last active superuser.")
+
+    await AuditService(session).log(
+        action="user.deleted",
+        resource_type="user",
+        resource_id=str(user.id),
+        message=f"User {user.username} deleted",
+        user=identity.user,
+    )
+    await repo.delete(user)
+    await session.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.patch("/{user_id}", response_model=UserRead)

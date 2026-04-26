@@ -33,7 +33,7 @@ class HeadingTableAwareChunker:
         chunk_size: int = 280,
         overlap: int = 45,
         min_group_tokens: int = 32,
-        table_context_tokens: int = 80,
+        table_context_tokens: int = 30,
     ) -> None:
         if overlap >= chunk_size:
             raise ValueError("overlap must be smaller than chunk_size")

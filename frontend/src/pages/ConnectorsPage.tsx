@@ -8,6 +8,7 @@ import { ConfirmDialog } from '../components/ui/ConfirmDialog';
 import DeleteOutlineOutlinedIcon from '@mui/icons-material/DeleteOutlineOutlined';
 import EditOutlinedIcon from '@mui/icons-material/EditOutlined';
 import HubOutlinedIcon from '@mui/icons-material/HubOutlined';
+import Alert from '@mui/material/Alert';
 import IconButton from '@mui/material/IconButton';
 import Stack from '@mui/material/Stack';
 import Typography from '@mui/material/Typography';
@@ -76,14 +77,14 @@ export function ConnectorsPage({
         </header>
 
         {listError ? (
-          <div className="page-alert page-alert--error" role="alert">
+          <Alert severity="error" className="page-alert">
             {listError}
-          </div>
+          </Alert>
         ) : null}
         {listLoading ? (
-          <div className="page-alert page-alert--info" role="status">
+          <Alert severity="info" className="page-alert" role="status">
             Loading connector list…
-          </div>
+          </Alert>
         ) : null}
 
         {connectors.length === 0 ? (

@@ -30,8 +30,56 @@ const CSRF_COOKIE_NAME = 'nc_ai_csrf_token';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
+type ApiValidationIssue = {
+  type?: string;
+  loc?: Array<string | number>;
+  msg?: string;
+  ctx?: Record<string, unknown>;
+};
+
 function isSafeMethod(method?: string): boolean {
   return SAFE_METHODS.has((method ?? 'GET').toUpperCase());
+}
+
+function formatFieldName(loc: ApiValidationIssue['loc']): string {
+  const raw = loc?.filter((part) => part !== 'body').at(-1);
+  if (typeof raw !== 'string' || raw.length === 0) {
+    return 'This field';
+  }
+  return raw
+    .replace(/_/g, ' ')
+    .replace(/\b\w/g, (letter) => letter.toUpperCase());
+}
+
+function formatValidationIssue(issue: ApiValidationIssue): string {
+  const field = formatFieldName(issue.loc);
+  const minLength = issue.ctx?.min_length;
+  if (issue.type === 'string_too_short' && typeof minLength === 'number') {
+    return `${field} must be at least ${minLength} characters.`;
+  }
+  if (issue.type?.includes('email')) {
+    return `${field} must be a valid email address.`;
+  }
+  return `${field}: ${issue.msg ?? 'Invalid value.'}`;
+}
+
+function formatApiError(payload: unknown, fallback: string): string {
+  if (!payload || typeof payload !== 'object') {
+    return fallback;
+  }
+  const data = payload as { detail?: unknown; message?: unknown };
+  if (typeof data.detail === 'string' && data.detail) {
+    return data.detail;
+  }
+  if (Array.isArray(data.detail) && data.detail.length > 0) {
+    return data.detail
+      .map((issue) => formatValidationIssue(issue as ApiValidationIssue))
+      .join(' ');
+  }
+  if (typeof data.message === 'string' && data.message) {
+    return data.message;
+  }
+  return fallback;
 }
 
 function readCookie(name: string): string | null {
@@ -112,13 +160,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 
     try {
       const payload = await response.json();
-      if (typeof payload?.detail === 'string' && payload.detail) {
-        throw new Error(payload.detail);
-      }
-      if (typeof payload?.message === 'string' && payload.message) {
-        throw new Error(payload.message);
-      }
-      throw new Error(JSON.stringify(payload));
+      throw new Error(formatApiError(payload, `Request failed with ${response.status}`));
     } catch (jsonError) {
       if (jsonError instanceof Error && jsonError.message) {
         throw jsonError;
@@ -342,6 +384,12 @@ export async function updateUser(userId: string, payload: UpdateUserPayload): Pr
   return request<User>(`/users/${userId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
+  });
+}
+
+export async function deleteUser(userId: string): Promise<void> {
+  return request<void>(`/users/${userId}`, {
+    method: 'DELETE',
   });
 }
 

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { FormEvent } from 'react';
 import IconButton from '@mui/material/IconButton';
+import InputAdornment from '@mui/material/InputAdornment';
 import VisibilityOffOutlinedIcon from '@mui/icons-material/VisibilityOffOutlined';
 import VisibilityOutlinedIcon from '@mui/icons-material/VisibilityOutlined';
 
@@ -173,13 +174,13 @@ export function NextcloudConnectorForm({ editingConnector = null, onSubmit, onCa
             label={isImap ? 'IMAP Host' : 'Base URL'}
             value={form.base_url}
             onChange={(e) => update('base_url', e.target.value)}
-            placeholder={isImap ? 'imap.example.com or imaps://outlook.office365.com' : 'http://localhost:8080 or https://cloud.example.com'}
+            placeholder={isImap ? 'imap.example.com or imaps://outlook.office365.com' : 'http://localhost:8081 or https://cloud.example.com'}
             autoComplete="off"
           />
           <small>
             {isImap
               ? 'Use the IMAP host for the shared mailbox. Exchange Online usually exposes `outlook.office365.com` over IMAP.'
-              : 'Use the full Nextcloud origin. Local installs usually look like `http://localhost:8080`.'}
+              : 'Use the full Nextcloud origin. Docker installs usually look like `http://localhost:8081`.'}
           </small>
         </label>
 
@@ -201,18 +202,22 @@ export function NextcloudConnectorForm({ editingConnector = null, onSubmit, onCa
             onChange={(e) => update('secret', e.target.value)}
             placeholder={isImap ? 'mailbox password or app password' : 'xxxx-xxxx-xxxx-xxxx'}
             autoComplete="current-password"
+            InputProps={{
+              endAdornment: (
+                <InputAdornment position="end">
+                  <IconButton
+                    type="button"
+                    aria-label={eyeLabel}
+                    title={eyeLabel}
+                    edge="end"
+                    onClick={() => setShowSecret((s) => !s)}
+                  >
+                    {showSecret ? <VisibilityOffOutlinedIcon fontSize="small" /> : <VisibilityOutlinedIcon fontSize="small" />}
+                  </IconButton>
+                </InputAdornment>
+              ),
+            }}
           />
-          <div className="input-with-action">
-            <IconButton
-              type="button"
-              className="input-action-button"
-              aria-label={eyeLabel}
-              title={eyeLabel}
-              onClick={() => setShowSecret((s) => !s)}
-            >
-              {showSecret ? <VisibilityOffOutlinedIcon fontSize="small" /> : <VisibilityOutlinedIcon fontSize="small" />}
-            </IconButton>
-          </div>
           {isEditing ? (
             <small>Leave blank to keep current secret.</small>
           ) : null}

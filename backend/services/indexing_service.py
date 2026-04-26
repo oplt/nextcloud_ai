@@ -93,6 +93,20 @@ class DocumentIngestionService:
             return document
 
         if self._needs_ocr(parsed):
+            document.metadata_json = {
+                **dict(document.metadata_json or {}),
+                "ingestion_quality": {
+                    "parser_backend": parsed.metadata.get("parser"),
+                    "text_length": len(parsed.text or ""),
+                    "page_count": parsed.metadata.get("page_count") or len(parsed.pages),
+                    "table_count": parsed.metadata.get("table_count"),
+                    "chunk_count": 0,
+                    "embedding_status": "skipped",
+                    "embedding_error": None,
+                    "indexed_at": None,
+                    "needs_ocr": True,
+                },
+            }
             await self._mark_unindexed(
                 document=document,
                 status="needs_ocr",
@@ -160,6 +174,22 @@ class DocumentIngestionService:
     ) -> None:
         await self.chunk_repo.delete_for_document(document.id)
         await self.intelligence.clear_document_intelligence(document.id)
+        metadata = dict(document.metadata_json or {})
+        metadata.setdefault(
+            "ingestion_quality",
+            {
+                "parser_backend": None,
+                "text_length": 0,
+                "page_count": None,
+                "table_count": None,
+                "chunk_count": 0,
+                "embedding_status": "skipped",
+                "embedding_error": error_message if status == "failed" else None,
+                "indexed_at": None,
+                "needs_ocr": status == "needs_ocr",
+            },
+        )
+        document.metadata_json = metadata
         document.parse_status = status
         document.parse_error = error_message
         document.indexed_at = None

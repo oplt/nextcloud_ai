@@ -1,50 +1,86 @@
-# NextCloud AI Server
+# DocuMind
 
-## Overview
+**DocuMind** is a private, self-hosted AI workspace for Nextcloud documents. It syncs files from Nextcloud, parses and indexes document content, and lets users ask grounded questions with cited source snippets while respecting document permissions.
 
-This repository contains a private document-search and chat workspace built around Nextcloud content.
+It is designed for individuals, teams, and companies that want AI-powered document search without moving confidential files into external SaaS platforms.
 
-The stack has four main parts:
+---
 
-- A FastAPI backend that handles authentication, connector management, document ingestion, chat, health checks, and Nextcloud webhook/bridge endpoints
-- A React + Vite frontend for login, chat, connectors, documents, job monitoring, and admin operations
-- Celery workers and a beat scheduler for sync and reindex jobs
-- An optional Nextcloud app (`nc_ai_bridge/`) that launches the frontend from a logged-in Nextcloud session
+## Why Nextcloud?
 
-At a high level, the system connects to Nextcloud, syncs file metadata and file contents, parses supported document types, stores chunk embeddings in PostgreSQL with `pgvector`, and answers chat questions with grounded source snippets.
+[Nextcloud](https://nextcloud.com/) is an open-source, self-hosted file sharing and collaboration platform. It can be used as a private alternative to Google Drive, OneDrive, Dropbox, or Box.
+
+For individuals, it offers private document storage, browser/mobile/desktop access, backups, sharing, and optional self-hosted control.
+
+For companies, it helps with data sovereignty, confidentiality, user/group permissions, internal collaboration, and reduced dependency on third-party SaaS providers for sensitive business, legal, HR, financial, and technical documents.
+
+---
+
+## Why DocuMind?
+
+Nextcloud stores documents, but finding precise answers inside large document collections can still be slow. DocuMind adds a private RAG layer on top of Nextcloud.
+
+Key benefits:
+
+- Ask natural-language questions over private Nextcloud files
+- Receive answers grounded in cited source snippets
+- Keep retrieval aligned with Nextcloud users, groups, owners, and public-link permissions
+- Run with local/self-hosted AI providers such as Ollama
+- Sync, parse, chunk, embed, reindex, and monitor documents through background jobs
+- Provide an internal AI workspace without exposing company documents to external SaaS tools
+
+---
 
 ## Features
 
-- Local admin sign-in plus Nextcloud bridge sign-in
-- Cookie-based session auth with CSRF protection
-- Role-based access control for admin, operator, and viewer personas
-- Nextcloud connector CRUD, credential testing, sync, and full reindex
-- Document ingestion for PDF, DOCX, ODT, TXT, and Markdown files
-- ACL-aware document visibility based on Nextcloud owners, users, groups, public links, and superuser access
-- Grounded chat responses with saved chat sessions and cited source snippets
-- Retrieval controls by connector, file type, path prefix, modified date, and per-chat active document scope
-- Document browsing, metadata inspection, inline original-file preview, and per-document reindex
-- Background sync/reindex jobs with retry, dead-letter tracking, and document-level failure diagnostics
-- Admin UX for user management, role assignment, connector ownership, and audit log browsing
-- Nextcloud webhook handling with debounce logic and fallback scheduled syncs
-- Health endpoints for liveness, readiness, database, Redis, broker, and Ollama status
-- Prometheus-compatible metrics, structured request and trace IDs, and optional Sentry reporting
-- Automatic Ollama model readiness checks, model pulling, and warm-up when Ollama providers are enabled
+- Local admin login and optional Nextcloud bridge login
+- Cookie-based session authentication with CSRF protection
+- Role-based access control for admin, operator, and viewer users
+- Nextcloud connector management, credential testing, sync, and full reindex
+- Document ingestion for PDF, DOCX, ODT, TXT, and Markdown
+- ACL-aware document visibility based on Nextcloud permissions
+- Grounded chat responses with saved sessions and cited source snippets
+- Retrieval filters by connector, file type, path prefix, modified date, and active document scope
+- Document browser with metadata, access lists, parse status, preview, and per-document reindex
+- Celery/Redis background jobs with retries and document-level diagnostics
+- Health checks, Prometheus-compatible metrics, request IDs, trace IDs, and optional Sentry reporting
+- Ollama model readiness checks, model pulling, and warm-up when Ollama providers are enabled
+
+---
+
+## Architecture
+
+```mermaid
+flowchart LR
+    NC[Nextcloud] -->|WebDAV / OCS / Webhooks| API[FastAPI Backend]
+    Bridge[Optional Nextcloud Bridge App] --> API
+    FE[React + Vite Frontend] --> API
+    API --> PG[(PostgreSQL + pgvector)]
+    API --> Redis[(Redis)]
+    API --> Worker[Celery Worker]
+    Beat[Celery Beat] --> Worker
+    Worker --> Parser[Document Parsers]
+    Parser --> Embed[Embedding Provider]
+    Embed --> PG
+    API --> LLM[LLM Provider / Ollama]
+```
+
+---
 
 ## Tech Stack
 
-### Backend
+**Backend**
 
 - Python 3.12
 - FastAPI
 - SQLAlchemy + Alembic
-- PostgreSQL + `pgvector`
+- PostgreSQL + pgvector
 - Celery + Redis
 - Ollama
-- `pdfplumber` and `python-docx`
-- `prometheus-client` and `sentry-sdk`
+- pdfplumber, python-docx
+- prometheus-client, sentry-sdk
 
-### Frontend
+**Frontend**
 
 - React 19
 - TypeScript
@@ -52,291 +88,283 @@ At a high level, the system connects to Nextcloud, syncs file metadata and file 
 - Material UI
 - Tailwind CSS
 
-### Integration
+**Integration**
 
-- Nextcloud WebDAV + OCS APIs
-- Optional Nextcloud app bridge compatible with Nextcloud 31-32
+- Nextcloud WebDAV API
+- Nextcloud OCS API
+- Optional Nextcloud app bridge
+- Compatible with Nextcloud 31-32, depending on deployment configuration
 
-## Architecture / Folder Structure
+---
+
+## Quick Start
+
+For a new starter, use the Docker flow first. It starts PostgreSQL, Redis, Ollama, backend, worker, scheduler, frontend, Nextcloud, and the Nextcloud database.
+
+### Prerequisites
+
+- Docker with Docker Compose v2
+- GNU Make
+- Internet access on first run so Ollama can pull models
+
+For non-Docker local development you also need Python 3.12, Node.js/npm, Redis, PostgreSQL with pgvector, and Ollama installed on the host.
+
+### Docker First Start
+
+```bash
+make docker-dev
+```
+
+`make docker-dev` creates env files if missing, runs database migrations in the Docker Postgres database, starts the Docker services, waits for health checks, and opens Nextcloud:
 
 ```text
-.
-├── .env.example          # Deployment-level reverse proxy variables
-├── Makefile              # Bootstrap, validate, dev, and deploy commands
-├── backend/
-│   ├── ai/                 # Embeddings, LLM clients, prompt building, citations, Ollama runtime
-│   ├── alembic/            # Database migrations
-│   ├── api/                # FastAPI routers, auth helpers, dependencies
-│   ├── connectors/nextcloud/ # Nextcloud client, bridge token handling, permissions, webhooks
-│   ├── core/               # Settings, security, CSRF, exceptions
-│   ├── db/                 # Models, repositories, sessions
-│   ├── ingestion/          # Chunking and embedding pipeline
-│   ├── parsers/            # PDF, DOCX, ODT, TXT, Markdown parsing
-│   ├── scripts/            # Admin seeding script
-│   ├── services/           # Auth, chat, retrieval, connector sync, health, jobs
-│   ├── tests/              # Pytest suite
-│   ├── workers/            # Celery app and background tasks
-│   ├── Dockerfile
-│   ├── .env.example
-│   └── pyproject.toml
-├── deployment/             # TLS-ready compose stack, backups, upgrade and rotation runbooks
-├── frontend/
-│   ├── src/
-│   │   ├── api/           # Frontend API client
-│   │   ├── components/    # Chat, connector, document, and job UI
-│   │   ├── hooks/         # Session hook
-│   │   └── pages/         # Login, overview, connectors, documents, jobs, admin
-│   ├── Dockerfile
-│   ├── .env.example
-│   └── package.json
-├── nc_ai_bridge/           # Optional Nextcloud app for SSO-style handoff
-└── docker-compose.yml      # Full local stack
+http://localhost:8081/apps/dashboard/
 ```
 
-## Setup and Installation
+Default Docker Nextcloud login:
 
-### Option A: Full stack with Docker Compose
+```text
+username: admin
+password: admin
+```
 
-Prerequisite: Docker with Compose.
+The backend admin account is created from `backend/.env`. With the default example env, use:
 
-From the repository root:
+```text
+email: admin@admin.com
+password: 12345678
+```
+
+Useful local URLs:
+
+- Frontend: <http://localhost:5173>
+- Backend API: <http://localhost:8000>
+- API docs: <http://localhost:8000/docs>
+- Health: <http://localhost:8000/health>
+- Nextcloud: <http://localhost:8081/apps/dashboard/>
+- Ollama: <http://localhost:11434>
+
+The first run can be slow. Docker uses Ollama bootstrap mode `ensure`, so missing models are pulled automatically:
+
+```text
+bge-m3:latest
+llama3:latest
+```
+
+If you need to pull them manually:
 
 ```bash
-make bootstrap-env
-make dev-up
+docker compose exec ollama ollama pull bge-m3:latest
+docker compose exec ollama ollama pull llama3:latest
 ```
 
-This starts:
+---
 
-- PostgreSQL on `localhost:5432`
-- Redis on `localhost:6379`
-- Ollama on `localhost:11434`
-- FastAPI backend on `localhost:8000`
-- React frontend on `localhost:5173`
-- A Celery worker
-- A Celery beat scheduler
+## Local Development Commands
 
-Docker startup seeds the first admin account automatically. If you need to run it manually:
+Docker commands:
 
 ```bash
-docker compose exec backend python -m scripts.seed_admin
+make docker-dev
+make docker-dev-rebuild
+make docker-migrate
+make docker-open-nextcloud
+make docker-logs
+make docker-ps
+make docker-diagnose
+make docker-down
 ```
 
-### Option B: Run services locally
-
-#### Backend install
-
-Prerequisites:
-
-- Python 3.12
-- PostgreSQL with the `vector` extension available
-- Redis
-- Ollama. In `backend/.env.example`, both `EMBEDDING_PROVIDER` and `LLM_PROVIDER` are set to `ollama`.
-
-Create a virtual environment and install the backend:
+Host-local commands:
 
 ```bash
-make bootstrap-env
-make install-backend
+make local-bootstrap
+make local-dev
+make local-backend-test
+make local-frontend-lint
+make local-frontend-build
+make local-check
+make local-seed-admin
 ```
 
-#### Frontend install
-
-Prerequisite: Node.js with npm.
+To stop the Docker stack:
 
 ```bash
-make install-frontend
+docker compose down
 ```
+
+To stop and delete all Docker data volumes, including PostgreSQL data, Nextcloud files, and downloaded Ollama models:
+
+```bash
+docker compose down -v
+```
+
+---
 
 ## Configuration
 
-Bootstrap env files from examples:
+Environment files are created from examples:
 
 ```bash
-make bootstrap-env
+make docker-dev
 ```
 
-### `backend/.env`
+Main files:
 
-Start from `backend/.env.example`, then set:
+```text
+.env
+backend/.env
+frontend/.env
+```
 
-- Application: `APP_NAME`, `APP_ENV`, `DEBUG`, `API_V1_PREFIX`, `FRONTEND_URL`
-- Database and queue: `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_PORT`, `DATABASE_URL`, `REDIS_URL`, `REDIS_PORT`, `CELERY_TASK_ALWAYS_EAGER`
-- Auth and admin bootstrap: `JWT_SECRET_KEY`, `SETTINGS_VAULT_KEY`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `AUTH_ISSUER`, `AUTH_AUDIENCE`, `AUTH_COOKIE_NAME`, `AUTH_COOKIE_SECURE`, `AUTH_COOKIE_SAMESITE`, `AUTH_COOKIE_DOMAIN`, `FIRST_SUPERUSER_EMAIL`, `FIRST_SUPERUSER_PASSWORD`
-- AI runtime: `EMBEDDING_DIM`, `EMBEDDING_PROVIDER`, `LLM_PROVIDER`, `OLLAMA_BASE_URL`, `OLLAMA_EMBEDDING_MODEL`, `OLLAMA_CHAT_MODEL`, `OLLAMA_PORT`
-- Nextcloud integration: `NEXTCLOUD_BRIDGE_SHARED_SECRET`, `NEXTCLOUD_BRIDGE_ISSUER`, `NEXTCLOUD_BRIDGE_AUDIENCE`, `NEXTCLOUD_BRIDGE_TTL_SECONDS`, `NEXTCLOUD_BRIDGE_ALLOWED_CLOCK_SKEW_SECONDS`, `NEXTCLOUD_BRIDGE_REDIS_URL`, `NEXTCLOUD_WEBHOOK_SECRET`, `NEXTCLOUD_VERIFY_TLS`, `NEXTCLOUD_REQUEST_TIMEOUT_SECONDS`
-- Observability: `SENTRY_DSN`, `SENTRY_TRACES_SAMPLE_RATE`, `METRICS_ENABLED`, `METRICS_PATH`, `REQUEST_ID_HEADER_NAME`, `TRACE_ID_HEADER_NAME`
-- Frontend API base value also appears in this file: `VITE_API_BASE_URL`
+Important backend values:
 
-Additional optional settings with code defaults live in `backend/core/config.py`.
+```env
+DATABASE_URL=
+REDIS_URL=
+JWT_SECRET_KEY=
+SETTINGS_VAULT_KEY=
+FIRST_SUPERUSER_EMAIL=
+FIRST_SUPERUSER_PASSWORD=
+EMBEDDING_PROVIDER=
+LLM_PROVIDER=
+OLLAMA_BASE_URL=
+OLLAMA_EMBEDDING_MODEL=
+OLLAMA_CHAT_MODEL=
+OLLAMA_BOOTSTRAP_MODE=
+NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL=
+NEXTCLOUD_BRIDGE_SHARED_SECRET=
+NEXTCLOUD_WEBHOOK_SECRET=
+```
 
-### `frontend/.env`
+Important frontend value:
 
-Start from `frontend/.env.example`. It includes:
+```env
+VITE_API_BASE_URL=
+```
 
-- `VITE_API_BASE_URL`
+Replace all example secrets, passwords, tokens, and hostnames before any non-local deployment.
 
-### Root `.env`
+---
 
-Start from `.env.example` when using [deployment/docker-compose.yml](/home/polat/Desktop/Projects/NextCloud/deployment/docker-compose.yml:1). It includes:
+## Default Admin Account
 
-- `PUBLIC_HOSTNAME`
-- `ACME_EMAIL`
-- `FRONTEND_API_BASE_URL`
+The first local admin user is created from `backend/.env`:
 
-### What still needs manual input
+```env
+FIRST_SUPERUSER_EMAIL=
+FIRST_SUPERUSER_PASSWORD=
+```
 
-- Replace example secrets and passwords in `backend/.env` before any non-local deployment.
-- Supply real Nextcloud connector values in the UI or API: base URL, username, app password, and root path.
-- `NEXTCLOUD_WEBHOOK_SECRET` is blank in `backend/.env`; set it if you want signed webhook verification on `/api/v1/nextcloud/webhooks`.
-- `NEXTCLOUD_BRIDGE_REDIS_URL` is blank in `backend/.env`; set it if you want separate Redis-backed replay protection for bridge tokens.
-- Update `FRONTEND_URL` and `VITE_API_BASE_URL` if you are not running on `localhost:5173` and `localhost:8000`.
-- If you install the Nextcloud app bridge, you must also set Nextcloud app config values such as `fastapi_base_url` and keep `overwrite.cli.url` correct in the Nextcloud server config.
-- This repository does not include a root `LICENSE` file, so repository-wide licensing still needs to be clarified.
+With the default local example env:
 
-## Run Instructions
+```text
+email: admin@admin.com
+password: 12345678
+```
 
-### Backend
+Never commit real credentials.
 
-Apply database migrations:
+---
+
+## Supported Document Types
+
+| Type | Status |
+|---|---|
+| PDF | Supported |
+| DOCX | Supported |
+| ODT | Supported |
+| TXT | Supported |
+| Markdown | Supported |
+| Images / OCR | Not guaranteed unless implemented separately |
+| Spreadsheets | Not listed as supported |
+| Audio / Video | Not listed as supported |
+
+---
+
+## Basic Usage
+
+1. Start the app:
 
 ```bash
-source .venv/bin/activate
-alembic -c backend/alembic.ini upgrade head
+make docker-dev
 ```
 
-Start the API server:
+2. Sign in to Nextcloud:
 
-```bash
-source .venv/bin/activate
-uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
+```text
+http://localhost:8081/apps/dashboard/
 ```
 
-Seed the first local admin user:
+Default Docker Nextcloud credentials:
 
-```bash
-source .venv/bin/activate
-python -m scripts.seed_admin
+```text
+username: admin
+password: admin
 ```
 
-Start the Celery worker:
+3. Open the frontend if you want to use the AI workspace directly:
 
-```bash
-source .venv/bin/activate
-celery -A backend.workers.celery_app.celery_app worker --loglevel=INFO
+```text
+http://localhost:5173
 ```
 
-Start the Celery beat scheduler:
+4. Sign in with the backend admin account from `backend/.env`.
 
-```bash
-source .venv/bin/activate
-celery -A backend.workers.celery_app.celery_app beat --loglevel=INFO
-```
-
-Notes:
-
-- In development, connector sync and document reindex requests can fall back to local execution if no Celery worker is detected.
-- Scheduled fallback connector syncs come from Celery beat, so the scheduler is still needed for that behavior.
-
-### Frontend
-
-Start the development server:
-
-```bash
-npm --prefix frontend run dev -- --host 0.0.0.0
-```
-
-### Makefile shortcuts
-
-```bash
-make backend-test
-make frontend-lint
-make frontend-build
-make check
-make ci
-make seed-admin
-```
-
-`make backend-test` disables unrelated host pytest plugins and loads `pytest_asyncio` explicitly, which avoids false failures from globally installed plugins.
-`make ci` runs backend tests plus frontend lint and build in one command.
-
-Create a production build:
-
-```bash
-npm --prefix frontend run build
-```
-
-Preview the production build:
-
-```bash
-npm --prefix frontend run preview
-```
-
-## Usage Examples
-
-### 1. First login
-
-1. Start the stack.
-2. Docker: admin auto-seeded. Local-only: run `python -m scripts.seed_admin`.
-3. Open `http://localhost:5173`.
-4. Sign in with `FIRST_SUPERUSER_EMAIL` and `FIRST_SUPERUSER_PASSWORD` from `backend/.env`.
-
-### 2. Add a Nextcloud connector
-
-In the frontend Connectors page, fill in:
+5. Add a Nextcloud connector from the Connectors page:
 
 - Display name
-- Base URL
+- Nextcloud base URL, for Docker usually `http://localhost:8081`
 - Username
 - App password
 - Root path
-- TLS verification choice
+- TLS verification preference
 
-Then use:
+The backend container cannot call browser-local `localhost` directly. Docker sets `NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL=http://nextcloud`, so local Nextcloud connector URLs such as `http://localhost:8081` are rewritten internally for backend test and sync calls.
 
-- `Test` to verify credentials
-- `Sync` to sync and index changed files
-- `Full reindex` to force reprocessing
+6. Use `Test`, `Sync`, or `Full reindex`.
 
-### 3. Browse synced documents
+7. Open the Documents page to inspect parsed files and indexing status.
 
-After a sync completes:
+8. Ask questions in the chat workspace and review cited source snippets.
 
-1. Open the Documents page.
-2. Select a document from the table.
-3. Review metadata, access lists, parse status, and preview the original file.
-4. Use `Reindex` if you want to re-run parsing and embedding for that document.
+---
 
-### 4. Ask grounded questions
+## Nextcloud Plugin / Bridge App
 
-Use the Overview page chat workspace to ask questions against indexed content.
+The optional Nextcloud bridge app is located in:
 
-The backend stores chat sessions and returns:
-
-- The assistant answer
-- Source snippets
-- Cited sources
-- Active context document IDs and document metadata
-
-### 5. Health checks
-
-Unauthenticated health endpoints:
-
-```bash
-curl http://localhost:8000/health
-curl http://localhost:8000/api/v1/health/live
-curl http://localhost:8000/api/v1/health/ready
+```text
+nc_ai_bridge/
 ```
 
-### 6. Optional Nextcloud bridge app
+It allows users to open the AI workspace from inside Nextcloud and exchange a short-lived signed token for backend session cookies.
 
-Install the bridge app into Nextcloud by copying `nc_ai_bridge/` into `custom_apps/`, then enable it:
+### Install into Nextcloud `extra-apps`
+
+Adjust paths for your server:
+
+```bash
+sudo cp -r /path/to/nextcloud_ai/nc_ai_bridge /path/to/nextcloud/extra-apps/
+sudo chown -R root:root /path/to/nextcloud/extra-apps/nc_ai_bridge
+```
+
+If your installation uses `custom_apps` instead:
+
+```bash
+sudo cp -r /path/to/nextcloud_ai/nc_ai_bridge /path/to/nextcloud/custom_apps/
+sudo chown -R root:root /path/to/nextcloud/custom_apps/nc_ai_bridge
+```
+
+> Some Nextcloud deployments expect app files to be readable by the web server user, often `www-data`. If the app does not appear or cannot be enabled, verify ownership and permissions for your deployment.
+
+Enable the app:
 
 ```bash
 sudo -u www-data php occ app:enable nc_ai_bridge
 ```
 
-Configure the app values:
+Configure bridge values:
 
 ```bash
 sudo -u www-data php occ config:app:set nc_ai_bridge fastapi_base_url --value="<your-fastapi-base-url>"
@@ -346,24 +374,35 @@ sudo -u www-data php occ config:app:set nc_ai_bridge bridge_audience --value="fa
 sudo -u www-data php occ config:app:set nc_ai_bridge bridge_ttl_seconds --value="60"
 ```
 
-Also make sure the Nextcloud server has a correct canonical base URL in `config/config.php`:
+Also verify the Nextcloud base URL in `config/config.php`:
 
 ```php
 'overwrite.cli.url' => '<your-nextcloud-base-url>',
 ```
 
-When a user opens the `AI Workspace` navigation entry in Nextcloud, the app:
+---
 
-1. Calls the bridge bootstrap endpoint inside Nextcloud
-2. Gets a short-lived signed bridge token
-3. Posts that token to `/api/v1/auth/nextcloud/sso/consume`
-4. Receives backend session cookies and is redirected to the frontend
+## API Documentation
+
+When the backend is running:
+
+- Swagger UI: <http://localhost:8000/docs>
+- ReDoc: <http://localhost:8000/redoc>
+- Health: <http://localhost:8000/health>
+- Liveness: <http://localhost:8000/api/v1/health/live>
+- Readiness: <http://localhost:8000/api/v1/health/ready>
+
+---
 
 ## Deployment
 
-Production deployment package now lives in [deployment/README.md](/home/polat/Desktop/Projects/NextCloud/deployment/README.md:1).
+Production deployment files live in:
 
-Quick start:
+```text
+deployment/
+```
+
+Typical production bootstrap:
 
 ```bash
 cp .env.example .env
@@ -372,41 +411,175 @@ make deploy-config
 make deploy-up
 ```
 
-What it adds:
+The deployment package may include Caddy TLS reverse proxying, persistent PostgreSQL/Redis/Ollama volumes, static frontend serving, backend worker and scheduler services, metrics, backup scripts, restore scripts, and operations runbooks.
 
-- Caddy reverse proxy with automatic TLS
-- Persistent Postgres, Redis, Ollama, and Caddy volumes
-- Static production frontend container
-- Dedicated backend worker and scheduler services
-- Prometheus-compatible `/metrics`
-- Backup and restore scripts in `deployment/scripts`
-- Upgrade, webhook, bridge auth, and credential rotation runbooks in `deployment/OPERATIONS.md`
+See:
+
+```text
+deployment/README.md
+deployment/OPERATIONS.md
+```
+
+---
+
+## Testing and Quality Checks
+
+```bash
+make local-backend-test
+make local-frontend-lint
+make local-frontend-build
+make local-check
+```
+
+---
+
+## Repository Structure
+
+```text
+.
+├── .env.example
+├── Makefile
+├── backend/
+│   ├── ai/
+│   ├── alembic/
+│   ├── api/
+│   ├── connectors/nextcloud/
+│   ├── core/
+│   ├── db/
+│   ├── ingestion/
+│   ├── parsers/
+│   ├── scripts/
+│   ├── services/
+│   ├── tests/
+│   ├── workers/
+│   ├── Dockerfile
+│   ├── .env.example
+│   └── pyproject.toml
+├── deployment/
+├── frontend/
+│   ├── src/
+│   ├── Dockerfile
+│   ├── .env.example
+│   └── package.json
+├── nc_ai_bridge/
+└── docker-compose.yml
+```
+
+---
+
+## Security Notes
+
+- Use Nextcloud app passwords for connector access, not browser passwords.
+- Replace all local/demo secrets before deployment.
+- Use HTTPS in production.
+- Configure secure auth cookies in production.
+- Keep `NEXTCLOUD_BRIDGE_SHARED_SECRET`, `JWT_SECRET_KEY`, and `SETTINGS_VAULT_KEY` private.
+- Restrict admin access to trusted users only.
+
+---
 
 ## Troubleshooting
 
-- `GET /api/v1/health/ready` returns `503`: the response body includes separate readiness details for the database, Redis, broker, and Ollama runtime.
-- Nextcloud connector test fails with authentication errors: the backend expects a Nextcloud username and app password, not a normal browser password.
-- Nextcloud connector cannot reach the server: the backend raises a message that includes the base URL and the upstream request error.
-- Documents are not indexed: only PDF, DOCX, ODT, TXT, and Markdown parsing is implemented in `backend/parsers/document_parser.py`.
-- Ollama startup is slow on first run: the backend and worker warm required models and will pull missing models automatically when Ollama providers are enabled.
-- The Nextcloud bridge page says configuration is incomplete: set `nc_ai_bridge.fastapi_base_url` in the Nextcloud app config.
-- The Nextcloud bridge bootstrap fails because base URL is missing: set `overwrite.cli.url` in Nextcloud.
+### Readiness endpoint returns `503`
 
-## Contribution
-
-This repository does not include a dedicated contribution guide.
-
-Useful checks that are present in the repo:
+Run:
 
 ```bash
-make backend-test
-make frontend-build
+curl http://localhost:8000/api/v1/health/ready
 ```
 
-There is a backend pytest suite in `backend/tests/`. No frontend test runner is configured in this repository.
+The response should show whether the database, Redis, broker, or Ollama runtime is unhealthy.
+
+### Nextcloud connector authentication fails
+
+Use a Nextcloud username and app password.
+
+### Nextcloud connector cannot reach localhost
+
+In Docker, `localhost` inside the backend container means the backend container, not the host browser. Use this browser-facing connector URL for the bundled Docker Nextcloud:
+
+```text
+http://localhost:8081
+```
+
+Docker sets this backend-only internal URL:
+
+```env
+NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL=http://nextcloud
+```
+
+That lets backend connector test and sync calls reach the Docker Nextcloud service.
+
+### Ollama says a model was not found
+
+Docker should pull missing models automatically on startup. To pull manually:
+
+```bash
+docker compose exec ollama ollama pull bge-m3:latest
+docker compose exec ollama ollama pull llama3:latest
+```
+
+Then restart backend and worker:
+
+```bash
+docker compose restart backend worker
+```
+
+### Migration container failed
+
+Inspect the migration logs:
+
+```bash
+docker compose logs --tail=160 migrate postgres
+```
+
+Run the Docker migration step explicitly:
+
+```bash
+make docker-migrate
+```
+
+### Docker permission denied on `/var/run/docker.sock`
+
+Your user may not have permission to use Docker. On Linux, either run Docker commands with the required privileges or add your user to the Docker group according to your distro's Docker installation guide.
+
+### Documents are not indexed
+
+Verify the file type is supported and check worker logs, parse status, and document-level failure diagnostics.
+
+### Ollama startup is slow
+
+The first run can be slow because required models may be pulled and warmed automatically.
+
+### Nextcloud bridge does not work
+
+Verify:
+
+```env
+NEXTCLOUD_BRIDGE_SHARED_SECRET=
+```
+
+and:
+
+```php
+'overwrite.cli.url' => '<your-nextcloud-base-url>',
+```
+
+---
+
+## Known Limitations
+
+- Only selected document formats are currently parsed.
+- OCR/image extraction is not guaranteed unless implemented separately.
+- Spreadsheet, audio, and video parsing are not listed as supported.
+- Frontend tests may not be configured.
+- Repository-wide licensing should be clarified if no root `LICENSE` file exists.
+- Production secrets must be replaced before deployment.
+
+---
 
 ## License
 
-No root `LICENSE` file is present in this repository.
+If no root `LICENSE` file is present, repository-wide licensing needs clarification.
 
-The only explicit license declaration in the codebase is inside `nc_ai_bridge/composer.json`, which declares `AGPL-3.0-or-later` for the Nextcloud bridge package. That does not establish a repository-wide license by itself.
+If the only explicit license declaration is inside `nc_ai_bridge/composer.json`, that license applies to the bridge package and does not necessarily establish a repository-wide license by itself.

@@ -153,5 +153,24 @@ def _chunk_tokens(chunk: DocumentChunk) -> list[str]:
         chunk.heading_path or "",
         document.file_name if document is not None else "",
         document.file_path if document is not None else "",
+        document.document_type if document is not None else "",
+        document.business_domain if document is not None else "",
+        _json_text(document.metadata_json) if document is not None else "",
+        _json_text(document.extracted_fields_json) if document is not None else "",
     ]
     return tokenize(" ".join(parts))
+
+
+def _json_text(value: dict | None) -> str:
+    if not value:
+        return ""
+    parts: list[str] = []
+    for key, item in value.items():
+        parts.append(str(key))
+        if isinstance(item, dict):
+            parts.append(_json_text(item))
+        elif isinstance(item, list):
+            parts.extend(str(entry) for entry in item)
+        elif item is not None:
+            parts.append(str(item))
+    return " ".join(parts)

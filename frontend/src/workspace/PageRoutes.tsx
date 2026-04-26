@@ -111,7 +111,9 @@ export function AdminRoute() {
       auditLogs={w.auditLogs}
       loading={w.busy || w.adminDataLoading}
       dataError={w.adminDataError}
+      currentUserId={w.user.id}
       onCreateUser={w.handleCreateUser}
+      onDeleteUsers={w.handleDeleteUsers}
       onUpdateUser={w.handleUpdateUser}
       onAssignConnectorOwner={w.handleAssignConnectorOwner}
       onSearchAuditLogs={w.handleSearchAuditLogs}

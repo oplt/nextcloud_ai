@@ -66,6 +66,20 @@ IMAGE_MIME_TYPES = {
 }
 EMAIL_MIME_TYPES = {"message/rfc822", "application/eml"}
 
+_AMOUNT_RE = re.compile(
+    r"(?i)(?:total|amount|balance|subtotal|btw|vat|totaal|bedrag|factuurbedrag)"
+    r"[^0-9€$]{0,30}([€$]?\s?\d{1,3}(?:[.,]\d{3})*(?:[.,]\d{2})?)"
+)
+
+_DATE_RE = re.compile(
+    r"\b(?:\d{1,2}[-/]\d{1,2}[-/]\d{2,4}|\d{4}[-/]\d{1,2}[-/]\d{1,2})\b"
+)
+
+_INVOICE_NO_RE = re.compile(
+    r"(?i)(?:invoice|factuur|invoice no|factuurnummer|nummer|nr\.?)"
+    r"[^A-Z0-9]{0,20}([A-Z0-9][A-Z0-9\-_/]{2,})"
+)
+
 ODT_OFFICE_NS = "urn:oasis:names:tc:opendocument:xmlns:office:1.0"
 ODT_TEXT_NS = "urn:oasis:names:tc:opendocument:xmlns:text:1.0"
 ODT_DOCUMENT_CONTENT_TAG = f"{{{ODT_OFFICE_NS}}}document-content"
@@ -130,7 +144,9 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
     return ParsedDocument(
         text=combined,
         pages=pages,
-        metadata={"page_count": len(pages), "parser": "pdfplumber"},
+        metadata={"page_count": len(pages),
+                  "parser": "pdfplumber",
+                  "extracted_fields": extract_generic_financial_fields(text),},
     )
 
 
@@ -162,6 +178,7 @@ def parse_docx_bytes(payload: bytes) -> ParsedDocument:
             "block_count": len(blocks),
             "table_count": len(document.tables),
             "parser": "python-docx",
+            "extracted_fields": extract_generic_financial_fields(text),
         },
     )
 
@@ -196,7 +213,8 @@ def parse_odt_bytes(payload: bytes) -> ParsedDocument:
     return ParsedDocument(
         text=text,
         pages=pages,
-        metadata={"block_count": len(blocks), "parser": "odt-xml"},
+        metadata={"block_count": len(blocks), "parser": "odt-xml", "extracted_fields": extract_generic_financial_fields(text),},
+
     )
 
 
@@ -210,6 +228,7 @@ def parse_text_bytes(payload: bytes, *, markdown: bool = False) -> ParsedDocumen
             "parser": "plain-text",
             "markdown": markdown,
             "line_count": len(text.splitlines()),
+            "extracted_fields": extract_generic_financial_fields(text),
         },
     )
 
@@ -224,7 +243,7 @@ def parse_csv_bytes(payload: bytes) -> ParsedDocument:
     return ParsedDocument(
         text=formatted,
         pages=pages,
-        metadata={"parser": "csv", "row_count": len(rows), "truncated": len(rows) > 5000},
+        metadata={"parser": "csv", "row_count": len(rows), "truncated": len(rows) > 5000, "extracted_fields": extract_generic_financial_fields(text),},
     )
 
 
@@ -289,6 +308,7 @@ def parse_email_bytes(payload: bytes) -> ParsedDocument:
                 }
                 for attachment in attachments
             ],
+            "extracted_fields": extract_generic_financial_fields(text),
         },
         attachments=attachments,
     )
@@ -311,6 +331,7 @@ def parse_image_bytes(
             "ocr_applied": False,
             "size_bytes": len(payload),
             "mime_type": normalized_mime,
+            "extracted_fields": extract_generic_financial_fields(text),
         },
     )
 
@@ -363,7 +384,40 @@ def _format_table(rows) -> str:
         return ""
     width = max(len(row) for row in cleaned_rows)
     normalized = [row + [""] * (width - len(row)) for row in cleaned_rows]
-    return "\n".join("| " + " | ".join(row) + " |" for row in normalized)
+    table_lines = ["| " + " | ".join(row) + " |" for row in normalized]
+    semantic_lines = _table_semantic_lines(normalized)
+    if semantic_lines:
+        return "\n".join([*table_lines, "", "Extracted table facts:", *semantic_lines])
+    return "\n".join(table_lines)
+
+
+def _table_semantic_lines(rows: list[list[str]]) -> list[str]:
+    facts: list[str] = []
+    if not rows:
+        return facts
+
+    for row_index, row in enumerate(rows, start=1):
+        non_empty = [cell.strip() for cell in row if cell and cell.strip()]
+
+        if len(non_empty) == 2:
+            facts.append(f"- {non_empty[0]}: {non_empty[1]}")
+            facts.append(f"- Field {non_empty[0]} has value {non_empty[1]}")
+
+        if len(non_empty) > 2:
+            facts.append(f"- Row {row_index}: " + "; ".join(non_empty))
+
+    header = rows[0]
+    if len(rows) >= 2 and any(header):
+        for row_index, row in enumerate(rows[1:], start=1):
+            pairs = [
+                f"{heading.strip()}: {value.strip()}"
+                for heading, value in zip(header, row)
+                if heading and value and heading.strip() and value.strip()
+            ]
+            if pairs:
+                facts.append(f"- Row {row_index}: " + "; ".join(pairs))
+
+    return list(dict.fromkeys(facts))
 
 
 def _extract_email_body(message) -> str:
@@ -472,3 +526,23 @@ def _normalize_email_datetime(value: str | None) -> str | None:
         return parsedate_to_datetime(value).isoformat()
     except (TypeError, ValueError, IndexError):
         return _clean_header(value) or None
+
+
+def extract_generic_financial_fields(text: str) -> dict[str, object]:
+    invoice_numbers = list(dict.fromkeys(_INVOICE_NO_RE.findall(text or "")))[:10]
+    dates = list(dict.fromkeys(_DATE_RE.findall(text or "")))[:20]
+    amounts = list(dict.fromkeys(match.group(1).strip() for match in _AMOUNT_RE.finditer(text or "")))[:20]
+
+    doc_type = None
+    lowered = (text or "").lower()
+    if "factuur" in lowered or "invoice" in lowered:
+        doc_type = "invoice"
+    elif "receipt" in lowered or "bon" in lowered:
+        doc_type = "receipt"
+
+    return {
+        "document_type_hint": doc_type,
+        "invoice_numbers": invoice_numbers,
+        "dates": dates,
+        "amounts": amounts,
+    }

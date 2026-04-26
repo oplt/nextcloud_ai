@@ -209,7 +209,7 @@ class ConnectorService:
             raise ValueError("Connector is not a Nextcloud connector")
         metadata = connector.metadata_json or {}
         return NextcloudConnectorConfig(
-            base_url=connector.base_url,
+            base_url=_backend_reachable_nextcloud_base_url(connector.base_url),
             username=connector.username,
             app_password=connector_secret_cipher.decrypt(connector.encrypted_secret),
             root_path=connector.root_path,
@@ -265,3 +265,19 @@ def _normalize_connector_base_url(base_url: str, *, connector_type: str) -> str:
     if connector_type == "nextcloud":
         return normalized.rstrip("/")
     return normalized.rstrip("/")
+
+
+def _backend_reachable_nextcloud_base_url(base_url: str) -> str:
+    internal_base_url = settings.NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL
+    if internal_base_url is None:
+        return base_url
+
+    parsed = urlparse(base_url)
+    if parsed.hostname not in {"localhost", "127.0.0.1"}:
+        return base_url
+
+    internal = str(internal_base_url).rstrip("/")
+    original_path = parsed.path.rstrip("/")
+    if not original_path:
+        return internal
+    return f"{internal}{original_path}"

@@ -18,6 +18,7 @@ import {
   createUser,
   deleteChatSession,
   deleteConnector,
+  deleteUser,
   getChatSession,
   getBackendReadiness,
   getDocument,
@@ -142,6 +143,7 @@ export type WorkspaceContextValue = {
   handleNewChat: () => void;
   handleRetryJob: (jobId: string) => Promise<void>;
   handleCreateUser: (payload: Parameters<typeof createUser>[0]) => Promise<void>;
+  handleDeleteUsers: (userIds: string[]) => Promise<void>;
   handleUpdateUser: (
     userId: string,
     patch: { role_id?: string | null; is_active?: boolean },
@@ -781,6 +783,16 @@ export function WorkspaceProvider({
     [loadAdminData, withFeedback],
   );
 
+  const handleDeleteUsers = useCallback(
+    async (userIds: string[]) => {
+      await withFeedback(async () => {
+        await Promise.all(userIds.map((userId) => deleteUser(userId)));
+        await loadAdminData();
+      }, userIds.length === 1 ? 'User deleted' : `${userIds.length} users deleted`);
+    },
+    [loadAdminData, withFeedback],
+  );
+
   const handleUpdateUser = useCallback(
     async (userId: string, patch: { role_id?: string | null; is_active?: boolean }) => {
       await withFeedback(async () => {
@@ -945,6 +957,7 @@ export function WorkspaceProvider({
     handleNewChat,
     handleRetryJob,
     handleCreateUser,
+    handleDeleteUsers,
     handleUpdateUser,
     handleAssignConnectorOwner,
     handleSearchAuditLogs,

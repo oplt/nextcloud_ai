@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import ScheduleOutlinedIcon from '@mui/icons-material/ScheduleOutlined';
+import Alert from '@mui/material/Alert';
 
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
@@ -209,9 +210,9 @@ export function JobsPage({
         </header>
 
         {error ? (
-          <div className="jobs-error" role="alert">
+          <Alert severity="error" className="jobs-error">
             {error}
-          </div>
+          </Alert>
         ) : null}
 
         {loading && jobs.length === 0 ? (

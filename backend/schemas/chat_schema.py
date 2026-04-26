@@ -23,6 +23,17 @@ class ChatSource(BaseModel):
     content: str | None = Field(default=None, exclude=True, repr=False)
 
 
+class ChatDocumentResult(BaseModel):
+    document_id: UUID
+    file_name: str
+    file_path: str
+    document_type: str
+    business_domain: str
+    modified_at: datetime | None = None
+    score: float
+    matched_fields: list[str] = Field(default_factory=list)
+
+
 class ChatMemoryPatchRequest(BaseModel):
     clear: bool = False
     focus_lock_document_ids: list[str] | None = None
@@ -81,6 +92,7 @@ class ChatAskResponse(BaseModel):
     answer: str
     answer_confidence: float | None = None
     sources: list[ChatSource]
+    document_results: list[ChatDocumentResult] = Field(default_factory=list)
     user_message_id: UUID
     assistant_message_id: UUID
     parent_message_id: str | None

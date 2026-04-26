@@ -249,6 +249,7 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     acl_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    extracted_fields_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     intelligence_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     ingestion_events_json: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
 

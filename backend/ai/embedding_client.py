@@ -32,12 +32,31 @@ class DeterministicEmbeddingClient:
         return [self._text_to_vector(text) for text in texts]
 
 
+class EmbeddingProviderNotConfiguredError(RuntimeError):
+    pass
+
+
 class EmbeddingClientFactory:
     @staticmethod
-    def create() -> EmbeddingClientProtocol:
+    def create(*, allow_deterministic: bool = False) -> EmbeddingClientProtocol:
         if settings.effective_embedding_provider == "ollama":
             return OllamaEmbeddingClient(
                 model=settings.OLLAMA_EMBEDDING_MODEL,
                 base_url=str(settings.OLLAMA_BASE_URL),
             )
-        return DeterministicEmbeddingClient()
+        if settings.effective_embedding_provider == "deterministic" and allow_deterministic:
+            return DeterministicEmbeddingClient()
+        raise EmbeddingProviderNotConfiguredError(
+            "EMBEDDING_PROVIDER must be set to a real embedding provider. "
+            "Set EMBEDDING_PROVIDER=ollama and configure OLLAMA_EMBEDDING_MODEL."
+        )
+
+
+def embedding_provider_health() -> dict[str, object]:
+    provider = settings.effective_embedding_provider
+    return {
+        "provider": provider,
+        "model": settings.OLLAMA_EMBEDDING_MODEL if provider == "ollama" else None,
+        "dimension": settings.EMBEDDING_DIM,
+        "real_embeddings": provider == "ollama",
+    }

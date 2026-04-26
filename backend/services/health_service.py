@@ -8,6 +8,7 @@ from kombu import Connection
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..ai.embedding_client import embedding_provider_health
 from ..ai.ollama_runtime import OllamaRuntimeService, OllamaRuntimeStatus
 from ..core.config import Settings, settings
 
@@ -117,3 +118,6 @@ class HealthCheckService:
             _ai_runtime_cache_status = status
             _ai_runtime_cache_checked_at = now
             return status
+
+    def check_embedding_provider(self) -> dict[str, object]:
+        return embedding_provider_health()

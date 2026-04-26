@@ -1,4 +1,5 @@
 import { createContext, useCallback, useContext, useId, useMemo, useState, type ReactNode } from 'react';
+import Alert from '@mui/material/Alert';
 
 export type ToastSeverity = 'success' | 'error' | 'info';
 
@@ -46,15 +47,17 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       {children}
       <div id={regionId} className="toast-region" aria-label="Notifications">
         {toasts.map((toast, index) => (
-          <div
+          <Alert
             key={toast.id}
+            severity={toast.severity}
+            variant="filled"
             className={`toast toast--${toast.severity}`}
             role={toast.severity === 'error' ? 'alert' : 'status'}
             aria-live={toast.severity === 'error' ? 'assertive' : 'polite'}
             style={{ ['--toast-index' as string]: String(index) }}
           >
             {toast.message}
-          </div>
+          </Alert>
         ))}
       </div>
     </ToastContext.Provider>

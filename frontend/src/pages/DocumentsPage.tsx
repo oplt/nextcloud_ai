@@ -1,4 +1,5 @@
 import { useCallback, useMemo, useState } from 'react';
+import Alert from '@mui/material/Alert';
 
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
@@ -181,14 +182,14 @@ export function DocumentsPage({
     <section className="split-layout split-layout--wide">
       <div className="documents-panel">
         {viewError ? (
-          <div className="page-alert page-alert--error" role="alert">
+          <Alert severity="error" className="page-alert">
             {viewError}
-          </div>
+          </Alert>
         ) : null}
         {viewLoading ? (
-          <div className="page-alert page-alert--info" role="status">
+          <Alert severity="info" className="page-alert" role="status">
             Refreshing document catalog…
-          </div>
+          </Alert>
         ) : null}
         <AppCard component="section" className="card filter-card">
           <header className="panel-header">

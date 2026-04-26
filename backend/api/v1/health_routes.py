@@ -41,6 +41,7 @@ async def ready(session: DbSessionDep) -> JSONResponse:
         else "not_ready",
         "database": database_status.detail,
         "ai_runtime": ai_runtime_status.to_dict(),
+        "embedding": health_service.check_embedding_provider(),
         "redis": redis_status.detail,
         "broker": broker_status.detail,
     }

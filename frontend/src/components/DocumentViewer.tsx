@@ -2,6 +2,8 @@ import { useState } from 'react';
 
 import { getDocumentOriginalUrl, updateDocumentClassification } from '../api/client';
 import DescriptionOutlinedIcon from '@mui/icons-material/DescriptionOutlined';
+import Alert from '@mui/material/Alert';
+
 import { AppButton } from './ui/AppButton';
 import { AppCard } from './ui/AppCard';
 import type { DocumentDetail } from '../types/api';
@@ -95,7 +97,7 @@ export function DocumentViewer({ document, onReindex }: DocumentViewerProps) {
         </div>
 
         {document.parse_error ? (
-          <p className="error-banner" style={{ marginTop: 12 }}>{document.parse_error}</p>
+          <Alert severity="error" className="error-banner" sx={{ mt: 1.5 }}>{document.parse_error}</Alert>
         ) : null}
       </section>
 

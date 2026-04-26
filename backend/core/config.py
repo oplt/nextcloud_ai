@@ -77,6 +77,13 @@ class Settings(BaseSettings):
     RAG_GRAPH_EXPANSION_MAX_SEED_DOCUMENTS: int = Field(default=4, ge=1, le=20)
     RAG_SESSION_SUMMARY_MESSAGE_THRESHOLD: int = Field(default=14, ge=6, le=200)
     RAG_EVAL_METRICS_LOG_PATH: str | None = None
+    RAG_VECTOR_TOP_K: int = Field(default=60, ge=1, le=1000)
+    RAG_KEYWORD_TOP_K: int = Field(default=60, ge=1, le=1000)
+    RAG_RERANK_TOP_K: int = Field(default=40, ge=1, le=500)
+    RAG_FINAL_TOP_N: int = Field(default=6, ge=1, le=50)
+    RAG_TRUE_RERANK_ENABLED: bool = True
+    RAG_TRUE_RERANK_MODEL: str = Field(default="BAAI/bge-reranker-v2-m3", min_length=1)
+    RAG_TRUE_RERANK_TOP_K: int = Field(default=30, ge=1, le=100)
 
     PRODUCT_INTELLIGENCE_ENABLED: bool = True
     PRODUCT_INTELLIGENCE_EXTRACTION_MODE: Literal["off", "inline", "async"] = "async"
@@ -90,6 +97,7 @@ class Settings(BaseSettings):
     NEXTCLOUD_WEBHOOK_SECRET: SecretStr | None = None
     NEXTCLOUD_VERIFY_TLS: bool = True
     NEXTCLOUD_REQUEST_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=120.0)
+    NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL: AnyHttpUrl | None = None
     NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS: int = Field(default=30, ge=1, le=3600)
     NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS: int = Field(
         default=300, ge=30, le=86400
@@ -111,6 +119,7 @@ class Settings(BaseSettings):
     TRACE_ID_HEADER_NAME: str = "X-Trace-ID"
 
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
+
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -212,12 +221,14 @@ class Settings(BaseSettings):
         return self.NEXTCLOUD_BRIDGE_REDIS_URL or self.REDIS_URL
 
     @cached_property
-    def effective_embedding_provider(self) -> Literal["deterministic", "ollama"]:
+    def effective_embedding_provider(self) -> Literal["deterministic", "ollama"] | None:
         if self.EMBEDDING_PROVIDER is not None:
             return self.EMBEDDING_PROVIDER
-        if self.APP_ENV in {"staging", "production"}:
-            return "ollama"
-        return "deterministic"
+        return None
+
+    @cached_property
+    def embedding_provider_is_real(self) -> bool:
+        return self.effective_embedding_provider == "ollama"
 
     @cached_property
     def effective_llm_provider(self) -> Literal["stub", "ollama"]:

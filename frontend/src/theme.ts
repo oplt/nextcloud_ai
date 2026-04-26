@@ -2,101 +2,117 @@ import { alpha, createTheme, type ThemeOptions } from '@mui/material/styles';
 
 export type ThemeMode = 'dark' | 'light';
 
+// Brand palette (single source of truth for MUI + CSS variables).
+const BRAND = {
+  bg: '#fffffe',
+  headline: '#272343',
+  paragraph: '#2d334a',
+  button: '#ffd803',
+  buttonText: '#272343',
+  stroke: '#272343',
+  main: '#fffffe',
+  highlight: '#ffd803',
+  secondary: '#e3f6f5',
+  tertiary: '#bae8e8',
+} as const;
+
+export const brandPalette = BRAND;
+
 const paletteByMode: Record<ThemeMode, ThemeOptions['palette']> = {
   dark: {
     mode: 'dark',
     primary: {
-      main: '#00FFAB',
-      light: '#6DFFC9',
-      dark: '#00CC89',
-      contrastText: '#0A0A0A',
+      main: BRAND.highlight,
+      light: '#ffe666',
+      dark: '#e6c200',
+      contrastText: BRAND.buttonText,
     },
     secondary: {
-      main: '#DFFFEF',
-      light: '#F3FFF9',
-      dark: '#9FEBCB',
-      contrastText: '#0A0A0A',
+      main: BRAND.tertiary,
+      light: BRAND.secondary,
+      dark: '#8fd1d1',
+      contrastText: BRAND.headline,
     },
     background: {
-      default: '#0A0A0A',
-      paper: '#141414',
+      default: BRAND.headline,
+      paper: '#1f1c38',
     },
     text: {
-      primary: '#FFFFFF',
-      secondary: '#C9C9C9',
+      primary: BRAND.bg,
+      secondary: BRAND.tertiary,
     },
-    divider: alpha('#FFFFFF', 0.14),
+    divider: alpha(BRAND.bg, 0.14),
     warning: {
-      main: '#00FFAB',
-      light: '#6DFFC9',
-      dark: '#00CC89',
-      contrastText: '#0A0A0A',
+      main: BRAND.highlight,
+      light: '#ffe666',
+      dark: '#e6c200',
+      contrastText: BRAND.buttonText,
     },
     success: {
-      main: '#00FFAB',
-      light: '#6DFFC9',
-      dark: '#00CC89',
-      contrastText: '#0A0A0A',
+      main: BRAND.tertiary,
+      light: BRAND.secondary,
+      dark: '#8fd1d1',
+      contrastText: BRAND.headline,
     },
     error: {
-      main: '#F25F5C',
-      light: '#FF8A87',
-      dark: '#C84543',
-      contrastText: '#FFFFFF',
+      main: '#f25f5c',
+      light: '#ff8a87',
+      dark: '#c84543',
+      contrastText: BRAND.bg,
     },
     info: {
-      main: '#C9C9C9',
-      light: '#FFFFFF',
-      dark: '#9B9B9B',
-      contrastText: '#0A0A0A',
+      main: BRAND.secondary,
+      light: BRAND.bg,
+      dark: BRAND.tertiary,
+      contrastText: BRAND.headline,
     },
   },
   light: {
     mode: 'light',
     primary: {
-      main: '#00FFAB',
-      light: '#6DFFC9',
-      dark: '#00CC89',
-      contrastText: '#0A0A0A',
+      main: BRAND.highlight,
+      light: '#ffe666',
+      dark: '#e6c200',
+      contrastText: BRAND.buttonText,
     },
     secondary: {
-      main: '#0A0A0A',
-      light: '#404040',
-      dark: '#000000',
-      contrastText: '#FFFFFF',
+      main: BRAND.headline,
+      light: BRAND.paragraph,
+      dark: '#1a1730',
+      contrastText: BRAND.bg,
     },
     background: {
-      default: '#FFFFFF',
-      paper: '#FFFFFF',
+      default: BRAND.bg,
+      paper: BRAND.bg,
     },
     text: {
-      primary: '#0A0A0A',
-      secondary: '#404040',
+      primary: BRAND.headline,
+      secondary: BRAND.paragraph,
     },
-    divider: alpha('#0A0A0A', 0.14),
+    divider: alpha(BRAND.headline, 0.14),
     warning: {
-      main: '#00E198',
-      light: '#6DFFC9',
-      dark: '#00B97D',
-      contrastText: '#0A0A0A',
+      main: BRAND.highlight,
+      light: '#ffe666',
+      dark: '#e6c200',
+      contrastText: BRAND.buttonText,
     },
     success: {
-      main: '#00FFAB',
-      light: '#6DFFC9',
-      dark: '#00CC89',
-      contrastText: '#0A0A0A',
+      main: BRAND.tertiary,
+      light: BRAND.secondary,
+      dark: '#8fd1d1',
+      contrastText: BRAND.headline,
     },
     error: {
-      main: '#D94845',
-      light: '#F0726F',
-      dark: '#AE322F',
-      contrastText: '#ffffff',
+      main: '#d94845',
+      light: '#f0726f',
+      dark: '#ae322f',
+      contrastText: BRAND.bg,
     },
     info: {
-      main: '#CFFFEF',
-      light: '#F2FFF9',
-      dark: '#9FEBCB',
-      contrastText: '#0A0A0A',
+      main: BRAND.secondary,
+      light: BRAND.bg,
+      dark: BRAND.tertiary,
+      contrastText: BRAND.headline,
     },
   },
 };
@@ -115,6 +131,12 @@ export function buildAppTheme(mode: ThemeMode) {
         fontWeight: 800,
         textTransform: 'none',
       },
+      h1: { color: BRAND.headline },
+      h2: { color: BRAND.headline },
+      h3: { color: BRAND.headline },
+      h4: { color: BRAND.headline },
+      h5: { color: BRAND.headline },
+      h6: { color: BRAND.headline },
     },
     components: {
       MuiCssBaseline: {
@@ -131,8 +153,8 @@ export function buildAppTheme(mode: ThemeMode) {
             border: `1px solid ${palette.divider}`,
             boxShadow:
               mode === 'dark'
-                ? '0 14px 36px rgba(0, 0, 0, 0.26)'
-                : '0 14px 36px rgba(10, 10, 10, 0.06)',
+                ? '0 14px 36px rgba(39, 35, 67, 0.32)'
+                : '0 14px 36px rgba(39, 35, 67, 0.08)',
           },
         },
       },
@@ -156,7 +178,18 @@ export function buildAppTheme(mode: ThemeMode) {
             paddingInline: 16,
           },
           containedPrimary: {
-            color: mode === 'dark' ? '#0A0A0A' : '#0A0A0A',
+            color: BRAND.buttonText,
+            backgroundColor: BRAND.button,
+            '&:hover': {
+              backgroundColor: '#e6c200',
+            },
+          },
+          outlinedPrimary: {
+            color: BRAND.headline,
+            borderColor: BRAND.headline,
+          },
+          textPrimary: {
+            color: BRAND.headline,
           },
         },
       },
@@ -166,8 +199,8 @@ export function buildAppTheme(mode: ThemeMode) {
             borderRadius: 5,
             backgroundColor:
               mode === 'dark'
-                ? alpha('#FFFFFF', 0.04)
-                : alpha('#FFFFFF', 0.92),
+                ? alpha(BRAND.bg, 0.04)
+                : alpha(BRAND.bg, 0.92),
           },
         },
       },
@@ -181,7 +214,18 @@ export function buildAppTheme(mode: ThemeMode) {
       MuiCheckbox: {
         styleOverrides: {
           root: {
-            color: mode === 'dark' ? '#C9C9C9' : '#404040',
+            color: mode === 'dark' ? BRAND.tertiary : BRAND.paragraph,
+          },
+        },
+      },
+      MuiLink: {
+        styleOverrides: {
+          root: {
+            color: BRAND.headline,
+            textDecorationColor: alpha(BRAND.headline, 0.4),
+            '&:hover': {
+              textDecorationColor: BRAND.highlight,
+            },
           },
         },
       },

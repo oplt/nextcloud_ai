@@ -1,9 +1,60 @@
-.PHONY: docker-up docker-up-detached docker-up-rebuild docker-up-open docker-open-nextcloud docker-wait-nextcloud docker-nextcloud-up docker-nextcloud-down docker-down docker-build docker-logs docker-ps docker-restart docker-seed-admin docker-backend-shell docker-db-shell docker-backend-test docker-frontend-lint docker-frontend-build docker-check
+.PHONY: docker-bootstrap docker-dev docker-dev-rebuild docker-migrate docker-open-dev-tabs docker-up docker-up-detached docker-up-rebuild docker-up-open docker-open-nextcloud docker-open-frontend docker-wait-backend docker-wait-frontend docker-wait-nextcloud docker-nextcloud-up docker-nextcloud-down docker-down docker-build docker-logs docker-ps docker-restart docker-seed-admin docker-backend-shell docker-db-shell docker-backend-test docker-frontend-lint docker-frontend-build docker-check docker-diagnose
 
 DOCKER_COMPOSE ?= docker compose
-NEXTCLOUD_URL ?= http://localhost:8081
-NEXTCLOUD_LOGIN_URL ?= http://localhost:8081/login
+DOCKER_NEXTCLOUD_URL ?= http://localhost:8081
+DOCKER_NEXTCLOUD_LOGIN_URL ?= $(DOCKER_NEXTCLOUD_URL)/login
+DOCKER_NEXTCLOUD_DASHBOARD_URL ?= $(DOCKER_NEXTCLOUD_URL)/apps/dashboard/
+DOCKER_NEXTCLOUD_HEALTH_URL ?= $(DOCKER_NEXTCLOUD_URL)/status.php
+FRONTEND_URL ?= http://localhost:5173
+BACKEND_HEALTH_URL ?= http://localhost:8000/api/v1/health/live
+DOCKER_WAIT_SEC ?= 180
+DOCKER_SKIP_BROWSER ?= 0
+DOCKER_DEV_SERVICES ?= backend worker scheduler frontend nextcloud
 BROWSER_OPEN ?= python3 -m webbrowser -t
+
+# Use this when the backend package is importable as "backend.*".
+# Override from CLI if your repo really exposes scripts.seed_admin instead:
+#   make docker-seed-admin SEED_ADMIN_MODULE=scripts.seed_admin
+SEED_ADMIN_MODULE ?= backend.scripts.seed_admin
+
+docker-bootstrap:
+	@test -f .env || cp .env.example .env
+	@test -f backend/.env || cp backend/.env.example backend/.env
+	@test -f frontend/.env || cp frontend/.env.example frontend/.env
+
+docker-dev: docker-bootstrap
+	$(MAKE) docker-migrate
+	$(DOCKER_COMPOSE) up -d --build $(DOCKER_DEV_SERVICES)
+	$(MAKE) docker-wait-backend
+	$(MAKE) docker-wait-frontend
+	$(MAKE) docker-wait-nextcloud
+	$(MAKE) docker-open-dev-tabs
+	@echo "Docker dev ready:"
+	@echo "  Frontend:  $(FRONTEND_URL)"
+	@echo "  Backend:   http://localhost:8000/api/v1"
+	@echo "  Nextcloud: $(DOCKER_NEXTCLOUD_DASHBOARD_URL)"
+
+docker-dev-rebuild: docker-bootstrap
+	$(MAKE) docker-migrate
+	$(DOCKER_COMPOSE) up -d --build --force-recreate $(DOCKER_DEV_SERVICES)
+	$(MAKE) docker-wait-backend
+	$(MAKE) docker-wait-frontend
+	$(MAKE) docker-wait-nextcloud
+	@echo "Docker dev rebuilt:"
+	@echo "  Frontend:  $(FRONTEND_URL)"
+	@echo "  Backend:   http://localhost:8000/api/v1"
+	@echo "  Nextcloud: $(DOCKER_NEXTCLOUD_DASHBOARD_URL)"
+
+docker-migrate:
+	$(DOCKER_COMPOSE) up --build --force-recreate migrate
+
+docker-open-dev-tabs:
+	@if [ "$(DOCKER_SKIP_BROWSER)" = "1" ]; then \
+		echo "DOCKER_SKIP_BROWSER=1 - skip browser open"; \
+	else \
+		echo "Opening Nextcloud dashboard in browser..."; \
+		$(BROWSER_OPEN) "$(DOCKER_NEXTCLOUD_DASHBOARD_URL)"; \
+	fi
 
 docker-up:
 	$(DOCKER_COMPOSE) up
@@ -17,22 +68,57 @@ docker-up-rebuild:
 docker-up-open:
 	$(DOCKER_COMPOSE) up -d
 	$(MAKE) docker-wait-nextcloud
-	$(BROWSER_OPEN) "$(NEXTCLOUD_LOGIN_URL)"
+	$(BROWSER_OPEN) "$(DOCKER_NEXTCLOUD_DASHBOARD_URL)"
 
 docker-open-nextcloud:
 	$(MAKE) docker-wait-nextcloud
-	$(BROWSER_OPEN) "$(NEXTCLOUD_LOGIN_URL)"
+	$(BROWSER_OPEN) "$(DOCKER_NEXTCLOUD_DASHBOARD_URL)"
 
+docker-open-frontend:
+	$(MAKE) docker-wait-frontend
+	$(BROWSER_OPEN) "$(FRONTEND_URL)"
+
+docker-wait-backend:
+	@echo "Waiting for backend at $(BACKEND_HEALTH_URL) ($(DOCKER_WAIT_SEC)s max)..."
+	@for i in $$(seq 1 $(DOCKER_WAIT_SEC)); do \
+		if curl -fsS -o /dev/null "$(BACKEND_HEALTH_URL)"; then \
+			echo "Backend ready"; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "Timed out waiting for backend: $(BACKEND_HEALTH_URL)" >&2; \
+	$(DOCKER_COMPOSE) ps >&2; \
+	$(DOCKER_COMPOSE) logs --tail=120 backend migrate 2>/dev/null >&2 || true; \
+	exit 1
+
+docker-wait-frontend:
+	@echo "Waiting for frontend at $(FRONTEND_URL) ($(DOCKER_WAIT_SEC)s max)..."
+	@for i in $$(seq 1 $(DOCKER_WAIT_SEC)); do \
+		if curl -fsS -o /dev/null "$(FRONTEND_URL)"; then \
+			echo "Frontend ready"; \
+			exit 0; \
+		fi; \
+		sleep 1; \
+	done; \
+	echo "Timed out waiting for frontend: $(FRONTEND_URL)" >&2; \
+	$(DOCKER_COMPOSE) ps >&2; \
+	$(DOCKER_COMPOSE) logs --tail=120 frontend 2>/dev/null >&2 || true; \
+	exit 1
+
+# Health-check Nextcloud through status.php; open the dashboard only after it is healthy.
 docker-wait-nextcloud:
-	@echo "Waiting for Nextcloud at $(NEXTCLOUD_LOGIN_URL)..."
-	@for i in $$(seq 1 90); do \
-		if curl -fsS -o /dev/null "$(NEXTCLOUD_LOGIN_URL)"; then \
+	@echo "Waiting for Nextcloud at $(DOCKER_NEXTCLOUD_HEALTH_URL) ($(DOCKER_WAIT_SEC)s max)..."
+	@for i in $$(seq 1 $(DOCKER_WAIT_SEC)); do \
+		if curl -fsS -o /dev/null "$(DOCKER_NEXTCLOUD_HEALTH_URL)"; then \
 			echo "Nextcloud ready"; \
 			exit 0; \
 		fi; \
 		sleep 1; \
 	done; \
-	echo "Timed out waiting for Nextcloud: $(NEXTCLOUD_LOGIN_URL)" >&2; \
+	echo "Timed out waiting for Nextcloud: $(DOCKER_NEXTCLOUD_HEALTH_URL)" >&2; \
+	$(DOCKER_COMPOSE) ps >&2; \
+	$(DOCKER_COMPOSE) logs --tail=120 nextcloud nextcloud-db 2>/dev/null >&2 || true; \
 	exit 1
 
 # Nextcloud + MariaDB only (host runs backend/frontend via Makefile.local).
@@ -59,13 +145,14 @@ docker-restart:
 	$(DOCKER_COMPOSE) up -d
 
 docker-seed-admin:
-	$(DOCKER_COMPOSE) exec backend python -m scripts.seed_admin
+	$(DOCKER_COMPOSE) exec backend python -m $(SEED_ADMIN_MODULE)
 
 docker-backend-shell:
 	$(DOCKER_COMPOSE) exec backend sh
 
+# Read POSTGRES_USER/POSTGRES_DB inside the container, not from the host shell.
 docker-db-shell:
-	$(DOCKER_COMPOSE) exec postgres psql -U $$POSTGRES_USER -d $$POSTGRES_DB
+	$(DOCKER_COMPOSE) exec postgres sh -lc 'psql -U "$${POSTGRES_USER:-postgres}" -d "$${POSTGRES_DB:-postgres}"'
 
 docker-backend-test:
 	$(DOCKER_COMPOSE) exec backend pytest
@@ -77,3 +164,7 @@ docker-frontend-build:
 	$(DOCKER_COMPOSE) exec frontend npm run build
 
 docker-check: docker-backend-test docker-frontend-lint docker-frontend-build
+
+docker-diagnose:
+	$(DOCKER_COMPOSE) ps
+	$(DOCKER_COMPOSE) logs --tail=160 backend frontend postgres redis nextcloud nextcloud-db

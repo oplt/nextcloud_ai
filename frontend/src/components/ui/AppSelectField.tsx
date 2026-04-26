@@ -14,13 +14,16 @@ type AppSelectFieldProps = Omit<SelectProps<string>, 'label'> & {
   options: Option[];
 };
 
-export function AppSelectField({ label, options, id, ...props }: AppSelectFieldProps) {
+export function AppSelectField({ label, options, id, value, ...props }: AppSelectFieldProps) {
   const labelId = `${id ?? label.replace(/\s+/g, '-').toLowerCase()}-label`;
+  const hasMatchingOption =
+    value === undefined || value === '' || options.some((option) => option.value === value);
+  const safeValue = hasMatchingOption ? value : '';
 
   return (
     <FormControl fullWidth size="small">
       <InputLabel id={labelId}>{label}</InputLabel>
-      <Select<string> labelId={labelId} id={id} label={label} {...props}>
+      <Select<string> {...props} labelId={labelId} id={id} label={label} value={safeValue}>
         {options.map((option) => (
           <MenuItem key={option.value} value={option.value}>
             {option.label}

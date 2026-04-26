@@ -1,5 +1,6 @@
 import { useMemo, useState } from 'react';
 
+import Alert from '@mui/material/Alert';
 import CardActionArea from '@mui/material/CardActionArea';
 
 import { AppCard } from '../components/ui/AppCard';
@@ -208,9 +209,9 @@ export function IntelligencePage({
   if (error) {
     return (
         <AppCard component="section" className="card card--panel detail-card">
-          <div className="page-alert page-alert--error" role="alert">
+          <Alert severity="error" className="page-alert">
             {error}
-          </div>
+          </Alert>
         </AppCard>
     );
   }
@@ -218,9 +219,9 @@ export function IntelligencePage({
   if (loading) {
     return (
         <AppCard component="section" className="card card--panel detail-card">
-          <div className="page-alert page-alert--info" role="status" aria-live="polite">
+          <Alert severity="info" className="page-alert" role="status" aria-live="polite">
             Loading intelligence overview…
-          </div>
+          </Alert>
         </AppCard>
     );
   }
@@ -238,9 +239,9 @@ export function IntelligencePage({
   if (overview.intelligence_feature_enabled === false) {
     return (
         <AppCard component="section" className="card card--panel detail-card">
-          <div className="page-alert page-alert--info" role="status">
+          <Alert severity="info" className="page-alert" role="status">
             Product intelligence is disabled for this deployment. Chat and document search are unaffected.
-          </div>
+          </Alert>
         </AppCard>
     );
   }
