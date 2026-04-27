@@ -12,18 +12,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..core.config import settings
 from ..core.security import AuthContext
-from ..db.models import Document, DocumentInsight, WorkflowTask
+from ..db.models import Document, DocumentChunk, DocumentInsight, WorkflowTask
 from ..db.repo.document import DocumentRepository
 from ..db.repo.intelligence import (
     DocumentInsightRepository,
     KnowledgeEdgeDraft,
     KnowledgeGraphRepository,
     KnowledgeNodeDraft,
+    OPEN_WORKFLOW_STATUSES,
     WorkflowTaskRepository,
 )
+from ..ingestion.taxonomy import DOCUMENT_TYPE_ALIASES
 from ..parsers.document_parser import ParsedDocument
 from ..schemas.document_schema import DocumentDetail
 from . import intelligence_provenance as intel_prov
+from .task_validation import (
+    EvidenceItem,
+    TaskCandidate,
+    task_validation_metadata,
+    validate_candidate,
+)
 from ..schemas.intelligence_schema import (
     IntelligenceOpenTaskRead,
     IntelligenceOverviewRead,
@@ -97,6 +105,12 @@ _CONTROL_CHECKLIST: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("training", ("training", "awareness")),
     ("change_management", ("change management", "approval", "release process")),
 )
+
+
+def _current_document_type(value: str | None) -> str:
+    if not value:
+        return "unclassified"
+    return DOCUMENT_TYPE_ALIASES.get(value, value)
 
 
 class ProductIntelligenceService:
@@ -300,6 +314,7 @@ class ProductIntelligenceService:
                 intelligence_feature_enabled=False,
                 wedge="disabled",
                 document_type_counts={},
+                business_domain_counts={},
                 task_status_counts={},
                 queue_counts={},
                 open_tasks=[],
@@ -316,22 +331,28 @@ class ProductIntelligenceService:
         )
 
         type_counter: Counter[str] = Counter()
+        domain_counter: Counter[str] = Counter()
         task_status_counter: Counter[str] = Counter()
         queue_counter: Counter[str] = Counter()
         spotlight_documents: list[IntelligenceSpotlightDocumentRead] = []
         for document in documents:
             insight_types = [insight.insight_type for insight in document.insights]
-            classification = document.document_type or self._extract_classification(document.insights)
-            if classification and classification != "general":
+            classification = _current_document_type(
+                document.document_type or self._extract_classification(document.insights)
+            )
+            domain = document.business_domain or "unknown"
+            if classification != "unclassified":
                 type_counter[classification] += 1
+            if domain != "unknown":
+                domain_counter[domain] += 1
             for task in document.workflow_tasks:
                 task_status_counter[task.status] += 1
-                if task.status in {"queued", "in_progress", "blocked"}:
+                if task.status in OPEN_WORKFLOW_STATUSES:
                     queue_counter[task.queue_name] += 1
             if not insight_types and not document.workflow_tasks:
                 continue
             open_doc_tasks = [
-                task for task in document.workflow_tasks if task.status in {"queued", "in_progress", "blocked"}
+                task for task in document.workflow_tasks if task.status in OPEN_WORKFLOW_STATUSES
             ]
             spotlight_documents.append(
                 IntelligenceSpotlightDocumentRead(
@@ -372,8 +393,9 @@ class ProductIntelligenceService:
 
         return IntelligenceOverviewRead(
             intelligence_feature_enabled=True,
-            wedge="contracts-compliance-meetings",
+            wedge="document-intelligence",
             document_type_counts=dict(type_counter),
+            business_domain_counts=dict(domain_counter),
             task_status_counts=dict(task_status_counter),
             queue_counts=dict(queue_counter),
             open_tasks=open_task_reads,
@@ -526,35 +548,86 @@ class ProductIntelligenceService:
     ) -> list[WorkflowTask]:
         tasks: list[WorkflowTask] = []
 
+        def add_candidate(
+            candidate: TaskCandidate,
+            *,
+            insight: DocumentInsight | None,
+            queue_name: str,
+            priority: str,
+            owner_label: str | None = None,
+            due_at: datetime | None = None,
+            methods: list[str],
+            evidence_tier: str,
+            presentation: str,
+            description: str | None = None,
+        ) -> None:
+            validated = validate_candidate(candidate)
+            if validated is None:
+                return
+            validation_meta = task_validation_metadata(validated)
+            task_payload = dict(candidate.suggested_task_payload)
+            task_payload.update(validation_meta)
+            task = WorkflowTask(
+                document_id=document.id,
+                insight_id=insight.id if insight is not None else None,
+                task_type=candidate.candidate_type,
+                queue_name=queue_name,
+                title=candidate.normalized_title[:255],
+                description=description or candidate.extracted_claim,
+                status=validated.status,
+                priority="low" if validated.status == "suggested" else priority,
+                owner_label=owner_label,
+                due_at=due_at,
+                metadata_json=intel_prov.task_metadata_with_provenance(
+                    task_payload,
+                    methods=methods,
+                    evidence_tier=evidence_tier,
+                    presentation="suggestion" if validated.status == "suggested" else presentation,
+                    notes=validated.reason,
+                ),
+            )
+            tasks.append(task)
+
         if meeting_insight and meeting_payload:
             for action_item in meeting_payload.get("action_items", [])[:8]:
                 title = str(action_item.get("title") or "").strip()
                 if not title:
                     continue
                 due_at = self._parse_date(str(action_item.get("due_at") or ""))
-                tasks.append(
-                    WorkflowTask(
-                        document_id=document.id,
-                        insight_id=meeting_insight.id,
-                        task_type="meeting_action_item",
-                        queue_name="meetings",
-                        title=title[:255],
-                        description=str(action_item.get("detail") or title),
-                        status="queued",
-                        priority=self._priority_for_due_at(due_at),
-                        owner_label=str(action_item.get("owner_label") or "") or None,
-                        due_at=due_at,
-                        metadata_json=intel_prov.task_metadata_with_provenance(
-                            dict(action_item) if isinstance(action_item, dict) else {},
-                            methods=[
-                                intel_prov.METHOD_LINE_ACTION_PARSE,
-                                intel_prov.METHOD_REGEX_STRUCTURE,
-                            ],
-                            evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
-                            presentation="action_candidate",
-                            notes="Parsed from meeting text; confirm owner and due date.",
-                        ),
-                    )
+                excerpt = str(action_item.get("detail") or title)
+                add_candidate(
+                    TaskCandidate(
+                        candidate_id=f"{document.id}:meeting_action:{len(tasks)}",
+                        source_document_id=document.id,
+                        candidate_type="meeting_action_item",
+                        extracted_claim=excerpt,
+                        normalized_title=title,
+                        source_excerpt=excerpt,
+                        evidence_method=intel_prov.METHOD_LINE_ACTION_PARSE,
+                        evidence_items=[
+                            self._evidence_item(
+                                document=document,
+                                excerpt=excerpt,
+                                signal_type="direct_quote",
+                                score=0.86,
+                            )
+                        ],
+                        suggested_task_payload=dict(action_item) if isinstance(action_item, dict) else {},
+                        keyword_overlap=0.82,
+                        source_agreement=0.70,
+                        document_classification_confidence=confidence,
+                    ),
+                    insight=meeting_insight,
+                    queue_name="meetings",
+                    priority=self._priority_for_due_at(due_at),
+                    owner_label=str(action_item.get("owner_label") or "") or None,
+                    due_at=due_at,
+                    methods=[
+                        intel_prov.METHOD_LINE_ACTION_PARSE,
+                        intel_prov.METHOD_REGEX_STRUCTURE,
+                    ],
+                    evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
+                    presentation="action_candidate",
                 )
 
         if contract_insight and contract_payload:
@@ -563,100 +636,187 @@ class ProductIntelligenceService:
                 if not title:
                     continue
                 due_at = self._parse_date(str(deadline.get("due_at") or ""))
-                tasks.append(
-                    WorkflowTask(
-                        document_id=document.id,
-                        insight_id=contract_insight.id,
-                        task_type="contract_deadline",
-                        queue_name="contracts",
-                        title=title[:255],
-                        description=str(deadline.get("sentence") or title),
-                        status="queued",
-                        priority=self._priority_for_due_at(due_at),
-                        owner_label=str(deadline.get("owner_label") or "") or None,
-                        due_at=due_at,
-                        metadata_json=intel_prov.task_metadata_with_provenance(
-                            dict(deadline) if isinstance(deadline, dict) else {},
-                            methods=[
-                                intel_prov.METHOD_SENTENCE_MARKER_PARSE,
-                                intel_prov.METHOD_REGEX_STRUCTURE,
-                            ],
-                            evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
-                            presentation="deadline_candidate",
-                            notes="Date extracted by pattern; verify in the contract body.",
-                        ),
-                    )
+                excerpt = str(deadline.get("sentence") or title)
+                add_candidate(
+                    TaskCandidate(
+                        candidate_id=f"{document.id}:contract_deadline:{len(tasks)}",
+                        source_document_id=document.id,
+                        candidate_type="contract_deadline",
+                        extracted_claim=excerpt,
+                        normalized_title=title,
+                        source_excerpt=excerpt,
+                        evidence_method=intel_prov.METHOD_SENTENCE_MARKER_PARSE,
+                        evidence_items=[
+                            self._evidence_item(
+                                document=document,
+                                excerpt=excerpt,
+                                signal_type="direct_quote",
+                                score=0.84,
+                            )
+                        ],
+                        suggested_task_payload=dict(deadline) if isinstance(deadline, dict) else {},
+                        keyword_overlap=0.78,
+                        source_agreement=0.65,
+                        document_classification_confidence=confidence,
+                    ),
+                    insight=contract_insight,
+                    queue_name="contracts",
+                    priority=self._priority_for_due_at(due_at),
+                    owner_label=str(deadline.get("owner_label") or "") or None,
+                    due_at=due_at,
+                    methods=[
+                        intel_prov.METHOD_SENTENCE_MARKER_PARSE,
+                        intel_prov.METHOD_REGEX_STRUCTURE,
+                    ],
+                    evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
+                    presentation="deadline_candidate",
+                )
+
+            for index, obligation in enumerate(list(contract_payload.get("obligations", []))[:4]):
+                excerpt = str(obligation).strip()
+                if not excerpt:
+                    continue
+                title = self._task_title_from_excerpt(excerpt, prefix="Review obligation")
+                add_candidate(
+                    TaskCandidate(
+                        candidate_id=f"{document.id}:contract_obligation:{index}",
+                        source_document_id=document.id,
+                        candidate_type="contract_obligation_review",
+                        extracted_claim=excerpt,
+                        normalized_title=title,
+                        source_excerpt=excerpt,
+                        evidence_method=intel_prov.METHOD_SENTENCE_MARKER_PARSE,
+                        evidence_items=[
+                            self._evidence_item(
+                                document=document,
+                                excerpt=excerpt,
+                                signal_type="direct_quote",
+                                score=0.82,
+                            )
+                        ],
+                        suggested_task_payload={"source": "obligations", "obligation": excerpt},
+                        keyword_overlap=0.80,
+                        source_agreement=0.60,
+                        document_classification_confidence=confidence,
+                    ),
+                    insight=contract_insight,
+                    queue_name="contracts",
+                    priority="normal",
+                    methods=[intel_prov.METHOD_SENTENCE_MARKER_PARSE],
+                    evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
+                    presentation="review_candidate",
                 )
 
             if contract_payload.get("renewal_terms"):
-                tasks.append(
-                    WorkflowTask(
-                        document_id=document.id,
-                        insight_id=contract_insight.id,
-                        task_type="contract_review",
-                        queue_name="contracts",
-                        title="Review renewal and commercial terms",
-                        description=str(contract_payload["renewal_terms"][0]),
-                        status="queued",
-                        priority="normal",
-                        owner_label=str(contract_payload.get("primary_counterparty") or "") or None,
-                        metadata_json=intel_prov.task_metadata_with_provenance(
-                            {"source": "renewal_terms"},
-                            methods=[intel_prov.METHOD_SENTENCE_MARKER_PARSE],
-                            evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
-                            presentation="review_candidate",
-                        ),
-                    )
+                excerpt = str(contract_payload["renewal_terms"][0])
+                add_candidate(
+                    TaskCandidate(
+                        candidate_id=f"{document.id}:contract_renewal",
+                        source_document_id=document.id,
+                        candidate_type="contract_review",
+                        extracted_claim=excerpt,
+                        normalized_title="Review renewal and commercial terms",
+                        source_excerpt=excerpt,
+                        evidence_method=intel_prov.METHOD_SENTENCE_MARKER_PARSE,
+                        evidence_items=[
+                            self._evidence_item(
+                                document=document,
+                                excerpt=excerpt,
+                                signal_type="direct_quote",
+                                score=0.78,
+                            )
+                        ],
+                        suggested_task_payload={"source": "renewal_terms", "renewal_term": excerpt},
+                        keyword_overlap=0.72,
+                        source_agreement=0.55,
+                        document_classification_confidence=confidence,
+                    ),
+                    insight=contract_insight,
+                    queue_name="contracts",
+                    priority="normal",
+                    owner_label=str(contract_payload.get("primary_counterparty") or "") or None,
+                    methods=[intel_prov.METHOD_SENTENCE_MARKER_PARSE],
+                    evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
+                    presentation="review_candidate",
                 )
 
         if compliance_insight and compliance_payload:
             for gap_name in list(compliance_payload.get("gap_controls", []))[:4]:
-                tasks.append(
-                    WorkflowTask(
-                        document_id=document.id,
-                        insight_id=compliance_insight.id,
-                        task_type="compliance_gap",
-                        queue_name="compliance",
-                        title=f"Suggest verifying: {gap_name.replace('_', ' ')}",
-                        description=(
-                            "Keyword checklist did not find typical markers for this topic in the document text. "
-                            "Treat as a suggestion until reviewed; it is not proof of non-compliance."
-                        ),
-                        status="queued",
-                        priority="low",
-                        metadata_json=intel_prov.task_metadata_with_provenance(
-                            {"gap_control": gap_name, "checklist_severity": compliance_payload.get("severity")},
-                            methods=[intel_prov.METHOD_STATIC_CONTROL_CHECKLIST],
-                            evidence_tier=intel_prov.EVIDENCE_SUGGESTION,
-                            presentation="suggestion",
-                        ),
-                    )
+                description = (
+                    "Static checklist did not find typical markers for this topic. "
+                    "This is an unverified review suggestion, not proof of non-compliance."
+                )
+                add_candidate(
+                    TaskCandidate(
+                        candidate_id=f"{document.id}:compliance_suggestion:{gap_name}",
+                        source_document_id=document.id,
+                        candidate_type="compliance_review_suggestion",
+                        extracted_claim=description,
+                        normalized_title=f"Review whether {gap_name.replace('_', ' ')} applies",
+                        source_excerpt="",
+                        evidence_method=intel_prov.METHOD_STATIC_CONTROL_CHECKLIST,
+                        evidence_items=[
+                            self._evidence_item(
+                                document=document,
+                                excerpt="",
+                                signal_type="missing_keyword",
+                                score=0.10,
+                            )
+                        ],
+                        suggested_task_payload={
+                            "gap_control": gap_name,
+                            "checklist_severity": compliance_payload.get("severity"),
+                        },
+                        keyword_overlap=0.0,
+                        source_agreement=0.0,
+                        document_classification_confidence=confidence,
+                        unverified_suggestion=True,
+                    ),
+                    insight=compliance_insight,
+                    queue_name="compliance",
+                    priority="low",
+                    methods=[intel_prov.METHOD_STATIC_CONTROL_CHECKLIST],
+                    evidence_tier=intel_prov.EVIDENCE_SUGGESTION,
+                    presentation="suggestion",
+                    description=description,
                 )
 
-        if classification != "general" or confidence < 0.65:
-            tasks.append(
-                WorkflowTask(
-                    document_id=document.id,
-                    insight_id=None,
-                    task_type="triage_review",
-                    queue_name="triage",
-                    title=f"Triage {classification.replace('_', ' ')} document",
-                    description=(
-                        "Confirm classification, assign owner, and decide whether this document "
-                        "needs meeting, contract, or compliance follow-up."
+        if classification not in {"general", "unclassified"} and confidence < 0.65:
+            add_candidate(
+                TaskCandidate(
+                    candidate_id=f"{document.id}:classification_triage",
+                    source_document_id=document.id,
+                    candidate_type="triage_review",
+                    extracted_claim=(
+                        "Classification is low confidence; human review should decide whether workflow follow-up is needed."
                     ),
-                    status="queued",
-                    priority="normal",
-                    metadata_json=intel_prov.task_metadata_with_provenance(
-                        {"classification": classification, "confidence": confidence},
-                        methods=[
-                            intel_prov.METHOD_FILENAME_KEYWORDS,
-                            intel_prov.METHOD_BODY_KEYWORDS,
-                        ],
-                        evidence_tier=intel_prov.EVIDENCE_SUGGESTION,
-                        presentation="suggestion",
-                    ),
-                )
+                    normalized_title=f"Review {classification.replace('_', ' ')} classification",
+                    source_excerpt="",
+                    evidence_method=intel_prov.METHOD_FILENAME_KEYWORDS,
+                    evidence_items=[
+                        self._evidence_item(
+                            document=document,
+                            excerpt="",
+                            signal_type="metadata_match",
+                            score=0.18,
+                        )
+                    ],
+                    suggested_task_payload={"classification": classification, "confidence": confidence},
+                    document_classification_confidence=confidence,
+                    unverified_suggestion=True,
+                ),
+                insight=None,
+                queue_name="triage",
+                priority="low",
+                methods=[
+                    intel_prov.METHOD_FILENAME_KEYWORDS,
+                    intel_prov.METHOD_BODY_KEYWORDS,
+                ],
+                evidence_tier=intel_prov.EVIDENCE_SUGGESTION,
+                presentation="suggestion",
+                description=(
+                    "Classification evidence is weak. Review before creating any downstream task."
+                ),
             )
 
         return tasks
@@ -778,6 +938,8 @@ class ProductIntelligenceService:
 
         async with httpx.AsyncClient(timeout=settings.TASK_WEBHOOK_TIMEOUT_SECONDS) as client:
             for task in tasks:
+                if task.status == "suggested":
+                    continue
                 payload = {
                     "task_id": str(task.id),
                     "document_id": str(document.id),
@@ -789,6 +951,10 @@ class ProductIntelligenceService:
                     "description": task.description,
                     "owner_label": task.owner_label,
                     "due_at": task.due_at.isoformat() if task.due_at else None,
+                    "review_status": (task.metadata_json or {}).get("review_status"),
+                    "confidence_level": (task.metadata_json or {}).get("confidence_level"),
+                    "confidence_score": (task.metadata_json or {}).get("confidence_score"),
+                    "evidence_method": (task.metadata_json or {}).get("evidence_method"),
                     "metadata_json": task.metadata_json,
                 }
                 try:
@@ -886,6 +1052,63 @@ class ProductIntelligenceService:
             if len(results) >= 6:
                 break
         return results
+
+    @staticmethod
+    def _task_title_from_excerpt(excerpt: str, *, prefix: str) -> str:
+        cleaned = " ".join(excerpt.split()).strip(" .")
+        if len(cleaned) <= 90:
+            return f"{prefix}: {cleaned}"
+        return f"{prefix}: {cleaned[:87].rstrip()}..."
+
+    def _evidence_item(
+        self,
+        *,
+        document: Document,
+        excerpt: str,
+        signal_type: str,
+        score: float,
+    ) -> EvidenceItem:
+        normalized_excerpt = " ".join(excerpt.split())
+        chunk = self._find_evidence_chunk(document=document, excerpt=normalized_excerpt)
+        return EvidenceItem(
+            document_id=document.id,
+            file_name=document.file_name,
+            file_path=document.file_path,
+            chunk_id=chunk.id if chunk is not None else None,
+            page_number=chunk.page_number if chunk is not None else None,
+            excerpt=normalized_excerpt[:900],
+            signal_type=signal_type,
+            score=score,
+            heading_path=chunk.heading_path if chunk is not None else None,
+            section_title=chunk.section_title if chunk is not None else None,
+        )
+
+    @staticmethod
+    def _find_evidence_chunk(
+        *, document: Document, excerpt: str
+    ) -> DocumentChunk | None:
+        if not excerpt:
+            return None
+        chunks = document.__dict__.get("chunks") or []
+        excerpt_key = " ".join(excerpt.lower().split())
+        for chunk in chunks:
+            content_key = " ".join((chunk.content or "").lower().split())
+            if excerpt_key and excerpt_key in content_key:
+                return chunk
+        excerpt_terms = {term for term in re.findall(r"\w{4,}", excerpt_key) if term}
+        if not excerpt_terms:
+            return None
+        best_chunk: DocumentChunk | None = None
+        best_overlap = 0.0
+        for chunk in chunks:
+            content_terms = set(re.findall(r"\w{4,}", (chunk.content or "").lower()))
+            if not content_terms:
+                continue
+            overlap = len(excerpt_terms & content_terms) / max(len(excerpt_terms), 1)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_chunk = chunk
+        return best_chunk if best_overlap >= 0.45 else None
 
     @staticmethod
     def _extract_counterparties(text: str) -> list[str]:

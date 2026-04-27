@@ -7,7 +7,7 @@ from typing import Iterable
 from ..rag.answer import build_source_block
 from ..schemas.chat_schema import ChatSource
 
-GROUNDED_PROMPT_VERSION = "2"
+GROUNDED_PROMPT_VERSION = "3"
 DEFAULT_DOMAIN_PROFILE = "default"
 
 
@@ -45,6 +45,8 @@ _DOMAIN_PROFILES: dict[str, DomainPromptProfile] = {
             "Do not answer that a person did not work somewhere unless a source explicitly says that.",
             "Do not treat education entries, degrees, student status, or training as employment unless the source explicitly describes a job, role, internship, contract, or work assignment.",
             "Preserve distinctions between employer, client, project, school, certification body, and location.",
+            "When the same employer and date range appear across multiple sources, output one consolidated bullet and attach every supporting citation to it (e.g. [1][3]); never repeat the same employment entry on separate lines.",
+            "Normalize each employment bullet to the form 'Employer (Location, Start - End) [citations]'; do not echo raw table rows, pipe-delimited fragments, or duplicated employer/date strings inside the bullet.",
         ),
     ),
     "contract_review": DomainPromptProfile(
@@ -127,54 +129,90 @@ def build_grounded_prompt(
         domain_profile: str | None = None,
         extra_rules: list[str] | tuple[str, ...] | None = None,
 ) -> str:
-    """Build a grounded answer prompt.
-
-    Default behavior is domain-neutral. Domain-specific rules are opt-in through
-    ``domain_profile`` so the generic product does not overfit to one document type.
-    Existing callers remain compatible because all new arguments are keyword-only and
-    optional.
-    """
     profile = get_domain_profile(domain_profile)
     buffer = io.StringIO()
 
-    buffer.write("You are a private company knowledge assistant.\n")
-    buffer.write("Your job is to answer from retrieved indexed sources with strict citations.\n")
+    # =========================
+    # SYSTEM ROLE
+    # =========================
+    buffer.write(
+        "You are a high-precision private knowledge assistant operating in a retrieval-augmented system.\n"
+        "You MUST strictly ground every factual statement in the provided sources.\n"
+        "You are NOT allowed to use prior knowledge.\n"
+    )
 
-    buffer.write("\nBASE GROUNDING RULES:\n")
+    # =========================
+    # CORE RULES
+    # =========================
+    buffer.write("\nSTRICT GROUNDING RULES:\n")
     _write_rules(buffer, _DOMAIN_PROFILES[DEFAULT_DOMAIN_PROFILE].rules)
 
     if profile.name != DEFAULT_DOMAIN_PROFILE:
-        buffer.write(f"\nDOMAIN-SPECIFIC RULES ({profile.name}):\n")
+        buffer.write(f"\nDOMAIN RULES ({profile.name}):\n")
         _write_rules(buffer, profile.rules)
 
     if extra_rules:
-        buffer.write("\nADDITIONAL CALL-SITE RULES:\n")
+        buffer.write("\nADDITIONAL RULES:\n")
         _write_rules(buffer, extra_rules)
 
+    # =========================
+    # MEMORY (SMART USAGE)
+    # =========================
     if memory_block:
-        buffer.write("\nMEMORY CONTEXT (not evidence unless also supported by sources):\n")
-        buffer.write(memory_block.strip())
-        buffer.write("\n")
+        buffer.write(
+            "\nMEMORY CONTEXT:\n"
+            "Use this ONLY for understanding user intent, NOT as factual evidence.\n"
+        )
+        buffer.write(memory_block.strip() + "\n")
 
+    # =========================
+    # HISTORY
+    # =========================
     if history:
         _write_history(buffer, history)
 
+    # =========================
+    # TASK INSTRUCTIONS
+    # =========================
+    buffer.write(
+        "\nTASK:\n"
+        "Answer the QUESTION using ONLY the SOURCES below.\n"
+        "\nFollow this reasoning process internally:\n"
+        "1. Identify relevant source excerpts.\n"
+        "2. Extract exact supporting facts.\n"
+        "3. Cross-check consistency across sources.\n"
+        "4. If evidence is incomplete → return insufficiency.\n"
+    )
+
+    # =========================
+    # QUESTION
+    # =========================
     buffer.write("\nQUESTION:\n")
-    buffer.write(question)
-    buffer.write("\n\nSOURCES:\n")
+    buffer.write(question + "\n")
+
+    # =========================
+    # SOURCES
+    # =========================
+    buffer.write("\nSOURCES:\n")
     buffer.write(build_source_block(sources))
     buffer.write("\n")
 
+    # =========================
+    # OUTPUT CONTRACT (VERY IMPORTANT)
+    # =========================
     buffer.write(
-        "\nFINAL ANSWER RULES:\n"
-        "- Use only the sources above as evidence.\n"
-        "- If the sources are insufficient, say so clearly and do not make a positive or negative claim.\n"
-        "- If no retrieved source directly answers the question, answer exactly: "
+        "\nOUTPUT FORMAT:\n"
+        "Return ONLY the final answer.\n"
+        "\nRules:\n"
+        "- First sentence MUST directly answer the question if possible.\n"
+        "- Every factual statement MUST include a citation like [1].\n"
+        "- DO NOT cite if statement is not supported.\n"
+        "- If evidence is insufficient, return EXACTLY:\n"
         '"I could not verify this from the retrieved indexed sources. The available evidence is insufficient to answer without guessing."\n'
-        "- Do not repeat or restate the user question at the start of the answer.\n"
-        "- Keep the answer concise and factual.\n"
-        "- Include inline citations for every supported factual statement.\n"
-        "- Do not include a citation on unsupported or insufficiency statements.\n\n"
-        "FINAL ANSWER:\n"
+        "- DO NOT explain reasoning.\n"
+        "- DO NOT mention sources explicitly (like 'SOURCE 1 says').\n"
+        "- DO NOT hallucinate.\n"
+        "\nFINAL ANSWER:\n"
     )
+
     return buffer.getvalue()

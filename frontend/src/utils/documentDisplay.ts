@@ -11,12 +11,20 @@ const MIME_TYPE_LABELS: Record<string, string> = {
   'text/x-markdown': 'MD',
 };
 
+const DOCUMENT_TYPE_ALIASES: Record<string, string> = {
+  email: 'email_correspondence',
+  meeting: 'meeting_notes',
+  policy: 'policy_document',
+  general: 'general_knowledge',
+};
+
 export function getDocumentTypeLabel(document: DocumentDisplayShape): string {
-  if (document.document_type && document.document_type !== 'general') {
-    if (document.document_type === 'unclassified' || document.document_type_confidence < 0.6) {
+  const documentType = DOCUMENT_TYPE_ALIASES[document.document_type] ?? document.document_type;
+  if (documentType && documentType !== 'general_knowledge') {
+    if (documentType === 'unclassified' || document.document_type_confidence < 0.6) {
       return 'Unclassified';
     }
-    return formatTaxonomyLabel(document.document_type);
+    return formatTaxonomyLabel(documentType);
   }
   const suffix = document.file_name.split('.').pop()?.trim().toUpperCase();
 

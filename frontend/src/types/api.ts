@@ -241,6 +241,13 @@ export type WorkflowTask = {
   hook_response: string | null;
   hook_last_attempt_at: string | null;
   metadata_json: Record<string, unknown> | null;
+  confidence_level?: 'low' | 'medium' | 'high' | null;
+  confidence_score?: number | null;
+  evidence_method?: string | null;
+  evidence_items?: Array<Record<string, unknown>>;
+  reason?: string | null;
+  recommended_action?: string | null;
+  review_status?: 'suggested' | 'needs_review' | 'approved' | 'dismissed' | string | null;
   document_file_name?: string | null;
   document_file_path?: string | null;
   document_connector_id?: string | null;
@@ -294,6 +301,7 @@ export type IntelligenceOverview = {
   intelligence_feature_enabled?: boolean;
   wedge: string;
   document_type_counts: Record<string, number>;
+  business_domain_counts: Record<string, number>;
   task_status_counts: Record<string, number>;
   queue_counts: Record<string, number>;
   open_tasks: IntelligenceOpenTask[];

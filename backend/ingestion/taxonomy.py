@@ -5,6 +5,8 @@ from typing import Literal
 DOCUMENT_TYPES = [
     "contract",
     "invoice_finance",
+    "email_correspondence",
+    "policy_document",
     "legal",
     "compliance",
     "meeting_notes",
@@ -16,6 +18,13 @@ DOCUMENT_TYPES = [
     "general_knowledge",
     "unclassified",
 ]
+
+DOCUMENT_TYPE_ALIASES = {
+    "email": "email_correspondence",
+    "meeting": "meeting_notes",
+    "policy": "policy_document",
+    "general": "general_knowledge",
+}
 
 BUSINESS_DOMAINS = [
     "legal",
@@ -48,6 +57,8 @@ EMBEDDING_STATUSES = ["pending", "embedded", "failed", "skipped"]
 DocumentType = Literal[
     "contract",
     "invoice_finance",
+    "email_correspondence",
+    "policy_document",
     "legal",
     "compliance",
     "meeting_notes",
@@ -73,4 +84,3 @@ BusinessDomain = Literal[
     "management",
     "unknown",
 ]
-

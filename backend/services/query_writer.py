@@ -20,7 +20,7 @@ _MAX_HISTORY_MESSAGE_CHARS = 420
 _MAX_REWRITE_CHARS = 500
 _MAX_REWRITE_WORDS = 70
 _STRICT_CONTEXT_REFERENCE_RE = re.compile(
-    r"\b(it|its|they|them|this|that|these|those|same|previous|prior|next|above|below|there|here)\b|^\s*(what|how)\s+about\b",
+    r"\b(it|its|they|them|this|these|those|same|previous|prior|next|above|below|there|here)\b|^\s*(what|how)\s+about\b",
     flags=re.IGNORECASE,
 )
 

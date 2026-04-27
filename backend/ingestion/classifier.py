@@ -30,10 +30,21 @@ class WeightedRule:
 
 
 TYPE_RULES: tuple[WeightedRule, ...] = (
+    WeightedRule("email_correspondence", (
+        (r"\bfrom:\s", 3.4), (r"\bto:\s", 3.0), (r"\bsubject:\s", 3.0),
+        (r"\bcc:\s", 2.0), (r"\bre:\s", 1.7), (r"\bfwd:\s", 1.7),
+        (r"\bmessage-id\b", 2.8), (r"\bemail\b", 1.6),
+    )),
     WeightedRule("invoice_finance", (
         (r"\binvoice\b", 3.5), (r"\breceipt\b", 2.5), (r"\bpayment due\b", 3.0),
         (r"\bvat\b", 2.0), (r"\btax\b", 1.0), (r"\btotal amount\b", 2.5),
         (r"\bpurchase order\b|\bpo[-\s]?\d+\b", 2.8),
+    )),
+    WeightedRule("policy_document", (
+        (r"\bpolicy\b", 3.2), (r"\bprocedure\b", 2.7),
+        (r"\bstandard operating procedure\b|\bsop\b", 3.2),
+        (r"\bhandbook\b", 2.6), (r"\bgovernance\b", 2.0), (r"\bretention\b", 1.7),
+        (r"\bapproval workflow\b", 1.8),
     )),
     WeightedRule("contract", (
         (r"\bagreement\b", 3.0), (r"\bcontract\b", 3.0), (r"\bparty\b|\bparties\b", 1.8),
@@ -82,7 +93,9 @@ DOMAIN_RULES: tuple[WeightedRule, ...] = (
     WeightedRule("finance", ((r"\binvoice\b|\bpayment\b|\breceipt\b|\bbudget\b|\bvat\b|\baccounting\b", 3.0),)),
     WeightedRule("hr", ((r"\bemployee\b|\bpayroll\b|\bonboarding\b|\bleave\b|\bresume\b|\bcv\b", 3.0),)),
     WeightedRule("engineering", ((r"\bapi\b|\btechnical\b|\bspec\b|\binstallation\b|\bdeployment\b|\bendpoint\b", 3.0),)),
-    WeightedRule("operations", ((r"\brunbook\b|\bincident\b|\bprocess\b|\bprocedure\b|\boperations\b", 3.0),)),
+    WeightedRule("operations", (
+        (r"\brunbook\b|\bincident\b|\bprocess\b|\bprocedure\b|\boperations\b|\bsop\b", 3.0),
+    )),
     WeightedRule("sales", ((r"\bproposal\b|\bclient\b|\bquote\b|\brfp\b|\bsales\b|\boffer\b", 3.0),)),
     WeightedRule("procurement", ((r"\bsupplier\b|\bvendor\b|\bpurchase order\b|\bprocurement\b|\bpo[-\s]?\d+\b", 3.0),)),
     WeightedRule("compliance", ((r"\bcompliance\b|\bgdpr\b|\biso\s?27001\b|\baudit\b|\bpolicy\b|\bcontrol\b", 3.0),)),
@@ -179,6 +192,8 @@ class DocumentClassifier:
 
 def rule_classify(*, document: Document, parsed: ParsedDocument) -> ClassificationResult:
     haystack = _haystack(document=document, parsed=parsed)
+    body_haystack = _body_haystack(parsed=parsed)
+    metadata_haystack = _metadata_haystack(document=document)
     doc_type, type_score, type_terms, type_margin = _best_match(haystack, TYPE_RULES)
     domain, domain_score, domain_terms, domain_margin = _best_match(haystack, DOMAIN_RULES)
 
@@ -189,7 +204,13 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
         type_source = "fallback"
     else:
         type_confidence = _score_to_confidence(type_score, type_margin)
-        type_reason = f"Matched weighted evidence: {', '.join(type_terms[:5])}."
+        if _metadata_only_match(type_terms, body_haystack=body_haystack, metadata_haystack=metadata_haystack):
+            type_confidence = min(type_confidence, 0.45)
+            type_reason = (
+                "Low-confidence filename/path-only classification; no supporting body text signal matched."
+            )
+        else:
+            type_reason = f"Matched weighted evidence: {', '.join(type_terms[:5])}."
         type_source = "rule"
 
     if domain is None or domain_score < 2.3:
@@ -199,7 +220,13 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
         domain_source = "fallback"
     else:
         domain_confidence = _score_to_confidence(domain_score, domain_margin)
-        domain_reason = f"Matched weighted evidence: {', '.join(domain_terms[:5])}."
+        if _metadata_only_match(domain_terms, body_haystack=body_haystack, metadata_haystack=metadata_haystack):
+            domain_confidence = min(domain_confidence, 0.45)
+            domain_reason = (
+                "Low-confidence filename/path-only domain guess; no supporting body text signal matched."
+            )
+        else:
+            domain_reason = f"Matched weighted evidence: {', '.join(domain_terms[:5])}."
         domain_source = "rule"
 
     return ClassificationResult(
@@ -215,11 +242,27 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
 
 
 def _haystack(*, document: Document, parsed: ParsedDocument) -> str:
+    return _normalize(f"{_metadata_haystack(document=document)} {_body_haystack(parsed=parsed)}")
+
+
+def _metadata_haystack(*, document: Document) -> str:
     ext = Path(document.file_name or "").suffix.lower()
-    headings = " ".join(_headings(parsed.text or "")[:25])
     path_boost = " ".join(Path(document.file_path or "").parts[-4:])
+    return _normalize(f"{document.file_name} {path_boost} {ext} {document.mime_type or ''}")
+
+
+def _body_haystack(*, parsed: ParsedDocument) -> str:
+    headings = " ".join(_headings(parsed.text or "")[:25])
     text_sample = _classification_sample(parsed.text or "")
-    return _normalize(f"{document.file_name} {path_boost} {ext} {document.mime_type or ''} {headings} {text_sample}")
+    return _normalize(f"{headings} {text_sample}")
+
+
+def _metadata_only_match(patterns: list[str], *, body_haystack: str, metadata_haystack: str) -> bool:
+    if not patterns:
+        return False
+    has_metadata_match = any(re.search(pattern, metadata_haystack, flags=re.I) for pattern in patterns)
+    has_body_match = any(re.search(pattern, body_haystack, flags=re.I) for pattern in patterns)
+    return has_metadata_match and not has_body_match
 
 
 def _classification_sample(text: str, limit: int = 9000) -> str:

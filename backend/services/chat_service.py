@@ -4,6 +4,7 @@ import json
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -42,7 +43,11 @@ _AMOUNT_QUERY_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _MONEY_RE = re.compile(
-    r"(?:€\s*\d[\d.,]*|\d[\d.,]*\s*(?:eur|euro|€))",
+    r"(?:"
+    r"€\s*\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?"
+    r"|\d{1,3}(?:[.,\s]\d{3})*[.,]\d{2}\s*(?:eur|euro|€)"
+    r"|\b(?:eur|euro)\s*\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?"
+    r")",
     flags=re.IGNORECASE,
 )
 _AMOUNT_CONTEXT_RE = re.compile(
@@ -82,6 +87,19 @@ _YEAR_RANGE_RE = re.compile(
 )
 _PIPE_RANGE_ROW_RE = re.compile(
     r"(?P<label>[^|\n]{2,120}?)\s*\|\s*(?P<context>[^|\n]{2,100}?)\s*\|\s*(?P<start>(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})\s*[-–—]\s*(?P<end>(?:(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})|present|current|now)",
+    flags=re.IGNORECASE,
+)
+_START_WORK_QUERY_RE = re.compile(
+    r"\bwhen\b.{0,50}\b(?:start|started|begin|began|join|joined)\b.{0,80}\b(?:work|working|role|job|position|employment|at)\b",
+    flags=re.IGNORECASE,
+)
+_EMPLOYMENT_CONTEXT_RE = re.compile(
+    r"\b(?:work|working|employment|experience|role|position|job|career|developer|engineer|"
+    r"analyst|manager|consultant|assistant|lecturer|professor|researcher|specialist|architect)\b",
+    flags=re.IGNORECASE,
+)
+_EDUCATION_ONLY_RE = re.compile(
+    r"\b(?:education|student|degree|bachelor|master|phd|ph\.d|doctorate|thesis|diploma|university studies)\b",
     flags=re.IGNORECASE,
 )
 _GENERIC_QUERY_STOPWORDS = {
@@ -138,6 +156,275 @@ _AMOUNT_QUERY_TERMS = {
     "charge",
 }
 
+_FIELD_VALUE_RE = re.compile(
+    r"(?P<field>[A-Za-z][A-Za-z0-9 _./\-]{1,70})\s*(?:[:=]|\|)\s*(?P<value>[^|\n]{1,180})",
+    flags=re.IGNORECASE,
+)
+_START_MARKER_RE = re.compile(
+    r"\b(?:since|from|started|start(?:ed)?\s+(?:in|on)?|joined|join(?:ed)?\s+(?:in|on)?|began|begin(?:s)?\s+(?:in|on)?)\b",
+    flags=re.IGNORECASE,
+)
+_MONTH_YEAR_RE = re.compile(
+    r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
+    r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:19|20)\d{2}\b",
+    flags=re.IGNORECASE,
+)
+
+
+@dataclass(slots=True)
+class EvidenceMatch:
+    """Reusable direct-evidence match used before grounded generation."""
+
+    kind: str
+    value: str
+    source: ChatSource
+    score: float
+    label: str = ""
+    context: str = ""
+    start: str = ""
+    end: str = ""
+
+
+class EvidenceExtractor:
+    """Small, domain-neutral extraction primitives for common RAG answers.
+
+    These methods intentionally extract evidence shapes, not business-domain answers.
+    Domain answer builders can combine them with question intent and source scoring.
+    """
+
+    @staticmethod
+    def source_text(source: ChatSource) -> str:
+        return " ".join(
+            part
+            for part in [
+                source.content or "",
+                source.snippet or "",
+                source.section_title or "",
+                source.heading_path or "",
+                source.file_name or "",
+                source.file_path or "",
+                ]
+            if part
+        )
+
+    @staticmethod
+    def lines(source: ChatSource) -> list[str]:
+        text = "\n".join(
+            part
+            for part in [
+                source.content or "",
+                source.snippet or "",
+                source.section_title or "",
+                source.heading_path or "",
+                ]
+            if part
+        )
+        out: list[str] = []
+        for raw_line in text.splitlines():
+            line = " ".join(raw_line.split()).strip()
+            if line:
+                out.append(line)
+        if not out and text.strip():
+            out.append(" ".join(text.split()))
+        return out
+
+    @staticmethod
+    def normalize_entity_terms(terms: list[str]) -> list[str]:
+        return [re.sub(r"[^a-z0-9]+", "", term.lower()) for term in terms if term]
+
+    @classmethod
+    def entity_match_score(cls, entity_terms: list[str], text: str) -> float:
+        if not entity_terms:
+            return 0.0
+        normalized_text = re.sub(r"[^a-z0-9]+", "", text.lower())
+        score = 0.0
+        for term in cls.normalize_entity_terms(entity_terms):
+            if not term:
+                continue
+            if term in normalized_text:
+                score += 1.0
+            elif len(term) >= 6 and term[:6] in normalized_text:
+                score += 0.7
+        return score
+
+    @classmethod
+    def date_range_extractor(cls, sources: list[ChatSource]) -> list[EvidenceMatch]:
+        matches: list[EvidenceMatch] = []
+        for source in sources:
+            for line in cls.lines(source):
+                for match in _PIPE_RANGE_ROW_RE.finditer(line):
+                    label = " ".join(match.group("label").split()).strip(":- ")
+                    context = " ".join(match.group("context").split()).strip(":- ")
+                    start = match.group("start").strip()
+                    end = match.group("end").strip()
+                    matches.append(
+                        EvidenceMatch(
+                            kind="date_range",
+                            value=f"{start} - {end}",
+                            source=source,
+                            score=source.score + 0.30,
+                            label=label,
+                            context=context,
+                            start=start,
+                            end=end,
+                        )
+                    )
+                for match in _YEAR_RANGE_RE.finditer(line):
+                    start = match.group(1).strip()
+                    end = match.group(2).strip()
+                    context_start = max(0, match.start() - 120)
+                    context_end = min(len(line), match.end() + 120)
+                    context = " ".join(line[context_start:context_end].split()).strip(":- ")
+                    matches.append(
+                        EvidenceMatch(
+                            kind="date_range",
+                            value=f"{start} - {end}",
+                            source=source,
+                            score=source.score + 0.15,
+                            label=context,
+                            context=context,
+                            start=start,
+                            end=end,
+                        )
+                    )
+        return matches
+
+    @classmethod
+    def amount_extractor(
+            cls, sources: list[ChatSource], *, entity_terms: list[str] | None = None
+    ) -> list[EvidenceMatch]:
+        matches: list[EvidenceMatch] = []
+        terms = entity_terms or []
+        for source in sources:
+            text = cls.source_text(source)
+            entity_score = cls.entity_match_score(terms, text)
+            if terms and entity_score <= 0:
+                continue
+            for match in _MONEY_RE.finditer(text):
+                amount = " ".join(match.group(0).replace("€", " EUR").split())
+                if amount.lower().startswith("eur"):
+                    amount = amount[3:].strip() + " EUR"
+                start = max(0, match.start() - 90)
+                end = min(len(text), match.end() + 90)
+                context = text[start:end]
+                score = source.score + entity_score * 5.0
+                if _AMOUNT_CONTEXT_RE.search(context):
+                    score += 3.0
+                if re.search(r"\b(te betalen|payable|total|invoice total|factuur.*bedrag|bedrag)\b", context, re.I):
+                    score += 4.0
+                matches.append(
+                    EvidenceMatch(
+                        kind="amount", value=amount, source=source, score=score, context=context
+                    )
+                )
+        return sorted(matches, key=lambda item: item.score, reverse=True)
+
+    @classmethod
+    def field_value_extractor(
+            cls,
+            sources: list[ChatSource],
+            *,
+            field_terms: list[str] | None = None,
+            entity_terms: list[str] | None = None,
+    ) -> list[EvidenceMatch]:
+        matches: list[EvidenceMatch] = []
+        fields = [term.lower() for term in (field_terms or [])]
+        entities = entity_terms or []
+        for source in sources:
+            source_text = cls.source_text(source)
+            entity_score = cls.entity_match_score(entities, source_text)
+            if entities and entity_score <= 0:
+                continue
+            for line in cls.lines(source):
+                for match in _FIELD_VALUE_RE.finditer(line):
+                    field = " ".join(match.group("field").split()).strip()
+                    value = " ".join(match.group("value").split()).strip()
+                    if fields and not any(term in field.lower() for term in fields):
+                        continue
+                    matches.append(
+                        EvidenceMatch(
+                            kind="field_value",
+                            value=value,
+                            source=source,
+                            score=source.score + entity_score * 3.0 + 1.5,
+                            label=field,
+                            context=line,
+                        )
+                    )
+        return sorted(matches, key=lambda item: item.score, reverse=True)
+
+    @classmethod
+    def table_row_extractor(
+            cls, sources: list[ChatSource], *, entity_terms: list[str] | None = None
+    ) -> list[EvidenceMatch]:
+        matches: list[EvidenceMatch] = []
+        terms = entity_terms or []
+        for source in sources:
+            for line in cls.lines(source):
+                if "|" not in line or line.count("|") < 2:
+                    continue
+                cells = [" ".join(cell.split()).strip() for cell in line.strip("|").split("|")]
+                cells = [cell for cell in cells if cell]
+                if len(cells) < 2:
+                    continue
+                row_text = " | ".join(cells)
+                entity_score = cls.entity_match_score(terms, row_text)
+                if terms and entity_score <= 0:
+                    continue
+                matches.append(
+                    EvidenceMatch(
+                        kind="table_row",
+                        value=row_text,
+                        source=source,
+                        score=source.score + entity_score * 3.0 + min(len(cells), 6) * 0.1,
+                        label=cells[0],
+                        context=row_text,
+                    )
+                )
+        return sorted(matches, key=lambda item: item.score, reverse=True)
+
+    @classmethod
+    def entity_proximity_extractor(
+            cls,
+            sources: list[ChatSource],
+            *,
+            entity_terms: list[str],
+            value_pattern: re.Pattern[str],
+            context_window: int = 180,
+            require_start_marker: bool = False,
+    ) -> list[EvidenceMatch]:
+        matches: list[EvidenceMatch] = []
+        compact_terms = cls.normalize_entity_terms(entity_terms)
+        if not compact_terms:
+            return matches
+        for source in sources:
+            text = cls.source_text(source)
+            compact_text = re.sub(r"[^a-z0-9]+", "", text.lower())
+            if not any(term and term in compact_text for term in compact_terms):
+                continue
+            for value_match in value_pattern.finditer(text):
+                start = max(0, value_match.start() - context_window)
+                end = min(len(text), value_match.end() + context_window)
+                context = text[start:end]
+                entity_score = cls.entity_match_score(entity_terms, context)
+                if entity_score <= 0:
+                    continue
+                if require_start_marker and not _START_MARKER_RE.search(context):
+                    continue
+                score = source.score + entity_score * 4.0
+                if _START_MARKER_RE.search(context):
+                    score += 3.0
+                matches.append(
+                    EvidenceMatch(
+                        kind="entity_proximity",
+                        value=value_match.group(0),
+                        source=source,
+                        score=score,
+                        context=" ".join(context.split()),
+                    )
+                )
+        return sorted(matches, key=lambda item: item.score, reverse=True)
+
 
 def _same_question_text(left: str, right: str) -> bool:
     normalize = lambda value: re.sub(r"\W+", " ", value).strip().lower()
@@ -149,10 +436,10 @@ _HISTORY_WINDOW = 10
 
 class ChatService:
     def __init__(
-        self,
-        session: AsyncSession,
-        retrieval_service: RetrievalService | None = None,
-        llm_client: LLMClientProtocol | None = None,
+            self,
+            session: AsyncSession,
+            retrieval_service: RetrievalService | None = None,
+            llm_client: LLMClientProtocol | None = None,
     ) -> None:
         self.session = session
         self.retrieval_service = retrieval_service or RetrievalService(session)
@@ -162,7 +449,7 @@ class ChatService:
         self.audit = AuditService(session)
 
     async def _get_or_create_session(
-        self, *, user: User, request: ChatAskRequest
+            self, *, user: User, request: ChatAskRequest
     ) -> ChatSession:
         if request.session_id:
             return await self._get_session_for_user(request.session_id, user)
@@ -174,9 +461,9 @@ class ChatService:
         return chat_session
 
     async def _get_session_for_user(
-        self,
-        session_id: str | UUID,
-        user: User,
+            self,
+            session_id: str | UUID,
+            user: User,
     ) -> ChatSession:
         existing = await self.session_repo.get(session_id)
         if existing is None:
@@ -190,11 +477,11 @@ class ChatService:
         chat_session.updated_at = datetime.now(timezone.utc)
 
     async def patch_session_memory(
-        self,
-        *,
-        user: User,
-        session_id: str | UUID,
-        payload: ChatMemoryPatchRequest,
+            self,
+            *,
+            user: User,
+            session_id: str | UUID,
+            payload: ChatMemoryPatchRequest,
     ) -> dict[str, object]:
         chat_session = await self._get_session_for_user(session_id, user)
         mem = chat_memory.normalize_memory(getattr(chat_session, 'memory_json', None))
@@ -224,7 +511,7 @@ class ChatService:
 
     @staticmethod
     def _extract_preferred_document_ids(
-        prior_messages_orm: list[ChatMessage],
+            prior_messages_orm: list[ChatMessage],
     ) -> list[UUID]:
         for msg in reversed(prior_messages_orm):
             if msg.role != 'assistant':
@@ -248,7 +535,7 @@ class ChatService:
 
     @staticmethod
     def _extract_preferred_chunk_refs(
-        prior_messages_orm: list[ChatMessage],
+            prior_messages_orm: list[ChatMessage],
     ) -> list[tuple[UUID, UUID]]:
         for msg in reversed(prior_messages_orm):
             if msg.role != 'assistant':
@@ -312,11 +599,11 @@ class ChatService:
         )
 
     async def _augment_follow_up_sources_with_neighbors(
-        self,
-        *,
-        question: str,
-        sources: list[ChatSource],
-        preferred_chunk_refs: list[tuple[UUID, UUID]],
+            self,
+            *,
+            question: str,
+            sources: list[ChatSource],
+            preferred_chunk_refs: list[tuple[UUID, UUID]],
     ) -> list[ChatSource]:
         if not sources or not preferred_chunk_refs or not self._looks_like_contextual_follow_up(question):
             return sources
@@ -361,10 +648,10 @@ class ChatService:
         return [*sources, *neighbor_sources]
 
     async def _build_follow_up_neighbor_sources(
-        self,
-        *,
-        question: str,
-        preferred_chunk_refs: list[tuple[UUID, UUID]],
+            self,
+            *,
+            question: str,
+            preferred_chunk_refs: list[tuple[UUID, UUID]],
     ) -> list[ChatSource]:
         if not preferred_chunk_refs or not self._looks_like_contextual_follow_up(question):
             return []
@@ -403,11 +690,11 @@ class ChatService:
         return sources
 
     async def _augment_question_sources_from_same_documents(
-        self,
-        *,
-        question: str,
-        sources: list[ChatSource],
-        max_sources: int,
+            self,
+            *,
+            question: str,
+            sources: list[ChatSource],
+            max_sources: int,
     ) -> list[ChatSource]:
         if not sources:
             return sources
@@ -465,6 +752,57 @@ class ChatService:
         boosted_sources.sort(key=lambda item: item[0], reverse=True)
         return [source for _, source in boosted_sources[:max_sources]] + sources
 
+    @classmethod
+    def _employment_fingerprints(cls, source: ChatSource) -> set[tuple[str, str, str]]:
+        text = "\n".join(
+            [
+                source.content or "",
+                source.snippet or "",
+                source.section_title or "",
+            ]
+        )
+        fingerprints: set[tuple[str, str, str]] = set()
+        document_key = str(source.document_id) if source.document_id else ""
+        for line in text.splitlines():
+            line_str = " ".join(line.split())
+            if not line_str:
+                continue
+            for _label, _context, start, end in cls._employment_range_rows(line_str):
+                start_year = cls._extract_year_token(start)
+                end_year = cls._extract_year_token(end)
+                if not start_year or not end_year:
+                    continue
+                fingerprints.add((document_key, start_year, end_year))
+        return fingerprints
+
+    @staticmethod
+    def _extract_year_token(value: str) -> str:
+        value_lower = value.lower().strip()
+        if value_lower in {"present", "current", "now"}:
+            return value_lower
+        match = re.search(r"(19|20)\d{2}", value_lower)
+        return match.group(0) if match else ""
+
+    @classmethod
+    def _dedupe_employment_sources(cls, sources: list[ChatSource]) -> list[ChatSource]:
+        if len(sources) <= 1:
+            return sources
+        ordered = sorted(
+            enumerate(sources), key=lambda pair: pair[1].score, reverse=True
+        )
+        accepted_fingerprints: set[tuple[str, str, str]] = set()
+        kept_indexes: set[int] = set()
+        for original_index, source in ordered:
+            fingerprints = cls._employment_fingerprints(source)
+            if not fingerprints:
+                kept_indexes.add(original_index)
+                continue
+            if fingerprints & accepted_fingerprints:
+                continue
+            accepted_fingerprints |= fingerprints
+            kept_indexes.add(original_index)
+        return [source for index, source in enumerate(sources) if index in kept_indexes]
+
     @staticmethod
     def _generic_query_terms(question: str) -> list[str]:
         terms: list[str] = []
@@ -482,13 +820,13 @@ class ChatService:
 
     @classmethod
     def _same_document_chunk_relevance(
-        cls,
-        *,
-        question_terms: list[str],
-        years: list[int],
-        source: ChatSource,
-        chunk: DocumentChunk,
-        anchor_indexes: set[int],
+            cls,
+            *,
+            question_terms: list[str],
+            years: list[int],
+            source: ChatSource,
+            chunk: DocumentChunk,
+            anchor_indexes: set[int],
     ) -> float:
         text = " ".join(
             [
@@ -497,7 +835,7 @@ class ChatService:
                 chunk.heading_path or "",
                 source.file_name or "",
                 source.file_path or "",
-            ]
+                ]
         ).lower()
         score = 0.0
         if question_terms:
@@ -563,8 +901,8 @@ class ChatService:
 
     @staticmethod
     def _build_active_context_documents(
-        sources: list[ChatSource],
-        active_document_ids: list[UUID],
+            sources: list[ChatSource],
+            active_document_ids: list[UUID],
     ) -> list[dict[str, str]]:
         source_documents: dict[str, dict[str, str]] = {}
         for source in sources:
@@ -655,7 +993,7 @@ class ChatService:
 
     @staticmethod
     def _filter_sources_to_citations(
-        answer: str, sources: list[ChatSource]
+            answer: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]]:
         if not sources:
             return answer, []
@@ -693,13 +1031,25 @@ class ChatService:
 
     @staticmethod
     def _answer_style_rules(question: str) -> list[str]:
-        if not _AMOUNT_QUERY_RE.search(question):
-            return []
-        return [
-            "For amount, total, balance, payable, invoice, bill, cost, or price questions: answer with the exact amount first.",
-            "Prefer the payable/total/invoice amount over tariffs, rates, fees, background, or explanatory text unless the user asks for those.",
-            "Keep amount answers to one short sentence when one amount directly answers the question.",
-        ]
+        rules: list[str] = []
+        if _AMOUNT_QUERY_RE.search(question):
+            rules.extend(
+                [
+                    "For amount, total, balance, payable, invoice, bill, cost, or price questions: answer with the exact amount first.",
+                    "Prefer the payable/total/invoice amount over tariffs, rates, fees, background, or explanatory text unless the user asks for those.",
+                    "Keep amount answers to one short sentence when one amount directly answers the question.",
+                ]
+            )
+        if _EMPLOYMENT_CONTEXT_RE.search(question):
+            rules.extend(
+                [
+                    "For work history questions, output one bullet per distinct employer-and-date-range; never repeat the same employer with the same dates on separate bullets.",
+                    "When the same employer and date range appear across multiple sources, merge them into a single bullet and attach every supporting citation (e.g. [1][3]).",
+                    "Format each bullet as 'Employer (Location, Start - End) [citations]'. Do not echo raw pipe-delimited fragments or duplicate the employer string within a bullet.",
+                    "Only include employment entries whose date range overlaps the period the question asks about.",
+                ]
+            )
+        return rules
 
     @staticmethod
     def _source_evidence_text(source: ChatSource) -> str:
@@ -711,7 +1061,7 @@ class ChatService:
                 source.heading_path or "",
                 source.file_name or "",
                 source.file_path or "",
-            ]
+                ]
         )
 
     @classmethod
@@ -722,7 +1072,7 @@ class ChatService:
                 source.snippet or "",
                 source.section_title or "",
                 source.heading_path or "",
-            ]
+                ]
         )
         lines: list[str] = []
         for raw_line in text.splitlines():
@@ -735,7 +1085,7 @@ class ChatService:
 
     @classmethod
     def _build_direct_answer(
-        cls, *, question: str, sources: list[ChatSource], trace_id: str
+            cls, *, question: str, sources: list[ChatSource], trace_id: str
     ) -> tuple[str, list[ChatSource], dict[str, object]] | None:
         title_answer = cls._build_direct_title_answer(question=question, sources=sources)
         if title_answer is not None:
@@ -767,6 +1117,16 @@ class ChatService:
                 "shadow_mode": False,
             }
 
+        employment_start_answer = cls._build_direct_employment_start_answer(question=question, sources=sources)
+        if employment_start_answer is not None:
+            answer, cited_sources = employment_start_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "employment_start",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+
         range_answer = cls._build_direct_range_answer(question=question, sources=sources)
         if range_answer is not None:
             answer, cited_sources = range_answer
@@ -780,41 +1140,26 @@ class ChatService:
 
     @classmethod
     def _build_direct_due_date_answer(
-        cls, *, question: str, sources: list[ChatSource]
+            cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if not _DUE_DATE_QUERY_RE.search(question):
             return None
         entity_terms = cls._direct_answer_entity_terms(question)
-        best: tuple[float, str, ChatSource] | None = None
-        for source in sources:
-            text = cls._source_evidence_text(source)
-            if not text:
-                continue
-            entity_score = cls._entity_match_score(entity_terms, text)
-            if entity_terms and entity_score <= 0:
-                continue
-            for match in _DATE_VALUE_RE.finditer(text):
-                start = max(0, match.start() - 90)
-                end = min(len(text), match.end() + 90)
-                context = text[start:end]
-                score = source.score + entity_score * 5.0
-                if _DUE_DATE_CONTEXT_RE.search(context):
-                    score += 5.0
-                if re.search(r"\b(te betalen voor|pay before|pay by|due date|vervaldatum)\b", context, flags=re.IGNORECASE):
-                    score += 10.0
-                if re.search(r"\bfactuurdatum\b", context, flags=re.IGNORECASE):
-                    score -= 6.0
-                candidate = (score, match.group(0), source)
-                if best is None or candidate[0] > best[0]:
-                    best = candidate
-        if best is None:
+        matches = EvidenceExtractor.entity_proximity_extractor(
+            sources,
+            entity_terms=entity_terms or ["due", "deadline", "payment", "payable", "vervaldatum"],
+            value_pattern=_DATE_VALUE_RE,
+            context_window=120,
+        )
+        matches = [m for m in matches if _DUE_DATE_CONTEXT_RE.search(m.context)]
+        if not matches:
             return None
-        _score, due_date, source = best
-        return f"{due_date} [1]", [source]
+        best = max(matches, key=lambda item: item.score)
+        return f"{best.value} [1]", [best.source]
 
     @classmethod
     def _build_direct_title_answer(
-        cls, *, question: str, sources: list[ChatSource]
+            cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if not _TITLE_QUERY_RE.search(question):
             return None
@@ -823,13 +1168,16 @@ class ChatService:
         for source in sources:
             if years and not cls._source_supports_years(source, years):
                 continue
+            evidence = cls._source_evidence_text(source)
+            if not cls._source_can_answer_title_query(source, evidence):
+                continue
             title = cls._title_from_source(source)
             if title is None:
                 continue
             score = source.score
             if years:
                 score += 3.0
-            if re.search(r"\b(article|paper|journal|publication)\b", cls._source_evidence_text(source), flags=re.IGNORECASE):
+            if re.search(r"\b(article|paper|journal|publication)\b", evidence, flags=re.IGNORECASE):
                 score += 2.0
             candidate = (score, title, source)
             if best is None or candidate[0] > best[0]:
@@ -838,6 +1186,19 @@ class ChatService:
             return None
         _score, title, source = best
         return f"{title} [1]", [source]
+
+    @staticmethod
+    def _source_can_answer_title_query(source: ChatSource, evidence: str) -> bool:
+        file_hint = f"{source.file_name or ''} {source.file_path or ''}".lower()
+        if re.search(r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)", file_hint):
+            return False
+        return bool(
+            re.search(
+                r"\b(article|paper|journal|publication|published|doi|abstract)\b",
+                evidence,
+                flags=re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     def _title_from_source(source: ChatSource) -> str | None:
@@ -857,82 +1218,229 @@ class ChatService:
 
     @classmethod
     def _build_direct_amount_answer(
-        cls, *, question: str, sources: list[ChatSource]
+            cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if _DUE_DATE_QUERY_RE.search(question):
             return None
         if not _AMOUNT_QUERY_RE.search(question):
             return None
-        entity_terms = cls._direct_answer_entity_terms(question)
-        best: tuple[float, str, ChatSource] | None = None
-        for source in sources:
-            text = cls._source_evidence_text(source)
-            if not text:
-                continue
-            entity_score = cls._entity_match_score(entity_terms, text)
-            if entity_terms and entity_score <= 0:
-                continue
-            for match in _MONEY_RE.finditer(text):
-                amount = " ".join(match.group(0).replace("€", " EUR").split())
-                start = max(0, match.start() - 80)
-                end = min(len(text), match.end() + 80)
-                context = text[start:end]
-                score = source.score + entity_score * 5.0
-                if _AMOUNT_CONTEXT_RE.search(context):
-                    score += 3.0
-                if re.search(r"\b(te betalen|payable|total|invoice total|factuur.*bedrag|bedrag)\b", context, flags=re.IGNORECASE):
-                    score += 4.0
-                if amount.lower().startswith("eur"):
-                    amount = amount[3:].strip() + " EUR"
-                candidate = (score, amount, source)
-                if best is None or candidate[0] > best[0]:
-                    best = candidate
-        if best is None:
+        matches = EvidenceExtractor.amount_extractor(
+            sources, entity_terms=cls._direct_answer_entity_terms(question)
+        )
+        if not matches:
             return None
-        _score, amount, source = best
-        return f"{amount} [1]", [source]
+        best = matches[0]
+        return f"{best.value} [1]", [best.source]
 
     @classmethod
     def _build_direct_range_answer(
-        cls, *, question: str, sources: list[ChatSource]
+            cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         years = cls._requested_years(question)
         if len(years) < 2:
             return None
         query_start, query_end = min(years), max(years)
-        matches: list[tuple[str, str, str, ChatSource, int, int]] = []
-        seen: set[tuple[str, str, str]] = set()
-        for source in sources:
-            for line in cls._source_evidence_lines(source):
-                for match in _PIPE_RANGE_ROW_RE.finditer(line):
-                    label = " ".join(match.group("label").split()).strip(":- ")
-                    context = " ".join(match.group("context").split()).strip(":- ")
-                    if not cls._looks_like_clean_range_label(label):
-                        continue
-                    if not cls._looks_like_clean_range_label(context, allow_short=True):
-                        continue
-                    start_year = cls._first_year(match.group("start"))
-                    end_year = cls._first_year(match.group("end")) or 9999
-                    if start_year is None:
-                        continue
-                    if end_year < query_start or start_year > query_end:
-                        continue
-                    date_range = f"{match.group('start').strip()} - {match.group('end').strip()}"
-                    key = (label.lower(), context.lower(), date_range.lower())
-                    if key in seen:
-                        continue
-                    seen.add(key)
-                    matches.append((label, context, date_range, source, start_year, end_year))
-        if not matches:
+        rows_by_key: dict[tuple[str, int, int], tuple[str, str, str, ChatSource, int, int, int]] = {}
+        for match in EvidenceExtractor.date_range_extractor(sources):
+            if not cls._looks_like_clean_range_label(match.label):
+                continue
+            if match.context and not cls._looks_like_clean_range_label(match.context, allow_short=True):
+                continue
+            start_year = cls._first_year(match.start)
+            end_year = cls._first_year(match.end) or 9999
+            if start_year is None:
+                continue
+            if end_year < query_start or start_year > query_end:
+                continue
+            label_clean = cls._strip_pipe_artifacts(match.label)
+            context_clean = cls._strip_pipe_artifacts(match.context)
+            value_clean = match.value.strip()
+            label_token = re.sub(r"[^a-z0-9]+", "", label_clean.lower())
+            if not label_token:
+                continue
+            key = (label_token, start_year, end_year)
+            specificity = cls._range_value_specificity(value_clean)
+            existing = rows_by_key.get(key)
+            if existing is not None and specificity <= existing[6]:
+                continue
+            rows_by_key[key] = (
+                label_clean,
+                context_clean,
+                value_clean,
+                match.source,
+                start_year,
+                end_year,
+                specificity,
+            )
+        if not rows_by_key:
             return None
-        matches.sort(key=lambda item: (item[4], item[5], item[0].lower()))
-        matches = matches[:6]
-        cited_sources = [item[3] for item in matches]
+        rows = sorted(rows_by_key.values(), key=lambda item: (item[4], item[5], item[0].lower()))[:6]
+        cited_sources = [row[3] for row in rows]
         lines = [
-            f"- {label} ({context}, {date_range}) [{index}]"
-            for index, (label, context, date_range, _source, _start, _end) in enumerate(matches, start=1)
+            f"- {label} ({context}, {date_range}) [{index}]" if context
+            else f"- {label} ({date_range}) [{index}]"
+            for index, (label, context, date_range, _source, _start, _end, _spec) in enumerate(rows, start=1)
         ]
         return "\n".join(lines), cited_sources
+
+    @staticmethod
+    def _strip_pipe_artifacts(text: str) -> str:
+        if not text:
+            return ""
+        cleaned = re.split(r"\s*\|\s*", text)[0]
+        return " ".join(cleaned.split()).strip(" -:,;")
+
+    @staticmethod
+    def _range_value_specificity(value: str) -> int:
+        if not value:
+            return 0
+        score = 0
+        if re.search(r"[A-Za-z]{3,}", value):
+            score += 2
+        if re.search(r"\d{4}", value):
+            score += 1
+        return score
+
+    @classmethod
+    def _build_direct_employment_start_answer(
+            cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        if not _START_WORK_QUERY_RE.search(question):
+            return None
+        entity_terms = [
+            term
+            for term in cls._direct_answer_entity_terms(question)
+            if term
+               not in {
+                   "start",
+                   "started",
+                   "begin",
+                   "began",
+                   "join",
+                   "joined",
+                   "work",
+                   "working",
+                   "role",
+                   "job",
+                   "position",
+                   "employment",
+               }
+        ]
+        subject = cls._employment_subject(question)
+
+        best_range: EvidenceMatch | None = None
+        for match in EvidenceExtractor.date_range_extractor(sources):
+            combined = f"{match.label} {match.context} {match.source.section_title or ''} {match.source.heading_path or ''}"
+            entity_score = EvidenceExtractor.entity_match_score(entity_terms, combined)
+            if entity_terms and entity_score <= 0:
+                continue
+            if not cls._looks_like_employment_row(combined):
+                continue
+            score = match.score + entity_score * 4.0
+            if _EMPLOYMENT_CONTEXT_RE.search(combined):
+                score += 2.0
+            if match.source.file_name and re.search(
+                    r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)",
+                    match.source.file_name,
+                    re.I,
+            ):
+                score += 1.0
+            candidate = EvidenceMatch(
+                kind=match.kind,
+                value=match.value,
+                source=match.source,
+                score=score,
+                label=match.label,
+                context=match.context,
+                start=match.start,
+                end=match.end,
+            )
+            if best_range is None or candidate.score > best_range.score:
+                best_range = candidate
+
+        if best_range is not None:
+            target = cls._employment_target(best_range.label, best_range.context, entity_terms)
+            if best_range.end:
+                return (
+                    f"{subject} started working at {target} in {best_range.start} "
+                    f"(listed range: {best_range.start} - {best_range.end}) [1]",
+                    [best_range.source],
+                )
+            return f"{subject} started working at {target} in {best_range.start} [1]", [best_range.source]
+
+        # Generic fallback for free-text CV/resume prose, e.g.
+        # "Selahaddin Eyyubi University ... Software Developer ... started in 2021".
+        date_pattern = re.compile(
+            rf"(?:{_MONTH_YEAR_RE.pattern})|(?:{_YEAR_RE.pattern})",
+            flags=re.IGNORECASE,
+        )
+        proximity_matches = EvidenceExtractor.entity_proximity_extractor(
+            sources,
+            entity_terms=entity_terms,
+            value_pattern=date_pattern,
+            context_window=220,
+            require_start_marker=True,
+        )
+        proximity_matches = [
+            match
+            for match in proximity_matches
+            if cls._looks_like_employment_row(match.context)
+        ]
+        if proximity_matches:
+            best = proximity_matches[0]
+            target = cls._employment_target(best.context, "", entity_terms)
+            return f"{subject} started working at {target} in {best.value} [1]", [best.source]
+
+        return None
+
+    @staticmethod
+    def _employment_range_rows(line: str) -> list[tuple[str, str, str, str]]:
+        rows: list[tuple[str, str, str, str]] = []
+        for match in _PIPE_RANGE_ROW_RE.finditer(line):
+            rows.append(
+                (
+                    " ".join(match.group("label").split()).strip(":- "),
+                    " ".join(match.group("context").split()).strip(":- "),
+                    match.group("start").strip(),
+                    match.group("end").strip(),
+                )
+            )
+        for match in _YEAR_RANGE_RE.finditer(line):
+            start = match.group(1).strip()
+            end = match.group(2).strip()
+            context_start = max(0, match.start() - 120)
+            context_end = min(len(line), match.end() + 120)
+            context = " ".join(line[context_start:context_end].split()).strip(":- ")
+            rows.append((context, "", start, end))
+        return rows
+
+    @staticmethod
+    def _looks_like_employment_row(text: str) -> bool:
+        if not text.strip():
+            return False
+        has_work_signal = bool(_EMPLOYMENT_CONTEXT_RE.search(text))
+        education_only = bool(_EDUCATION_ONLY_RE.search(text)) and not has_work_signal
+        return has_work_signal and not education_only
+
+    @staticmethod
+    def _employment_target(label: str, context: str, entity_terms: list[str]) -> str:
+        candidates = [label, context]
+        compact_terms = [re.sub(r"[^a-z0-9]+", "", term.lower()) for term in entity_terms]
+        for candidate in candidates:
+            compact_candidate = re.sub(r"[^a-z0-9]+", "", candidate.lower())
+            if any(term and term in compact_candidate for term in compact_terms):
+                return candidate
+        return label or context or "the organization"
+
+    @staticmethod
+    def _employment_subject(question: str) -> str:
+        for term in re.findall(r"[A-ZÖÜĞŞİÇ][A-Za-zÖÜĞŞİÇöüğşıç'-]{2,}", question):
+            if term.lower() not in {"when"}:
+                return term
+        for term in re.findall(r"[a-zöüğşıç'-]{4,}", question.lower()):
+            if term not in _GENERIC_QUERY_STOPWORDS and term not in {"started", "start", "work", "working"}:
+                return term.capitalize()
+        return "They"
 
     @classmethod
     def _direct_answer_entity_terms(cls, question: str) -> list[str]:
@@ -1018,10 +1526,10 @@ class ChatService:
 
     @classmethod
     def _prioritize_sources_for_question(
-        cls,
-        *,
-        question: str,
-        sources: list[ChatSource],
+            cls,
+            *,
+            question: str,
+            sources: list[ChatSource],
     ) -> list[ChatSource]:
         del question
         return sorted(sources, key=lambda source: source.score, reverse=True)
@@ -1065,7 +1573,7 @@ class ChatService:
                 source.file_path or "",
                 source.section_title or "",
                 source.heading_path or "",
-            ]
+                ]
         ).lower()
         if not text:
             return False
@@ -1088,7 +1596,7 @@ class ChatService:
 
     @classmethod
     def _filter_sources_for_question_constraints(
-        cls, *, question: str, sources: list[ChatSource]
+            cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[list[ChatSource], dict[str, object]]:
         years = cls._requested_years(question)
         if not years:
@@ -1112,11 +1620,11 @@ class ChatService:
         }
 
     def _answer_is_supported(
-        self,
-        *,
-        question: str,
-        answer: str,
-        cited_sources: list[ChatSource],
+            self,
+            *,
+            question: str,
+            answer: str,
+            cited_sources: list[ChatSource],
     ) -> bool:
         if not cited_sources:
             return False
@@ -1129,19 +1637,19 @@ class ChatService:
 
         years = self._requested_years(question)
         if years and not all(
-            self._source_supports_years(source, years) for source in cited_sources
+                self._source_supports_years(source, years) for source in cited_sources
         ):
             return False
         return True
 
     @classmethod
     def _select_supporting_sources(
-        cls,
-        *,
-        question: str,
-        answer: str,
-        sources: list[ChatSource],
-        max_sources: int = 2,
+            cls,
+            *,
+            question: str,
+            answer: str,
+            sources: list[ChatSource],
+            max_sources: int = 2,
     ) -> list[ChatSource]:
         if not sources:
             return []
@@ -1216,12 +1724,12 @@ class ChatService:
         return 'stub'
 
     def _retrieval_settings_snapshot(
-        self,
-        *,
-        request: ChatAskRequest,
-        retrieval_query: str,
-        is_follow_up: bool,
-        follow_up: FollowUpClassification | None = None,
+            self,
+            *,
+            request: ChatAskRequest,
+            retrieval_query: str,
+            is_follow_up: bool,
+            follow_up: FollowUpClassification | None = None,
     ) -> dict[str, object]:
         filters_dump: object = None
         if request.retrieval_filters is not None:
@@ -1241,8 +1749,8 @@ class ChatService:
 
     @staticmethod
     def _compute_answer_confidence(
-        sources: list[ChatSource],
-        verification_summary: dict[str, object] | None,
+            sources: list[ChatSource],
+            verification_summary: dict[str, object] | None,
     ) -> float | None:
         if verification_summary is None:
             return None
@@ -1257,11 +1765,11 @@ class ChatService:
         return round(0.2 + 0.15 * top, 3)
 
     async def _maybe_summarize_session(
-        self,
-        *,
-        chat_session: ChatSession,
-        messages: list[ChatMessage],
-        mem: dict[str, object],
+            self,
+            *,
+            chat_session: ChatSession,
+            messages: list[ChatMessage],
+            mem: dict[str, object],
     ) -> None:
         if len(messages) < settings.RAG_SESSION_SUMMARY_MESSAGE_THRESHOLD:
             return
@@ -1270,9 +1778,9 @@ class ChatService:
             return
         lines = [f'{m.role}: {m.content[:520]}' for m in head]
         prompt = (
-            'Summarize durable facts and unresolved threads from this chat prefix '
-            'in 4-6 sentences for future turns. Do not invent facts.\n\n'
-            + '\n'.join(lines)
+                'Summarize durable facts and unresolved threads from this chat prefix '
+                'in 4-6 sentences for future turns. Do not invent facts.\n\n'
+                + '\n'.join(lines)
         )
         try:
             summary = (await self.llm_client.generate(prompt)).strip()
@@ -1285,13 +1793,13 @@ class ChatService:
             )
 
     def _verify_and_normalize_answer(
-        self,
-        *,
-        question: str,
-        answer: str,
-        sources: list[ChatSource],
-        shadow_mode: bool,
-        trace_id: str,
+            self,
+            *,
+            question: str,
+            answer: str,
+            sources: list[ChatSource],
+            shadow_mode: bool,
+            trace_id: str,
     ) -> tuple[str, list[ChatSource], dict[str, object]]:
         verification: dict[str, object] = {
             'shadow_mode': shadow_mode,
@@ -1321,9 +1829,9 @@ class ChatService:
                 sources=sources,
             )
             if supporting_sources and self._answer_is_supported(
-                question=question,
-                answer=normalized_answer,
-                cited_sources=supporting_sources,
+                    question=question,
+                    answer=normalized_answer,
+                    cited_sources=supporting_sources,
             ):
                 verification['result'] = 'auto_cited'
                 verification['auto_citation_applied'] = True
@@ -1367,7 +1875,7 @@ class ChatService:
         return normalized_answer, cited_sources, verification
 
     async def ask(
-        self, *, user: User, auth: AuthContext, request: ChatAskRequest
+            self, *, user: User, auth: AuthContext, request: ChatAskRequest
     ) -> ChatAskResponse:
         question = request.question.strip() or request.question
         trace_id = request.request_id or str(uuid.uuid4())
@@ -1561,25 +2069,25 @@ class ChatService:
             if lock_ids and explicit_document_ids is None:
                 retrieval_document_ids = lock_ids
             if (
-                filename_scoped_document_ids
-                and explicit_document_ids is None
-                and not lock_ids
+                    filename_scoped_document_ids
+                    and explicit_document_ids is None
+                    and not lock_ids
             ):
                 retrieval_document_ids = filename_scoped_document_ids
             if (
-                requested_active_context_document_ids
-                and is_follow_up
-                and explicit_document_ids is None
-                and not lock_ids
-                and not filename_scoped_document_ids
+                    requested_active_context_document_ids
+                    and is_follow_up
+                    and explicit_document_ids is None
+                    and not lock_ids
+                    and not filename_scoped_document_ids
             ):
                 retrieval_document_ids = requested_active_context_document_ids
             elif (
-                follow_up_document_ids
-                and is_follow_up
-                and explicit_document_ids is None
-                and not lock_ids
-                and not filename_scoped_document_ids
+                    follow_up_document_ids
+                    and is_follow_up
+                    and explicit_document_ids is None
+                    and not lock_ids
+                    and not filename_scoped_document_ids
             ):
                 retrieval_preferred_document_ids = follow_up_document_ids
 
@@ -1708,6 +2216,7 @@ class ChatService:
                         sources=candidate_sources,
                         max_sources=max(20, request.top_k * 3),
                     )
+                    candidate_sources = self._dedupe_employment_sources(candidate_sources)
                     candidate_sources, constraint_debug = self._filter_sources_for_question_constraints(
                         question=question,
                         sources=candidate_sources,

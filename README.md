@@ -86,6 +86,10 @@ flowchart LR
 ---
 
 ## 🚀 Quick Start (1 command)
+
+NextCloud bridge:
+Copy nc_ai_bridge folder to Nextcloud extra apps folder(/var/snap/nextcloud/current/nextcloud/extra-apps/) to access app via icon on Nextcloud:
+
 Docker:
 ```bash
 make docker-dev

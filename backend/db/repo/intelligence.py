@@ -19,6 +19,8 @@ from ..models import (
 from .base import BaseRepository
 from .document import DocumentRepository
 
+OPEN_WORKFLOW_STATUSES = ("queued", "in_progress", "blocked", "suggested", "needs_review")
+
 
 @dataclass(slots=True)
 class KnowledgeNodeDraft:
@@ -103,7 +105,7 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
                 selectinload(WorkflowTask.document),
                 selectinload(WorkflowTask.insight),
             )
-            .where(WorkflowTask.status.in_(["queued", "in_progress", "blocked"]))
+            .where(WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES))
             .order_by(
                 desc(WorkflowTask.priority == "high"),
                 WorkflowTask.due_at.asc().nulls_last(),
@@ -128,7 +130,7 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
                 selectinload(WorkflowTask.insight),
             )
             .where(
-                WorkflowTask.status.in_(["queued", "in_progress", "blocked"]),
+                WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES),
                 visibility,
             )
             .order_by(
@@ -146,7 +148,7 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
     async def count_open_by_queue(self) -> dict[str, int]:
         result = await self.session.execute(
             select(WorkflowTask.queue_name, func.count())
-            .where(WorkflowTask.status.in_(["queued", "in_progress", "blocked"]))
+            .where(WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES))
             .group_by(WorkflowTask.queue_name)
         )
         return {str(queue_name): int(count) for queue_name, count in result.all()}
