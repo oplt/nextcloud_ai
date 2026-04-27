@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import {
   createContext,
   useCallback,
@@ -401,52 +402,27 @@ export function WorkspaceProvider({
     }
 
     let disposed = false;
-    const runCheck = async () => {
-      try {
-        const readiness = await getBackendReadiness();
-        if (disposed) {
-          return;
-        }
-        const problems = [
-          readiness.status !== 'ready' ? `status:${readiness.status}` : null,
-          readiness.database !== 'ok' ? `db:${readiness.database}` : null,
-          readiness.redis !== 'ok' ? `redis:${readiness.redis}` : null,
-          readiness.broker !== 'ok' ? `broker:${readiness.broker}` : null,
-          readiness.ai_runtime.ready ? null : readiness.ai_runtime.error || 'ai:not_ready',
-        ].filter(Boolean);
-
-        setBackendStatus({
-          kind: problems.length === 0 ? 'ready' : 'degraded',
-          detail: problems.length === 0 ? null : problems.join(' | '),
-          checkedAt: new Date().toISOString(),
-        });
-      } catch (cause) {
-        if (disposed) {
-          return;
-        }
-        setBackendStatus({
-          kind: 'offline',
-          detail: cause instanceof Error ? cause.message : 'Server unreachable',
-          checkedAt: new Date().toISOString(),
-        });
+    const runCheck = () => {
+      if (!disposed) {
+        void checkBackendStatus();
       }
     };
 
-    void runCheck();
+    runCheck();
     const intervalId = window.setInterval(() => {
       if (document.visibilityState !== 'hidden') {
-        void runCheck();
+        runCheck();
       }
     }, HEALTH_POLL_INTERVAL_MS);
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
-        void runCheck();
+        runCheck();
       }
     };
 
     const handleFocus = () => {
-      void runCheck();
+      runCheck();
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
@@ -458,7 +434,7 @@ export function WorkspaceProvider({
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleFocus);
     };
-  }, [user]);
+  }, [checkBackendStatus, user]);
 
   useEffect(() => {
     if (!user || workspaceSection !== 'jobs') {

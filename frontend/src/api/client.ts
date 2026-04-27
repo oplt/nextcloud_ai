@@ -14,11 +14,13 @@ import type {
   CreateUserPayload,
   CsrfTokenResponse,
   DocumentDetail,
+  DocumentListResponse,
   DocumentListFilters,
   DocumentSummary,
   HealthReadiness,
   IntelligenceOverview,
   Role,
+  SyncJobListResponse,
   SyncJob,
   UpdateUserPayload,
   User,
@@ -29,6 +31,8 @@ const AUTH_COOKIE_NAME = 'nc_ai_access_token';
 const CSRF_COOKIE_NAME = 'nc_ai_csrf_token';
 const CSRF_HEADER_NAME = 'X-CSRF-Token';
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
+const GET_CACHE = new Map<string, { expiresAt: number; value: unknown }>();
+const GET_IN_FLIGHT = new Map<string, Promise<unknown>>();
 
 type ApiValidationIssue = {
   type?: string;
@@ -92,6 +96,44 @@ function readCookie(name: string): string | null {
     return decodeURIComponent(cookie.slice(prefix.length));
   }
   return null;
+}
+
+async function cachedGet<T>(
+  key: string,
+  ttlMs: number,
+  loader: () => Promise<T>,
+): Promise<T> {
+  const now = Date.now();
+  const cached = GET_CACHE.get(key);
+  if (cached && cached.expiresAt > now) {
+    return cached.value as T;
+  }
+  const pending = GET_IN_FLIGHT.get(key);
+  if (pending) {
+    return pending as Promise<T>;
+  }
+  const promise = loader()
+    .then((value) => {
+      GET_CACHE.set(key, { value, expiresAt: Date.now() + ttlMs });
+      return value;
+    })
+    .finally(() => {
+      GET_IN_FLIGHT.delete(key);
+    });
+  GET_IN_FLIGHT.set(key, promise);
+  return promise;
+}
+
+function invalidateGetCache(prefixes: string[] = []): void {
+  if (prefixes.length === 0) {
+    GET_CACHE.clear();
+    return;
+  }
+  for (const key of Array.from(GET_CACHE.keys())) {
+    if (prefixes.some((prefix) => key.startsWith(prefix))) {
+      GET_CACHE.delete(key);
+    }
+  }
 }
 
 export function hasSessionCookie(): boolean {
@@ -220,26 +262,31 @@ export async function listConnectors(): Promise<Connector[]> {
 }
 
 export async function createConnector(payload: ConnectorPayload): Promise<Connector> {
-  return request<Connector>('/connectors', {
+  const connector = await request<Connector>('/connectors', {
     method: 'POST',
     body: JSON.stringify(payload),
   });
+  invalidateGetCache(['/connectors', '/documents', '/jobs', '/intelligence']);
+  return connector;
 }
 
 export async function updateConnector(
   connectorId: string,
   payload: ConnectorUpdatePayload,
 ): Promise<Connector> {
-  return request<Connector>(`/connectors/${connectorId}`, {
+  const connector = await request<Connector>(`/connectors/${connectorId}`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
+  invalidateGetCache(['/connectors', '/documents', '/jobs', '/intelligence']);
+  return connector;
 }
 
 export async function deleteConnector(connectorId: string): Promise<void> {
-  return request<void>(`/connectors/${connectorId}`, {
+  await request<void>(`/connectors/${connectorId}`, {
     method: 'DELETE',
   });
+  invalidateGetCache(['/connectors', '/documents', '/jobs', '/intelligence']);
 }
 
 export async function testConnector(connectorId: string): Promise<{ ok: boolean; message: string }> {
@@ -247,10 +294,12 @@ export async function testConnector(connectorId: string): Promise<{ ok: boolean;
 }
 
 export async function syncConnector(connectorId: string, fullReindex = false): Promise<SyncJob> {
-  return request<SyncJob>(`/connectors/${connectorId}/sync`, {
+  const job = await request<SyncJob>(`/connectors/${connectorId}/sync`, {
     method: 'POST',
     body: JSON.stringify({ full_reindex: fullReindex }),
   });
+  invalidateGetCache(['/jobs', '/documents', '/intelligence']);
+  return job;
 }
 
 export async function listDocuments(filters: DocumentListFilters = {}): Promise<DocumentSummary[]> {
@@ -279,16 +328,38 @@ export async function listDocuments(filters: DocumentListFilters = {}): Promise<
   if (filters.source_type) params.set('source_type', filters.source_type);
   if (filters.needs_review) params.set('needs_review', 'true');
   if (filters.low_confidence) params.set('low_confidence', 'true');
+  params.set('page', String(filters.page ?? 1));
+  params.set('page_size', String(filters.page_size ?? 200));
   const suffix = params.toString();
-  return request<DocumentSummary[]>(`/documents${suffix ? `?${suffix}` : ''}`);
+  const path = `/documents${suffix ? `?${suffix}` : ''}`;
+  const cacheKey = `/documents:${suffix}`;
+  const response = await cachedGet<DocumentListResponse>(cacheKey, 5_000, () =>
+    request<DocumentListResponse>(path),
+  );
+  return response.items;
 }
 
 export async function getDocument(documentId: string): Promise<DocumentDetail> {
   return request<DocumentDetail>(`/documents/${documentId}`);
 }
 
-export async function getIntelligenceOverview(): Promise<IntelligenceOverview> {
-  return request<IntelligenceOverview>('/intelligence/overview');
+export async function getIntelligenceOverview(params?: {
+  task_search?: string;
+  blocked_by_task_id?: string;
+}): Promise<IntelligenceOverview> {
+  const query = new URLSearchParams();
+  if (params?.task_search) {
+    query.set('task_search', params.task_search);
+  }
+  if (params?.blocked_by_task_id) {
+    query.set('blocked_by_task_id', params.blocked_by_task_id);
+  }
+  const suffix = query.toString();
+  const path = `/intelligence/overview${suffix ? `?${suffix}` : ''}`;
+  const cacheKey = `/intelligence/overview:${suffix}`;
+  return cachedGet<IntelligenceOverview>(cacheKey, 5_000, () =>
+    request<IntelligenceOverview>(path),
+  );
 }
 
 export function getDocumentOriginalUrl(documentId: string): string {
@@ -296,29 +367,38 @@ export function getDocumentOriginalUrl(documentId: string): string {
 }
 
 export async function reindexDocument(documentId: string): Promise<{ status: string; task_id: string; document_id: string }> {
-  return request<{ status: string; task_id: string; document_id: string }>(`/documents/${documentId}/reindex`, {
+  const result = await request<{ status: string; task_id: string; document_id: string }>(`/documents/${documentId}/reindex`, {
     method: 'POST',
   });
+  invalidateGetCache(['/documents', '/jobs', '/intelligence']);
+  return result;
 }
 
 export async function updateDocumentClassification(
   documentId: string,
   payload: { document_type: string; business_domain: string; document_type_reason?: string; business_domain_reason?: string },
 ): Promise<DocumentDetail> {
-  return request<DocumentDetail>(`/documents/${documentId}/classification`, {
+  const detail = await request<DocumentDetail>(`/documents/${documentId}/classification`, {
     method: 'PATCH',
     body: JSON.stringify(payload),
   });
+  invalidateGetCache(['/documents', '/intelligence']);
+  return detail;
 }
 
 export async function listJobs(): Promise<SyncJob[]> {
-  return request<SyncJob[]>('/jobs');
+  const response = await cachedGet<SyncJobListResponse>('/jobs', 3_000, () =>
+    request<SyncJobListResponse>('/jobs?page=1&page_size=200'),
+  );
+  return response.items;
 }
 
 export async function retryJob(jobId: string): Promise<SyncJob> {
-  return request<SyncJob>(`/jobs/${jobId}/retry`, {
+  const job = await request<SyncJob>(`/jobs/${jobId}/retry`, {
     method: 'POST',
   });
+  invalidateGetCache(['/jobs']);
+  return job;
 }
 
 export async function listChatSessions(): Promise<ChatSessionSummary[]> {

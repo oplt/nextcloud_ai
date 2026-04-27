@@ -63,6 +63,7 @@ export function AppShell({
           : ' status-pill--checking';
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMobileNavOpen(false);
   }, [location.pathname]);
 

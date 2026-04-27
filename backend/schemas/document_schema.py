@@ -124,3 +124,10 @@ class DocumentTaxonomyRead(BaseModel):
     document_types: list[str]
     business_domains: list[str]
     parse_statuses: list[str]
+
+
+class DocumentListRead(BaseModel):
+    items: list[DocumentRead]
+    total: int
+    page: int
+    page_size: int

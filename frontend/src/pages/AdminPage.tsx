@@ -111,6 +111,7 @@ export function AdminPage({
     };
 
     useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
         setAuditPage(1);
     }, [auditLogs]);
 

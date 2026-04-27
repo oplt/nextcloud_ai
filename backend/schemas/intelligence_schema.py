@@ -44,6 +44,11 @@ class WorkflowTaskRead(TimestampedSchema):
     reason: str | None = None
     recommended_action: str | None = None
     review_status: str | None = None
+    workflow_stage: str | None = None
+    blocked_by_task_ids: list[str] = Field(default_factory=list)
+    acceptance_criteria: list[dict[str, Any]] = Field(default_factory=list)
+    suggested_owner_roles: list[str] = Field(default_factory=list)
+    suggested_reviewer_roles: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def hydrate_validation_fields(self) -> "WorkflowTaskRead":
@@ -70,6 +75,37 @@ class WorkflowTaskRead(TimestampedSchema):
         self.review_status = self.review_status or _string_meta(
             meta, validation_meta, "review_status", "status"
         )
+        self.workflow_stage = self.workflow_stage or _string_meta(
+            meta, validation_meta, "workflow_stage"
+        )
+        if not self.blocked_by_task_ids:
+            blocked = meta.get("blocked_by_task_ids")
+            self.blocked_by_task_ids = (
+                [str(item) for item in blocked if isinstance(item, str)]
+                if isinstance(blocked, list)
+                else []
+            )
+        if not self.acceptance_criteria:
+            acceptance = meta.get("acceptance_criteria")
+            self.acceptance_criteria = (
+                [item for item in acceptance if isinstance(item, dict)]
+                if isinstance(acceptance, list)
+                else []
+            )
+        if not self.suggested_owner_roles:
+            owners = meta.get("suggested_owner_roles")
+            self.suggested_owner_roles = (
+                [str(item) for item in owners if isinstance(item, str)]
+                if isinstance(owners, list)
+                else []
+            )
+        if not self.suggested_reviewer_roles:
+            reviewers = meta.get("suggested_reviewer_roles")
+            self.suggested_reviewer_roles = (
+                [str(item) for item in reviewers if isinstance(item, str)]
+                if isinstance(reviewers, list)
+                else []
+            )
         return self
 
 

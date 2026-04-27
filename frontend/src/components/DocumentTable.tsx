@@ -2,7 +2,9 @@ import { useState } from 'react';
 import IconButton from '@mui/material/IconButton';
 
 import { AppButton } from './ui/AppButton';
-import { AppCard } from './ui/AppCard';
+import { DataTable } from './ui/DataTable';
+import { StatusBadge } from './ui/StatusBadge';
+import { statusToneFromValue } from './ui/statusTone';
 import type { DocumentSummary } from '../types/api';
 import { formatConfidence, formatDateTime, getBusinessDomainLabel, getDocumentTypeLabel } from '../utils/documentDisplay';
 
@@ -83,132 +85,133 @@ export function DocumentTable({
   const collapsed = sectionCollapsible && !sectionOpen;
 
   return (
-    <AppCard
-      className={`card table-card document-table-card${collapsed ? ' document-table-card--section-collapsed' : ''}`}
-    >
-      <header className="panel-header">
-        <div className="panel-header__lead">
-          {sectionCollapsible ? (
-            <IconButton
-              type="button"
-              className="panel-collapse-toggle"
-              aria-expanded={sectionOpen}
-              aria-controls="document-table-body"
-              onClick={() => setSectionOpen((open) => !open)}
-              title={sectionOpen ? 'Collapse document list' : 'Expand document list'}
+    <DataTable
+      title="Documents"
+      count={totalDocuments}
+      tableId="document-table-body"
+      collapsed={collapsed}
+      className={`document-table-card${collapsed ? ' document-table-card--section-collapsed' : ''}`}
+      headerActions={
+        sectionCollapsible ? (
+          <IconButton
+            type="button"
+            className="panel-collapse-toggle"
+            aria-expanded={sectionOpen}
+            aria-controls="document-table-body"
+            onClick={() => setSectionOpen((open) => !open)}
+            title={sectionOpen ? 'Collapse document list' : 'Expand document list'}
+          >
+            <svg
+              className={`panel-collapse-toggle__icon${sectionOpen ? ' panel-collapse-toggle__icon--open' : ''}`}
+              viewBox="0 0 20 20"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.8"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
             >
-              <svg
-                className={`panel-collapse-toggle__icon${sectionOpen ? ' panel-collapse-toggle__icon--open' : ''}`}
-                viewBox="0 0 20 20"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="1.8"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <path d="M5 8l5 5 5-5" />
-              </svg>
-            </IconButton>
-          ) : null}
-          <h3>Documents</h3>
-        </div>
-        <span>{totalDocuments}</span>
-      </header>
+              <path d="M5 8l5 5 5-5" />
+            </svg>
+          </IconButton>
+        ) : null
+      }
+      footer={
+        <>
+          <p>
+            {totalDocuments === 0
+              ? 'No documents'
+              : `Showing ${firstRow}–${lastRow} of ${totalDocuments}`}
+          </p>
+          <div className="pagination-controls">
+            <AppButton
+              type="button"
+              variant="outlined"
+              onClick={() => onPageChange(currentPage - 1)}
+              disabled={currentPage <= 1}
+              aria-label="Previous page"
+            >
+              ← Prev
+            </AppButton>
+            <span aria-live="polite">{currentPage} / {totalPages}</span>
+            <AppButton
+              type="button"
+              variant="outlined"
+              onClick={() => onPageChange(currentPage + 1)}
+              disabled={currentPage >= totalPages}
+              aria-label="Next page"
+            >
+              Next →
+            </AppButton>
+          </div>
+        </>
+      }
+    >
+      <table className="document-table">
+        <thead>
+          <tr>
+            {columns.map((col) => (
+              <th key={col.key} aria-sort={ariaSort(col.key)}>
+                <AppButton
+                  type="button"
+                  variant="text"
+                  className={`sort-button${sortColumn === col.key ? ' sort-button--active' : ''}`}
+                  onClick={() => onSort(col.key)}
+                  aria-label={`Sort by ${col.label}${sortColumn === col.key ? `, currently ${sortDirection}ending` : ''}`}
+                >
+                  <span>{col.label}</span>
+                  <span className="sort-button__icon" aria-hidden="true">
+                    {sortColumn === col.key ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}
+                  </span>
+                </AppButton>
+              </th>
+            ))}
+          </tr>
+        </thead>
 
-      <div id="document-table-body" className="table-wrap" hidden={collapsed}>
-        <table className="document-table">
-          <thead>
-            <tr>
-              {columns.map((col) => (
-                <th key={col.key} aria-sort={ariaSort(col.key)}>
-                  <AppButton
-                    type="button"
-                    variant="text"
-                    className={`sort-button${sortColumn === col.key ? ' sort-button--active' : ''}`}
-                    onClick={() => onSort(col.key)}
-                    aria-label={`Sort by ${col.label}${sortColumn === col.key ? `, currently ${sortDirection}ending` : ''}`}
-                  >
-                    <span>{col.label}</span>
-                    <span className="sort-button__icon" aria-hidden="true">
-                      {sortColumn === col.key ? (sortDirection === 'asc' ? '↑' : '↓') : '↕'}
-                    </span>
-                  </AppButton>
-                </th>
-              ))}
-            </tr>
-          </thead>
-
-          <tbody>
-            {loading ? (
-              <SkeletonRows />
-            ) : (
-              documents.map((doc) => (
-                  <tr
-                    key={doc.id}
-                    className={selectedDocumentId === doc.id ? 'is-selected' : ''}
-                    onClick={() => onSelect(doc)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' || e.key === ' ') {
-                        e.preventDefault();
-                        onSelect(doc);
-                      }
-                    }}
-                    tabIndex={0}
-                    role="button"
-                    aria-selected={selectedDocumentId === doc.id}
-                  >
-                    <td>
-                      <strong>{doc.file_name}</strong>
-                      <small title={doc.file_path}>{doc.file_path}</small>
-                    </td>
-                    <td>
-                      <strong title={doc.mime_type ?? 'Unknown document type'}>
-                        {getDocumentTypeLabel(doc)}
-                      </strong>
-                    </td>
-                    <td>{getBusinessDomainLabel(doc)}</td>
-                    <td>
-                      <span className={`pill pill--${doc.parse_status}`}>{doc.parse_status}</span>
-                      {doc.needs_review ? <span className="pill pill--warning">Needs review</span> : null}
-                    </td>
-                    <td title={doc.document_type_reason ?? undefined}>{formatConfidence(Math.min(doc.document_type_confidence, doc.business_domain_confidence))}</td>
-                    <td>{formatDateTime(doc.indexed_at ?? doc.modified_at)}</td>
-                  </tr>
-              ))
-            )}
-          </tbody>
-        </table>
-      </div>
-
-      <footer className="document-table__footer" hidden={collapsed}>
-        <p>
-          {totalDocuments === 0
-            ? 'No documents'
-            : `Showing ${firstRow}–${lastRow} of ${totalDocuments}`}
-        </p>
-        <div className="pagination-controls">
-          <AppButton
-            type="button"
-            variant="outlined"
-            onClick={() => onPageChange(currentPage - 1)}
-            disabled={currentPage <= 1}
-            aria-label="Previous page"
-          >
-            ← Prev
-          </AppButton>
-          <span aria-live="polite">{currentPage} / {totalPages}</span>
-          <AppButton
-            type="button"
-            variant="outlined"
-            onClick={() => onPageChange(currentPage + 1)}
-            disabled={currentPage >= totalPages}
-            aria-label="Next page"
-          >
-            Next →
-          </AppButton>
-        </div>
-      </footer>
-    </AppCard>
+        <tbody>
+          {loading ? (
+            <SkeletonRows />
+          ) : (
+            documents.map((doc) => (
+                <tr
+                  key={doc.id}
+                  className={selectedDocumentId === doc.id ? 'is-selected' : ''}
+                  onClick={() => onSelect(doc)}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault();
+                      onSelect(doc);
+                    }
+                  }}
+                  tabIndex={0}
+                  role="button"
+                  aria-selected={selectedDocumentId === doc.id}
+                >
+                  <td>
+                    <strong>{doc.file_name}</strong>
+                    <small title={doc.file_path}>{doc.file_path}</small>
+                  </td>
+                  <td>
+                    <strong title={doc.mime_type ?? 'Unknown document type'}>
+                      {getDocumentTypeLabel(doc)}
+                    </strong>
+                  </td>
+                  <td>{getBusinessDomainLabel(doc)}</td>
+                  <td>
+                    <StatusBadge
+                      label={doc.parse_status}
+                      tone={statusToneFromValue(doc.parse_status)}
+                    />
+                    {doc.needs_review ? <StatusBadge label="Needs review" tone="warning" /> : null}
+                  </td>
+                  <td title={doc.document_type_reason ?? undefined}>{formatConfidence(Math.min(doc.document_type_confidence, doc.business_domain_confidence))}</td>
+                  <td>{formatDateTime(doc.indexed_at ?? doc.modified_at)}</td>
+                </tr>
+            ))
+          )}
+        </tbody>
+      </table>
+    </DataTable>
   );
 }

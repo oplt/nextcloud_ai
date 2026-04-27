@@ -15,11 +15,12 @@ from ...ingestion.taxonomy import BUSINESS_DOMAINS, DOCUMENT_TYPES, PARSE_STATUS
 from ...schemas.document_schema import (
     DocumentClassificationPatch,
     DocumentDetail,
-    DocumentRead,
+    DocumentListRead,
     DocumentTaxonomyRead,
 )
 from ...services.authorization_service import parse_csv_query_values
 from ...services.connector_service import ConnectorService
+from ...services.document_service import DocumentService
 from ...services.product_intelligence_service import ProductIntelligenceService
 from ...workers.indexing_tasks import enqueue_document_reindex
 
@@ -34,7 +35,7 @@ def build_content_disposition(filename: str, disposition: str = "inline") -> str
     return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
 
 
-@router.get("", response_model=list[DocumentRead])
+@router.get("", response_model=DocumentListRead)
 async def list_documents(
         session: DbSessionDep,
         identity: AuthenticatedUser = Depends(permission_required("documents:read")),
@@ -50,9 +51,10 @@ async def list_documents(
         source_type: str | None = Query(default=None),
         needs_review: bool | None = Query(default=None),
         low_confidence: bool | None = Query(default=None),
-) -> list[DocumentRead]:
-    repo = DocumentRepository(session)
-    documents = await repo.search(
+        page: int = Query(default=1, ge=1),
+        page_size: int = Query(default=50, ge=1, le=200),
+) -> DocumentListRead:
+    return await DocumentService(session).list_documents(
         auth=identity.auth,
         query=query,
         connector_ids=parse_csv_query_values(connector_id),
@@ -66,9 +68,9 @@ async def list_documents(
         source_type=source_type,
         needs_review=needs_review,
         low_confidence=low_confidence,
-        limit=100,
+        page=page,
+        page_size=page_size,
     )
-    return [_document_read(document) for document in documents]
 
 
 @router.get("/taxonomy", response_model=DocumentTaxonomyRead)
@@ -215,19 +217,6 @@ def _needs_review(document) -> bool:
         or document.business_domain == "unknown"
         or (document.document_type_confidence or 0.0) < 0.6
         or (document.business_domain_confidence or 0.0) < 0.6
-    )
-
-
-def _document_read(document) -> DocumentRead:
-    metadata = dict(document.metadata_json or {})
-    return DocumentRead.model_validate(
-        {
-            **document.__dict__,
-            "chunk_count": len(getattr(document, "chunks", []) or []),
-            "ingestion_quality": metadata.get("ingestion_quality"),
-            "signal_counts": _signal_counts(document),
-            "needs_review": _needs_review(document),
-        }
     )
 
 

@@ -9,8 +9,6 @@ import uuid
 from dataclasses import dataclass
 from typing import Optional
 
-from sqlalchemy import text
-
 from ..db.session import AsyncSessionLocal
 from ..core.config import settings
 from ..core.observability import record_job_transition
@@ -373,7 +371,7 @@ async def _run_document_intelligence_extraction_task(*, document_id: str) -> str
                 "Successfully completed intelligence extraction for document_id=%s",
                 document_id
             )
-        except Exception as e:
+        except Exception:
             logger.exception(
                 "Intelligence extraction task failed document_id=%s", document_id
             )

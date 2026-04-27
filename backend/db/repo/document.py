@@ -86,83 +86,98 @@ class DocumentRepository(BaseRepository[Document]):
             low_confidence: bool | None = None,
             include_deleted: bool = False,
             include_intelligence: bool = False,
+            include_chunks: bool = False,
             offset: int = 0,
             limit: int = 50,
     ) -> list[Document]:
-        stmt: Select[tuple[Document]] = select(Document).options(selectinload(Document.chunks))
+        stmt: Select[tuple[Document]] = select(Document)
+        if include_chunks:
+            stmt = stmt.options(selectinload(Document.chunks))
         if include_intelligence:
             stmt = stmt.options(
                 selectinload(Document.insights),
                 selectinload(Document.workflow_tasks),
             )
-        filters = []
-        if connector_id:
-            filters.append(Document.connector_id == connector_id)
-        if connector_ids:
-            filters.append(Document.connector_id.in_(list(connector_ids)))
-        if mime_type:
-            filters.append(Document.mime_type == mime_type)
-        if mime_types:
-            filters.append(Document.mime_type.in_(list(mime_types)))
-        if path_prefixes:
-            filters.append(
-                or_(
-                    *[
-                        Document.file_path.ilike(f"{path_prefix.rstrip('%')}%")
-                        for path_prefix in path_prefixes
-                        if path_prefix
-                    ]
-                )
-            )
-        if modified_after is not None:
-            filters.append(Document.modified_at >= modified_after)
-        if modified_before is not None:
-            filters.append(Document.modified_at <= modified_before)
-        if parse_status:
-            filters.append(Document.parse_status == parse_status)
-        if document_type:
-            filters.append(Document.document_type == document_type)
-        if business_domain:
-            filters.append(Document.business_domain == business_domain)
-        if source_type:
-            filters.append(Document.source_type == source_type)
-        if needs_review:
-            filters.append(
-                or_(
-                    Document.parse_status.in_(["failed", "needs_ocr", "unsupported_type"]),
-                    Document.document_type == "unclassified",
-                    Document.business_domain == "unknown",
-                    Document.document_type_confidence < 0.6,
-                    Document.business_domain_confidence < 0.6,
-                )
-            )
-        if low_confidence:
-            filters.append(
-                or_(
-                    Document.document_type_confidence < 0.6,
-                    Document.business_domain_confidence < 0.6,
-                )
-            )
-        if not include_deleted:
-            filters.append(Document.is_deleted.is_(False))
-        if query:
-            like = f"%{query}%"
-            filters.append(
-                or_(
-                    Document.file_name.ilike(like),
-                    Document.file_path.ilike(like),
-                    Document.document_type.ilike(like),
-                    Document.business_domain.ilike(like),
-                )
-            )
-        if auth is not None:
-            filters.append(self.visibility_clause(auth))
+        filters = self._build_search_filters(
+            auth=auth,
+            query=query,
+            connector_id=connector_id,
+            connector_ids=connector_ids,
+            mime_type=mime_type,
+            mime_types=mime_types,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            parse_status=parse_status,
+            document_type=document_type,
+            business_domain=business_domain,
+            source_type=source_type,
+            needs_review=needs_review,
+            low_confidence=low_confidence,
+            include_deleted=include_deleted,
+        )
         if filters:
             stmt = stmt.where(and_(*filters))
         result = await self.session.execute(
             stmt.order_by(Document.updated_at.desc()).offset(offset).limit(limit)
         )
         return list(result.scalars().all())
+
+    async def count_search(
+        self,
+        *,
+        auth: AuthContext | None = None,
+        query: str | None = None,
+        connector_id: UUID | None = None,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_type: str | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        parse_status: str | None = None,
+        document_type: str | None = None,
+        business_domain: str | None = None,
+        source_type: str | None = None,
+        needs_review: bool | None = None,
+        low_confidence: bool | None = None,
+        include_deleted: bool = False,
+    ) -> int:
+        filters = self._build_search_filters(
+            auth=auth,
+            query=query,
+            connector_id=connector_id,
+            connector_ids=connector_ids,
+            mime_type=mime_type,
+            mime_types=mime_types,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            parse_status=parse_status,
+            document_type=document_type,
+            business_domain=business_domain,
+            source_type=source_type,
+            needs_review=needs_review,
+            low_confidence=low_confidence,
+            include_deleted=include_deleted,
+        )
+        stmt = select(func.count()).select_from(Document)
+        if filters:
+            stmt = stmt.where(and_(*filters))
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def count_chunks_by_document_ids(
+        self, document_ids: Sequence[UUID | str]
+    ) -> dict[str, int]:
+        if not document_ids:
+            return {}
+        result = await self.session.execute(
+            select(DocumentChunk.document_id, func.count(DocumentChunk.id))
+            .where(DocumentChunk.document_id.in_(list(document_ids)))
+            .group_by(DocumentChunk.document_id)
+        )
+        return {str(document_id): int(count) for document_id, count in result.all()}
 
     async def search_documents(
             self,
@@ -318,6 +333,90 @@ class DocumentRepository(BaseRepository[Document]):
         if source_types:
             stmt = stmt.where(Document.source_type.in_(list(source_types)))
         return stmt
+
+    @staticmethod
+    def _build_search_filters(
+        *,
+        auth: AuthContext | None = None,
+        query: str | None = None,
+        connector_id: UUID | None = None,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_type: str | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        parse_status: str | None = None,
+        document_type: str | None = None,
+        business_domain: str | None = None,
+        source_type: str | None = None,
+        needs_review: bool | None = None,
+        low_confidence: bool | None = None,
+        include_deleted: bool = False,
+    ) -> list[object]:
+        filters: list[object] = []
+        if connector_id:
+            filters.append(Document.connector_id == connector_id)
+        if connector_ids:
+            filters.append(Document.connector_id.in_(list(connector_ids)))
+        if mime_type:
+            filters.append(Document.mime_type == mime_type)
+        if mime_types:
+            filters.append(Document.mime_type.in_(list(mime_types)))
+        if path_prefixes:
+            filters.append(
+                or_(
+                    *[
+                        Document.file_path.ilike(f"{path_prefix.rstrip('%')}%")
+                        for path_prefix in path_prefixes
+                        if path_prefix
+                    ]
+                )
+            )
+        if modified_after is not None:
+            filters.append(Document.modified_at >= modified_after)
+        if modified_before is not None:
+            filters.append(Document.modified_at <= modified_before)
+        if parse_status:
+            filters.append(Document.parse_status == parse_status)
+        if document_type:
+            filters.append(Document.document_type == document_type)
+        if business_domain:
+            filters.append(Document.business_domain == business_domain)
+        if source_type:
+            filters.append(Document.source_type == source_type)
+        if needs_review:
+            filters.append(
+                or_(
+                    Document.parse_status.in_(["failed", "needs_ocr", "unsupported_type"]),
+                    Document.document_type == "unclassified",
+                    Document.business_domain == "unknown",
+                    Document.document_type_confidence < 0.6,
+                    Document.business_domain_confidence < 0.6,
+                )
+            )
+        if low_confidence:
+            filters.append(
+                or_(
+                    Document.document_type_confidence < 0.6,
+                    Document.business_domain_confidence < 0.6,
+                )
+            )
+        if not include_deleted:
+            filters.append(Document.is_deleted.is_(False))
+        if query:
+            like = f"%{query}%"
+            filters.append(
+                or_(
+                    Document.file_name.ilike(like),
+                    Document.file_path.ilike(like),
+                    Document.document_type.ilike(like),
+                    Document.business_domain.ilike(like),
+                )
+            )
+        if auth is not None:
+            filters.append(DocumentRepository.visibility_clause(auth))
+        return filters
 
 
 class DocumentChunkRepository(BaseRepository[DocumentChunk]):

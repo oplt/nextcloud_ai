@@ -3,7 +3,6 @@ import { useCallback, useEffect, useState } from 'react';
 import {
   ensureCsrfToken,
   getCurrentUser,
-  hasSessionCookie,
   login as apiLogin,
   logout as apiLogout,
 } from '../api/client';
@@ -54,11 +53,6 @@ export function useSession() {
       await ensureCsrfToken();
     } catch {
       // Best effort: the app can still render the login screen without a CSRF cookie.
-    }
-
-    if (!hasSessionCookie()) {
-      setState({ user: null, loading: false, error: null, sessionRefreshing: false });
-      return;
     }
 
     try {

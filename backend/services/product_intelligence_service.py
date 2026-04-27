@@ -5,6 +5,8 @@ from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 import logging
 import re
+import uuid
+import time
 from uuid import UUID
 
 import httpx
@@ -114,6 +116,9 @@ def _current_document_type(value: str | None) -> str:
 
 
 class ProductIntelligenceService:
+    _overview_cache: dict[str, tuple[float, IntelligenceOverviewRead]] = {}
+    _overview_cache_ttl_seconds = 15.0
+
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
         self.document_repo = DocumentRepository(session)
@@ -129,7 +134,6 @@ class ProductIntelligenceService:
         if settings.PRODUCT_INTELLIGENCE_EXTRACTION_MODE == "off":
             return
         text = parsed_document.text.strip()
-        lowered = text.lower()
         metadata = dict(document.metadata_json or {})
         classification = document.document_type or "unclassified"
         confidence = document.document_type_confidence or 0.0
@@ -308,9 +312,24 @@ class ProductIntelligenceService:
             }
         )
 
-    async def build_overview(self, *, auth: AuthContext) -> IntelligenceOverviewRead:
+    async def build_overview(
+        self,
+        *,
+        auth: AuthContext,
+        task_search: str | None = None,
+        blocked_by_task_id: UUID | str | None = None,
+    ) -> IntelligenceOverviewRead:
+        cache_key = (
+            f"user={auth.user_id}|super={auth.is_superuser}|groups={','.join(sorted(auth.groups))}|"
+            f"search={(task_search or '').strip().lower()}|blocked={blocked_by_task_id or ''}"
+        )
+        now = time.monotonic()
+        cached = self._overview_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
         if not settings.PRODUCT_INTELLIGENCE_ENABLED:
-            return IntelligenceOverviewRead(
+            payload = IntelligenceOverviewRead(
                 intelligence_feature_enabled=False,
                 wedge="disabled",
                 document_type_counts={},
@@ -320,6 +339,11 @@ class ProductIntelligenceService:
                 open_tasks=[],
                 spotlight_documents=[],
             )
+            self._overview_cache[cache_key] = (
+                now + self._overview_cache_ttl_seconds,
+                payload,
+            )
+            return payload.model_copy(deep=True)
 
         documents = await self.document_repo.search(
             auth=auth,
@@ -327,7 +351,10 @@ class ProductIntelligenceService:
             include_intelligence=True,
         )
         visible_open_tasks = await self.task_repo.list_open_with_documents_visible_to_auth(
-            auth=auth, limit=30
+            auth=auth,
+            limit=30,
+            search_query=task_search,
+            blocked_by_task_id=blocked_by_task_id,
         )
 
         type_counter: Counter[str] = Counter()
@@ -391,7 +418,7 @@ class ProductIntelligenceService:
             reverse=True,
         )
 
-        return IntelligenceOverviewRead(
+        payload = IntelligenceOverviewRead(
             intelligence_feature_enabled=True,
             wedge="document-intelligence",
             document_type_counts=dict(type_counter),
@@ -401,6 +428,11 @@ class ProductIntelligenceService:
             open_tasks=open_task_reads,
             spotlight_documents=spotlight_documents[:12],
         )
+        self._overview_cache[cache_key] = (
+            now + self._overview_cache_ttl_seconds,
+            payload,
+        )
+        return payload.model_copy(deep=True)
 
     def _classify_document(
         self, *, document: Document, lowered: str
@@ -567,22 +599,48 @@ class ProductIntelligenceService:
             validation_meta = task_validation_metadata(validated)
             task_payload = dict(candidate.suggested_task_payload)
             task_payload.update(validation_meta)
+            review_status = validated.status
+            effective_priority = "low" if review_status == "suggested" else priority
+            effective_presentation = (
+                "suggestion" if review_status == "suggested" else presentation
+            )
+            suggested_owner_roles = self._suggested_owner_roles(
+                queue_name=queue_name, task_type=candidate.candidate_type
+            )
+            suggested_reviewer_roles = self._suggested_reviewer_roles(
+                queue_name=queue_name, task_type=candidate.candidate_type
+            )
+            acceptance_criteria = self._acceptance_criteria_for_task(
+                task_type=candidate.candidate_type,
+                review_status=review_status,
+            )
+            task_payload.update(
+                {
+                    "workflow_stage": "queued",
+                    "review_status": review_status,
+                    "blocked_by_task_ids": [],
+                    "acceptance_criteria": acceptance_criteria,
+                    "suggested_owner_roles": suggested_owner_roles,
+                    "suggested_reviewer_roles": suggested_reviewer_roles,
+                }
+            )
             task = WorkflowTask(
+                id=uuid.uuid4(),
                 document_id=document.id,
                 insight_id=insight.id if insight is not None else None,
                 task_type=candidate.candidate_type,
                 queue_name=queue_name,
                 title=candidate.normalized_title[:255],
                 description=description or candidate.extracted_claim,
-                status=validated.status,
-                priority="low" if validated.status == "suggested" else priority,
+                status="queued",
+                priority=effective_priority,
                 owner_label=owner_label,
                 due_at=due_at,
                 metadata_json=intel_prov.task_metadata_with_provenance(
                     task_payload,
                     methods=methods,
                     evidence_tier=evidence_tier,
-                    presentation="suggestion" if validated.status == "suggested" else presentation,
+                    presentation=effective_presentation,
                     notes=validated.reason,
                 ),
             )
@@ -819,7 +877,146 @@ class ProductIntelligenceService:
                 ),
             )
 
+        self._attach_manager_triage_tasks(document=document, tasks=tasks)
         return tasks
+
+    def _attach_manager_triage_tasks(
+        self, *, document: Document, tasks: list[WorkflowTask]
+    ) -> None:
+        triage_targets = [
+            task
+            for task in tasks
+            if task.task_type != "manager_triage_assignment"
+            and (
+                not (task.owner_label or "").strip()
+                or task.priority in {"high", "urgent", "critical"}
+            )
+        ]
+        if not triage_targets:
+            return
+
+        triage_task_id = uuid.uuid4()
+        blocked_task_ids = [str(task.id) for task in triage_targets if task.id]
+        earliest_due = min(
+            (task.due_at for task in triage_targets if task.due_at is not None),
+            default=None,
+        )
+        triage_priority = (
+            "high" if any(task.priority == "high" for task in triage_targets) else "normal"
+        )
+        triage_payload = {
+            "workflow_stage": "queued",
+            "review_status": "needs_review",
+            "blocked_by_task_ids": [],
+            "blocked_task_ids": blocked_task_ids,
+            "acceptance_criteria": self._acceptance_criteria_for_task(
+                task_type="manager_triage_assignment",
+                review_status="needs_review",
+            ),
+            "suggested_owner_roles": ["manager", "project_manager", "team_lead"],
+            "suggested_reviewer_roles": ["operations_manager", "compliance_lead"],
+            "triage_reason": "Auto-generated because one or more tasks are unassigned or high-priority.",
+        }
+        triage_task = WorkflowTask(
+            id=triage_task_id,
+            document_id=document.id,
+            task_type="manager_triage_assignment",
+            queue_name="manager_triage",
+            title=f"Assign owner/reviewer for {len(triage_targets)} queued tasks",
+            description=(
+                "Manager triage required before execution: assign owner and reviewer, "
+                "confirm acceptance checklist, and unblock linked tasks."
+            ),
+            status="queued",
+            priority=triage_priority,
+            owner_label="Manager",
+            due_at=earliest_due,
+            metadata_json=intel_prov.task_metadata_with_provenance(
+                triage_payload,
+                methods=[intel_prov.METHOD_STATIC_CONTROL_CHECKLIST],
+                evidence_tier=intel_prov.EVIDENCE_SUGGESTION,
+                presentation="triage",
+                notes="Auto triage to route ownership and review accountability.",
+            ),
+        )
+        tasks.append(triage_task)
+
+        for task in triage_targets:
+            meta = dict(task.metadata_json or {})
+            existing_blockers = meta.get("blocked_by_task_ids")
+            blockers = (
+                [str(value) for value in existing_blockers if isinstance(value, str)]
+                if isinstance(existing_blockers, list)
+                else []
+            )
+            triage_task_id_value = str(triage_task_id)
+            if triage_task_id_value not in blockers:
+                blockers.append(triage_task_id_value)
+            meta["blocked_by_task_ids"] = blockers
+            meta["workflow_stage"] = "awaiting_manager_triage"
+            task.metadata_json = meta
+
+    @staticmethod
+    def _suggested_owner_roles(*, queue_name: str, task_type: str) -> list[str]:
+        by_queue = {
+            "contracts": ["legal_counsel", "account_manager", "procurement_lead"],
+            "compliance": ["compliance_officer", "security_lead", "risk_manager"],
+            "meetings": ["project_manager", "team_lead"],
+            "triage": ["manager", "operations_manager"],
+            "manager_triage": ["manager", "operations_manager"],
+        }
+        if "compliance" in task_type:
+            return by_queue["compliance"]
+        if "contract" in task_type:
+            return by_queue["contracts"]
+        return by_queue.get(queue_name, ["manager"])
+
+    @staticmethod
+    def _suggested_reviewer_roles(*, queue_name: str, task_type: str) -> list[str]:
+        by_queue = {
+            "contracts": ["legal_reviewer", "finance_controller"],
+            "compliance": ["compliance_reviewer", "security_reviewer"],
+            "meetings": ["project_reviewer", "operations_reviewer"],
+            "triage": ["manager_reviewer"],
+            "manager_triage": ["operations_director"],
+        }
+        if "compliance" in task_type:
+            return by_queue["compliance"]
+        if "contract" in task_type:
+            return by_queue["contracts"]
+        return by_queue.get(queue_name, ["manager_reviewer"])
+
+    @staticmethod
+    def _acceptance_criteria_for_task(
+        *, task_type: str, review_status: str
+    ) -> list[dict[str, object]]:
+        criteria = [
+            {
+                "key": "source_verified",
+                "label": "Verify source excerpt and citation context",
+                "required": True,
+                "completed": False,
+            },
+            {
+                "key": "owner_assigned",
+                "label": "Assign owner",
+                "required": True,
+                "completed": False,
+            },
+            {
+                "key": "reviewer_assigned",
+                "label": "Assign reviewer",
+                "required": review_status != "suggested",
+                "completed": False,
+            },
+            {
+                "key": "due_date_confirmed",
+                "label": "Confirm due date or explicitly mark none",
+                "required": "deadline" in task_type or "action" in task_type,
+                "completed": False,
+            },
+        ]
+        return criteria
 
     def _build_knowledge_graph(
         self,
@@ -938,7 +1135,8 @@ class ProductIntelligenceService:
 
         async with httpx.AsyncClient(timeout=settings.TASK_WEBHOOK_TIMEOUT_SECONDS) as client:
             for task in tasks:
-                if task.status == "suggested":
+                review_status = (task.metadata_json or {}).get("review_status")
+                if review_status == "suggested":
                     continue
                 payload = {
                     "task_id": str(task.id),
@@ -951,10 +1149,12 @@ class ProductIntelligenceService:
                     "description": task.description,
                     "owner_label": task.owner_label,
                     "due_at": task.due_at.isoformat() if task.due_at else None,
-                    "review_status": (task.metadata_json or {}).get("review_status"),
+                    "review_status": review_status,
                     "confidence_level": (task.metadata_json or {}).get("confidence_level"),
                     "confidence_score": (task.metadata_json or {}).get("confidence_score"),
                     "evidence_method": (task.metadata_json or {}).get("evidence_method"),
+                    "blocked_by_task_ids": (task.metadata_json or {}).get("blocked_by_task_ids", []),
+                    "acceptance_criteria": (task.metadata_json or {}).get("acceptance_criteria", []),
                     "metadata_json": task.metadata_json,
                 }
                 try:

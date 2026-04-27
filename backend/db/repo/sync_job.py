@@ -4,7 +4,7 @@ from uuid import UUID
 
 from datetime import datetime, timezone
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -89,3 +89,34 @@ class SyncJobRepository(BaseRepository[SyncJob]):
             stmt = stmt.where(SyncJob.connector_id == connector_id)
         result = await self.session.execute(stmt)
         return list(result.scalars().unique().all())
+
+    async def count_by_connector(
+        self, *, connector_id: UUID | str | None = None
+    ) -> int:
+        stmt = select(func.count()).select_from(SyncJob)
+        if connector_id:
+            stmt = stmt.where(SyncJob.connector_id == connector_id)
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
+
+    async def count_visible_to_user(
+        self,
+        *,
+        user_id: UUID | str,
+        connector_id: UUID | str | None = None,
+    ) -> int:
+        stmt = (
+            select(func.count(SyncJob.id))
+            .select_from(SyncJob)
+            .join(SyncJob.connector)
+            .where(
+                or_(
+                    SyncJob.requested_by_id == user_id,
+                    Connector.owner_user_id == user_id,
+                )
+            )
+        )
+        if connector_id:
+            stmt = stmt.where(SyncJob.connector_id == connector_id)
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())

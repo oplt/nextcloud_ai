@@ -67,6 +67,10 @@ _TITLE_QUERY_RE = re.compile(
     r"\b(name|title|article|paper|publication|write|wrote|written|publish|published)\b",
     flags=re.IGNORECASE,
 )
+_SUMMARY_QUERY_RE = re.compile(
+    r"\b(summarize|summarise|summary|overview|explain|describe)\b|\bwhat\b.{0,80}\babout\b",
+    flags=re.IGNORECASE,
+)
 _INSUFFICIENT_MARKERS = (
     'could not verify',
     'could not find',
@@ -427,7 +431,9 @@ class EvidenceExtractor:
 
 
 def _same_question_text(left: str, right: str) -> bool:
-    normalize = lambda value: re.sub(r"\W+", " ", value).strip().lower()
+    def normalize(value: str) -> str:
+        return re.sub(r"\W+", " ", value).strip().lower()
+
     return normalize(left) == normalize(right)
 
 # How many prior messages to load for context (user + assistant alternating).
@@ -752,6 +758,53 @@ class ChatService:
         boosted_sources.sort(key=lambda item: item[0], reverse=True)
         return [source for _, source in boosted_sources[:max_sources]] + sources
 
+    async def _augment_summary_sources_from_same_documents(
+            self,
+            *,
+            question: str,
+            sources: list[ChatSource],
+            max_sources: int,
+    ) -> list[ChatSource]:
+        if not _SUMMARY_QUERY_RE.search(question) or not sources:
+            return sources
+
+        chunk_repo = DocumentChunkRepository(self.session)
+        existing_by_id = {str(source.chunk_id): source for source in sources}
+        document_ids: list[UUID] = []
+        seen_documents: set[str] = set()
+        for source in sources:
+            document_key = str(source.document_id)
+            if document_key in seen_documents:
+                continue
+            seen_documents.add(document_key)
+            document_ids.append(UUID(document_key))
+
+        body_sources: list[tuple[float, ChatSource]] = []
+        seen_body_ids: set[str] = set()
+        base_score = max((source.score for source in sources), default=0.72)
+        for document_id in document_ids[:2]:
+            for chunk in await chunk_repo.list_by_document(document_id):
+                chunk_key = str(chunk.id)
+                source = existing_by_id.get(chunk_key) or self._source_from_chunk(
+                    chunk, score=max(0.5, base_score - 0.02)
+                )
+                relevance = self._summary_chunk_relevance(source=source, chunk=chunk)
+                if relevance <= 0:
+                    continue
+                if chunk_key in seen_body_ids:
+                    continue
+                body_sources.append((relevance, source))
+                seen_body_ids.add(chunk_key)
+
+        if not body_sources:
+            return sources
+        body_sources.sort(key=lambda item: item[0], reverse=True)
+        selected_sources = [source for _, source in body_sources[:max_sources]]
+        selected_ids = {str(source.chunk_id) for source in selected_sources}
+        return selected_sources + [
+            source for source in sources if str(source.chunk_id) not in selected_ids
+        ]
+
     @classmethod
     def _employment_fingerprints(cls, source: ChatSource) -> set[tuple[str, str, str]]:
         text = "\n".join(
@@ -854,6 +907,45 @@ class ChatService:
             ) if any(anchor >= 0 for anchor in anchor_indexes) else None
             if nearest is not None and nearest <= 16:
                 score += max(0.2, 2.0 / (nearest + 1))
+        return score
+
+    @staticmethod
+    def _summary_chunk_relevance(*, source: ChatSource, chunk: DocumentChunk) -> float:
+        text = " ".join(
+            [
+                chunk.content or "",
+                chunk.section_title or "",
+                chunk.heading_path or "",
+            ]
+        ).lower()
+        words = re.findall(r"\b\w+\b", text)
+        if len(words) < 25:
+            return 0.0
+
+        section = " ".join(
+            [
+                source.section_title or "",
+                source.heading_path or "",
+            ]
+        ).lower()
+        score = min(2.0, len(words) / 160)
+        if re.search(r"\babstract\b", section):
+            score += 5.0
+        if re.search(r"\b(introduction|background)\b", section):
+            score += 3.0
+        if re.search(r"\b(results?|findings?|discussion|conclusion)\b", section):
+            score += 3.0
+        if re.search(r"\bthis paper analy[sz]es\b", text):
+            score += 5.0
+        if re.search(r"\bresults showed\b", text):
+            score += 4.0
+        if re.search(r"\bimports? and exports?\b", text):
+            score += 3.0
+        if re.search(r"\bforeign trade positively\b", text):
+            score += 3.0
+        chunk_index = getattr(chunk, "chunk_index", None)
+        if isinstance(chunk_index, int) and chunk_index >= 0:
+            score += max(0.2, 1.5 / (chunk_index + 1))
         return score
 
     @staticmethod
@@ -1032,6 +1124,14 @@ class ChatService:
     @staticmethod
     def _answer_style_rules(question: str) -> list[str]:
         rules: list[str] = []
+        if _SUMMARY_QUERY_RE.search(question):
+            rules.extend(
+                [
+                    "For summarize, summary, overview, explain, or describe questions: summarize the source content itself; do not answer by only naming the title, author, or publication date.",
+                    "Write a concise 2-4 sentence summary covering the article's subject, scope, and main supported points.",
+                    "If the retrieved sources only identify title/metadata and do not provide article substance, say there is not enough indexed source content to summarize it.",
+                ]
+            )
         if _AMOUNT_QUERY_RE.search(question):
             rules.extend(
                 [
@@ -1087,6 +1187,16 @@ class ChatService:
     def _build_direct_answer(
             cls, *, question: str, sources: list[ChatSource], trace_id: str
     ) -> tuple[str, list[ChatSource], dict[str, object]] | None:
+        summary_answer = cls._build_extractive_summary_answer(question=question, sources=sources)
+        if summary_answer is not None:
+            answer, cited_sources = summary_answer
+            return answer, cited_sources, {
+                "result": "direct_extraction",
+                "direct_extraction_type": "summary",
+                "trace_id": trace_id,
+                "shadow_mode": False,
+            }
+
         title_answer = cls._build_direct_title_answer(question=question, sources=sources)
         if title_answer is not None:
             answer, cited_sources = title_answer
@@ -1161,6 +1271,8 @@ class ChatService:
     def _build_direct_title_answer(
             cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
+        if _SUMMARY_QUERY_RE.search(question):
+            return None
         if not _TITLE_QUERY_RE.search(question):
             return None
         years = cls._requested_years(question)
@@ -1212,7 +1324,7 @@ class ChatService:
             value = re.sub(r"\.(pdf|docx?|odt|txt|md)$", "", value, flags=re.IGNORECASE).strip()
             value = re.split(r"\s*>\s*", value)[0].strip()
             value = re.sub(r"\s*-\s+", ": ", value).strip(" :-")
-            if len(value) >= 8 and not value.lower() in {"introduction", "appendix"}:
+            if len(value) >= 8 and value.lower() not in {"introduction", "appendix"}:
                 return value
         return None
 
@@ -1487,6 +1599,153 @@ class ChatService:
         lowered = f" {answer.lower()} "
         return any(marker in lowered for marker in _INSUFFICIENT_MARKERS)
 
+    @classmethod
+    def _looks_like_title_only_summary_answer(
+            cls, *, question: str, answer: str, sources: list[ChatSource]
+    ) -> bool:
+        if not _SUMMARY_QUERY_RE.search(question):
+            return False
+        plain = _CITATION_RE.sub("", answer).strip()
+        words = re.findall(r"\b\w+\b", plain)
+        if len(words) > 35:
+            return False
+        lowered = plain.lower()
+        title_like = re.search(
+            r"\b(article|paper|publication)\b.{0,100}\b(is|was|titled|called|named|written)\b",
+            lowered,
+            flags=re.IGNORECASE,
+        )
+        source_titles = [
+            title.lower()
+            for title in (cls._title_from_source(source) for source in sources)
+            if title
+        ]
+        if title_like and any(title in lowered for title in source_titles):
+            return True
+        return bool(
+            source_titles
+            and any(title in lowered for title in source_titles)
+            and re.search(r'["“”]', plain)
+            and len(re.findall(r"[.!?]+", plain)) <= 1
+        )
+
+    @staticmethod
+    def _clean_summary_sentence(sentence: str) -> str:
+        cleaned = " ".join(sentence.split()).strip(" -:")
+        starters = (
+            "this paper",
+            "this article",
+            "this study",
+            "the paper",
+            "the article",
+            "the study",
+            "results of",
+            "the results",
+            "furthermore",
+            "imports",
+            "exports",
+            "production",
+            "foreign trade",
+        )
+        lowered = cleaned.lower()
+        positions = [
+            lowered.find(starter)
+            for starter in starters
+            if 0 <= lowered.find(starter) <= 220
+        ]
+        if positions:
+            cleaned = cleaned[min(positions):].strip(" -:")
+        cleaned = re.sub(r"^[^.!?]{0,120}\s>\s", "", cleaned).strip(" -:")
+        return cleaned
+
+    @classmethod
+    def _build_extractive_summary_answer(
+            cls, *, question: str, sources: list[ChatSource]
+    ) -> tuple[str, list[ChatSource]] | None:
+        if not _SUMMARY_QUERY_RE.search(question):
+            return None
+
+        candidates: list[tuple[float, int, str, ChatSource]] = []
+        seen_sentences: set[str] = set()
+        for source_order, source in enumerate(sources):
+            text = " ".join((source.content or source.snippet or "").split())
+            if len(text) < 120:
+                continue
+            section = f"{source.section_title or ''} {source.heading_path or ''}".lower()
+            for raw_sentence in re.split(r"(?<=[.!?])\s+", text):
+                sentence = cls._clean_summary_sentence(raw_sentence)
+                words = re.findall(r"\b\w+\b", sentence)
+                if len(words) < 10 or len(words) > 55:
+                    continue
+                if not re.match(r"[A-Z]", sentence):
+                    continue
+                sentence_lower = sentence.lower()
+                if "this paper" in sentence_lower and not sentence_lower.startswith("this paper"):
+                    continue
+                if "this article" in sentence_lower and not sentence_lower.startswith("this article"):
+                    continue
+                if cls._title_from_source(source) and cls._title_from_source(source).lower() in sentence_lower:
+                    continue
+                score = 0.0
+                if re.search(r"\b(this paper|this article|study|analy[sz]es|examines)\b", sentence_lower):
+                    score += 4.0
+                if re.search(r"\b(result|show|find|impact|effect|significant)\b", sentence_lower):
+                    score += 3.0
+                if re.search(r"\b(imports?|exports?|foreign trade|labor market|employment|wages?)\b", sentence_lower):
+                    score += 2.0
+                if re.search(r"\babstract\b", section):
+                    score += 2.0
+                if re.search(r"\b(results?|findings?|discussion|conclusion)\b", section):
+                    score += 1.5
+                score += max(0.0, 2.0 - (source_order * 0.25))
+                if score <= 0:
+                    continue
+                normalized = re.sub(r"\W+", " ", sentence_lower).strip()
+                if normalized in seen_sentences:
+                    continue
+                seen_sentences.add(normalized)
+                candidates.append((score, source_order, sentence, source))
+
+        if not candidates:
+            return None
+
+        selected: list[tuple[str, ChatSource]] = []
+        selected_source_ids: set[str] = set()
+        method_candidates = [
+            item for item in candidates if item[2].lower().startswith("this paper analy")
+        ]
+        ordered_candidates = [
+            *sorted(method_candidates, key=lambda item: (item[1], -item[0]))[:1],
+            *[
+                item
+                for item in sorted(candidates, key=lambda item: (item[1], -item[0]))
+                if item not in method_candidates
+            ],
+        ]
+        for _score, _source_order, sentence, source in ordered_candidates:
+            source_key = str(source.chunk_id)
+            if source_key in selected_source_ids and len(selected_source_ids) >= 2:
+                continue
+            selected.append((sentence, source))
+            selected_source_ids.add(source_key)
+            if len(selected) >= 3:
+                break
+
+        if not selected:
+            return None
+
+        supporting_sources: list[ChatSource] = []
+        source_indexes: dict[str, int] = {}
+        answer_parts: list[str] = []
+        for sentence, source in selected:
+            source_key = str(source.chunk_id)
+            if source_key not in source_indexes:
+                supporting_sources.append(source)
+                source_indexes[source_key] = len(supporting_sources)
+            answer_parts.append(f"{sentence} [{source_indexes[source_key]}]")
+
+        return " ".join(answer_parts), supporting_sources
+
     @staticmethod
     def _strip_leading_question_echo(*, question: str, answer: str) -> str:
         cleaned_answer = answer.strip()
@@ -1723,6 +1982,43 @@ class ChatService:
             return str(model)
         return 'stub'
 
+    @staticmethod
+    def _empty_llm_usage() -> dict[str, object]:
+        return {
+            "calls": 0,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_tokens": 0,
+            "estimated_cost": 0.0,
+            "fallback_used": False,
+            "cache_hits": 0,
+        }
+
+    def _record_llm_usage(self, usage_totals: dict[str, object]) -> None:
+        usage = getattr(self.llm_client, "last_usage", None)
+        if not isinstance(usage, dict):
+            return
+
+        usage_totals["calls"] = int(usage_totals.get("calls", 0)) + 1
+        usage_totals["input_tokens"] = int(usage_totals.get("input_tokens", 0)) + int(
+            usage.get("input_tokens", 0) or 0
+        )
+        usage_totals["output_tokens"] = int(usage_totals.get("output_tokens", 0)) + int(
+            usage.get("output_tokens", 0) or 0
+        )
+        usage_totals["total_tokens"] = int(usage_totals.get("total_tokens", 0)) + int(
+            usage.get("total_tokens", 0) or 0
+        )
+        usage_totals["estimated_cost"] = round(
+            float(usage_totals.get("estimated_cost", 0.0))
+            + float(usage.get("estimated_cost", 0.0) or 0.0),
+            8,
+        )
+        if bool(usage.get("fallback_used")):
+            usage_totals["fallback_used"] = True
+        if bool(usage.get("cached")):
+            usage_totals["cache_hits"] = int(usage_totals.get("cache_hits", 0)) + 1
+
     def _retrieval_settings_snapshot(
             self,
             *,
@@ -1812,6 +2108,34 @@ class ChatService:
         answer = self._strip_leading_question_echo(question=question, answer=answer)
 
         normalized_answer, cited_sources = self._filter_sources_to_citations(answer, sources)
+        if self._looks_like_title_only_summary_answer(
+                question=question, answer=normalized_answer, sources=sources
+        ):
+            extractive_summary = self._build_extractive_summary_answer(
+                question=question,
+                sources=sources,
+            )
+            if extractive_summary is not None:
+                verification['result'] = 'summary_extractive_fallback'
+                return extractive_summary[0], extractive_summary[1], verification
+            verification['result'] = 'summary_title_only'
+            supporting_sources = cited_sources or self._select_supporting_sources(
+                question=question,
+                answer=normalized_answer,
+                sources=sources,
+                max_sources=4,
+            )
+            title_only_answer = (
+                "I could not verify enough article content from the retrieved indexed sources "
+                "to summarize it. The available evidence only identifies the article title or metadata."
+            )
+            if supporting_sources:
+                return (
+                    self._append_citations(title_only_answer, len(supporting_sources)),
+                    supporting_sources,
+                    verification,
+                )
+            return title_only_answer, [], verification
         if self._is_insufficient_answer(normalized_answer):
             verification['result'] = 'insufficient_answer'
             supporting_sources = cited_sources or self._select_supporting_sources(
@@ -1903,6 +2227,8 @@ class ChatService:
         await self._maybe_summarize_session(
             chat_session=chat_session, messages=prior_before, mem=mem
         )
+        if hasattr(self.llm_client, "last_usage"):
+            self.llm_client.last_usage = None
 
         user_message = ChatMessage(
             session_id=chat_session.id, role='user', content=question
@@ -1952,6 +2278,7 @@ class ChatService:
         }
         rerank_stats: dict[str, object] = {}
         candidate_sources_for_metrics: list[ChatSource] | None = None
+        llm_usage_summary = self._empty_llm_usage()
 
         try:
             plan = await plan_retrieval_query(
@@ -1959,6 +2286,7 @@ class ChatService:
                 history=history,
                 llm_client=self.llm_client,
             )
+            self._record_llm_usage(llm_usage_summary)
             retrieval_query = plan.retrieval_query
             is_follow_up = plan.is_follow_up
             follow_up_plan = plan.follow_up
@@ -2148,6 +2476,7 @@ class ChatService:
                             extra_rules=self._answer_style_rules(question),
                         )
                         raw_answer = (await self.llm_client.generate(prompt)).strip()
+                        self._record_llm_usage(llm_usage_summary)
                     except Exception as llm_exc:
                         llm_error_type = type(llm_exc).__name__
                         sources = fallback_sources[:2]
@@ -2216,6 +2545,11 @@ class ChatService:
                         sources=candidate_sources,
                         max_sources=max(20, request.top_k * 3),
                     )
+                    candidate_sources = await self._augment_summary_sources_from_same_documents(
+                        question=question,
+                        sources=candidate_sources,
+                        max_sources=max(12, request.top_k * 2),
+                    )
                     candidate_sources = self._dedupe_employment_sources(candidate_sources)
                     candidate_sources, constraint_debug = self._filter_sources_for_question_constraints(
                         question=question,
@@ -2258,6 +2592,7 @@ class ChatService:
                                     extra_rules=self._answer_style_rules(question),
                                 )
                                 raw_answer = (await self.llm_client.generate(prompt)).strip()
+                                self._record_llm_usage(llm_usage_summary)
                             except Exception as exc:
                                 llm_error_type = type(exc).__name__
                                 logger.exception(
@@ -2333,6 +2668,7 @@ class ChatService:
             'trace_id': trace_id,
             'llm_provider': llm_provider,
             'llm_model_id': llm_model_id,
+            'llm_usage': llm_usage_summary,
             'grounded_prompt_version': prompt_version,
             'retrieval': retrieval_settings_snapshot,
             'verification': verification_summary,

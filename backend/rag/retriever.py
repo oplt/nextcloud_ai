@@ -133,8 +133,6 @@ class HybridRetriever:
         if not candidates:
             return candidates
 
-        from .cross_encoder_reranker import CrossEncoderReranker
-
         window = max(1, settings.RAG_TRUE_RERANK_TOP_K)
         head = candidates[:window]
         tail = candidates[window:]

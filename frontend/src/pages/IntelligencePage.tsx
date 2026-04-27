@@ -4,8 +4,11 @@ import Alert from "@mui/material/Alert";
 import CardActionArea from "@mui/material/CardActionArea";
 
 import { AppCard } from "../components/ui/AppCard";
+import { EmptyState } from "../components/ui/EmptyState";
+import { StatusBadge } from "../components/ui/StatusBadge";
+import { statusToneFromValue } from "../components/ui/statusTone";
+import { TooltipInfo } from "../components/ui/TooltipInfo";
 import type {
-  Connector,
   DocumentDetail,
   IntelligenceOverview,
   WorkflowTask,
@@ -22,7 +25,6 @@ type IntelligencePageProps = {
   overview: IntelligenceOverview | null;
   loading: boolean;
   error: string | null;
-  connectors: Connector[];
   selectedDocument: DocumentDetail | null;
   onSelectDocument: (documentId: string) => Promise<void>;
 };
@@ -229,6 +231,15 @@ function taskDecisionLabel(task: WorkflowTask): string {
   return "Confirm scope, owner, and next action";
 }
 
+function acceptanceProgress(task: WorkflowTask): string {
+  const criteria = task.acceptance_criteria ?? [];
+  if (criteria.length === 0) {
+    return "No checklist";
+  }
+  const completed = criteria.filter((item) => item.completed === true).length;
+  return `${completed}/${criteria.length} criteria`;
+}
+
 function isHighPriority(task: WorkflowTask): boolean {
   const priority = task.priority?.toLowerCase() ?? "";
   return ["urgent", "high", "critical"].includes(priority);
@@ -303,7 +314,6 @@ export function IntelligencePage({
                                    overview,
                                    loading,
                                    error,
-                                   connectors: _connectors,
                                    selectedDocument,
                                    onSelectDocument,
                                  }: IntelligencePageProps) {
@@ -354,12 +364,11 @@ export function IntelligencePage({
   if (!overview) {
     return (
         <AppCard component="section" className="card card--panel detail-card">
-          <div className="empty-state" style={{ minHeight: 260 }}>
-          <span>
-            No intelligence data yet. Sync or reindex documents to generate
-            structured outputs.
-          </span>
-          </div>
+          <EmptyState
+              title="No intelligence data yet"
+              description="Sync or reindex documents to generate structured outputs."
+              className="workflow-tasks-empty"
+          />
         </AppCard>
     );
   }
@@ -416,11 +425,12 @@ export function IntelligencePage({
         >
           <div>
             <span className="eyebrow">AI review queue</span>
-            <h2>Review source-linked work before approval</h2>
+            <h2>
+              Review source-linked work
+              <TooltipInfo title="Tasks are queued by default; review status and checklist live in task metadata." />
+            </h2>
             <p>
-              Triage AI-generated review items, inspect the source document, and
-              approve only items with enough evidence. Suggestions are not
-              findings until a human verifies them.
+              Triage, verify, assign.
             </p>
           </div>
 
@@ -554,9 +564,11 @@ export function IntelligencePage({
 
               <div className="workflow-tasks-scroll">
                 {visibleOpenTasks.length === 0 ? (
-                    <div className="empty-state workflow-tasks-empty">
-                      <span>No review items match this filter.</span>
-                    </div>
+                    <EmptyState
+                        title="No tasks for this filter"
+                        description="Try a different queue filter."
+                        className="workflow-tasks-empty"
+                    />
                 ) : (
                     <div className="intelligence-task-list">
                       {visibleOpenTasks.map((task) => {
@@ -584,19 +596,26 @@ export function IntelligencePage({
                                     ) : null}
                                   </div>
                                   <span className="intelligence-task-card__pills">
-                              {taskPresentation(task) === "suggestion" ? (
-                                  <span className="pill pill--suggestion">
-                                  Unverified suggestion
-                                </span>
-                              ) : null}
-                                    <span
-                                        className={`pill pill--${confidenceClass(confidence)}`}
-                                    >
-                                {confidenceLabel(confidence)}
-                              </span>
-                              <span className={`pill pill--${task.priority}`}>
-                                {formatKey(task.priority)}
-                              </span>
+                                    {task.review_status ? (
+                                        <StatusBadge
+                                            label={formatKey(task.review_status)}
+                                            tone={statusToneFromValue(task.review_status)}
+                                        />
+                                    ) : null}
+                                    <StatusBadge
+                                        label={confidenceLabel(confidence)}
+                                        tone={confidenceClass(confidence) === "danger" ? "danger" : confidenceClass(confidence) === "warning" ? "warning" : confidenceClass(confidence) === "success" ? "success" : "neutral"}
+                                    />
+                                    <StatusBadge
+                                        label={formatKey(task.priority)}
+                                        tone={statusToneFromValue(task.priority)}
+                                    />
+                                    {task.blocked_by_task_ids?.length ? (
+                                        <StatusBadge
+                                            label={`blocked by ${task.blocked_by_task_ids.length}`}
+                                            tone="warning"
+                                        />
+                                    ) : null}
                             </span>
                                 </div>
                                 <p>
@@ -610,6 +629,9 @@ export function IntelligencePage({
                                 <small>{renderTaskMeta(task)}</small>
                                 <small className="filter-card__meta intelligence-task-card__evidence">
                                   {taskEvidenceLabel(task)}
+                                </small>
+                                <small>
+                                  <strong>Checklist:</strong> {acceptanceProgress(task)}
                                 </small>
                                 <div
                                     className="intelligence-task-card__actions"
@@ -829,12 +851,11 @@ export function IntelligencePage({
                   </section>
                 </>
             ) : (
-                <div className="empty-state" style={{ minHeight: 320 }}>
-              <span>
-                Select a review item to inspect the source, evidence, detected
-                signals, and linked entities.
-              </span>
-                </div>
+                <EmptyState
+                    title="Select a review item"
+                    description="Inspect source, evidence, signals, and linked entities."
+                    className="workflow-tasks-empty"
+                />
             )}
           </AppCard>
         </section>

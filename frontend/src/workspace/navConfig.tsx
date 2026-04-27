@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import type { ReactNode } from 'react';
 import HomeOutlinedIcon from '@mui/icons-material/HomeOutlined';
 import HubOutlinedIcon from '@mui/icons-material/HubOutlined';

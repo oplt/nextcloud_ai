@@ -1,4 +1,5 @@
 from __future__ import annotations
+# ruff: noqa: E402
 
 import asyncio
 import sys
@@ -15,7 +16,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from backend.core.config import settings
-from backend.db.models import *
+from backend.db import models as _models
 from backend.db.models import Base
 
 config = context.config
@@ -26,6 +27,7 @@ if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
 target_metadata = Base.metadata
+_ = _models
 
 
 def run_migrations_offline() -> None:

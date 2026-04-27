@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from uuid import UUID
 
-from sqlalchemy import delete, desc, func, select
+from sqlalchemy import Text, cast, delete, desc, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -19,7 +19,7 @@ from ..models import (
 from .base import BaseRepository
 from .document import DocumentRepository
 
-OPEN_WORKFLOW_STATUSES = ("queued", "in_progress", "blocked", "suggested", "needs_review")
+OPEN_WORKFLOW_STATUSES = ("queued", "in_progress", "blocked", "needs_review")
 
 
 @dataclass(slots=True)
@@ -97,7 +97,32 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
         )
         return list(result.scalars().all())
 
-    async def list_open_with_documents(self, *, limit: int = 50) -> list[WorkflowTaskWithDocument]:
+    async def list_open_with_documents(
+        self,
+        *,
+        limit: int = 50,
+        search_query: str | None = None,
+        blocked_by_task_id: UUID | str | None = None,
+    ) -> list[WorkflowTaskWithDocument]:
+        conditions = [WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES)]
+        if blocked_by_task_id:
+            conditions.append(
+                cast(WorkflowTask.metadata_json, Text).ilike(
+                    f"%{str(blocked_by_task_id).strip()}%"
+                )
+            )
+        if search_query:
+            like = f"%{search_query.strip()}%"
+            conditions.append(
+                or_(
+                    WorkflowTask.title.ilike(like),
+                    WorkflowTask.description.ilike(like),
+                    WorkflowTask.queue_name.ilike(like),
+                    cast(WorkflowTask.metadata_json, Text).ilike(like),
+                    Document.file_name.ilike(like),
+                    Document.file_path.ilike(like),
+                )
+            )
         result = await self.session.execute(
             select(WorkflowTask, Document)
             .outerjoin(Document, Document.id == WorkflowTask.document_id)
@@ -105,7 +130,7 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
                 selectinload(WorkflowTask.document),
                 selectinload(WorkflowTask.insight),
             )
-            .where(WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES))
+            .where(*conditions)
             .order_by(
                 desc(WorkflowTask.priority == "high"),
                 WorkflowTask.due_at.asc().nulls_last(),
@@ -119,9 +144,33 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
         ]
 
     async def list_open_with_documents_visible_to_auth(
-        self, *, auth: AuthContext, limit: int = 50
+        self,
+        *,
+        auth: AuthContext,
+        limit: int = 50,
+        search_query: str | None = None,
+        blocked_by_task_id: UUID | str | None = None,
     ) -> list[WorkflowTaskWithDocument]:
         visibility = DocumentRepository.visibility_clause(auth)
+        conditions = [WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES), visibility]
+        if blocked_by_task_id:
+            conditions.append(
+                cast(WorkflowTask.metadata_json, Text).ilike(
+                    f"%{str(blocked_by_task_id).strip()}%"
+                )
+            )
+        if search_query:
+            like = f"%{search_query.strip()}%"
+            conditions.append(
+                or_(
+                    WorkflowTask.title.ilike(like),
+                    WorkflowTask.description.ilike(like),
+                    WorkflowTask.queue_name.ilike(like),
+                    cast(WorkflowTask.metadata_json, Text).ilike(like),
+                    Document.file_name.ilike(like),
+                    Document.file_path.ilike(like),
+                )
+            )
         result = await self.session.execute(
             select(WorkflowTask, Document)
             .join(Document, Document.id == WorkflowTask.document_id)
@@ -129,10 +178,7 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
                 selectinload(WorkflowTask.document),
                 selectinload(WorkflowTask.insight),
             )
-            .where(
-                WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES),
-                visibility,
-            )
+            .where(*conditions)
             .order_by(
                 desc(WorkflowTask.priority == "high"),
                 WorkflowTask.due_at.asc().nulls_last(),

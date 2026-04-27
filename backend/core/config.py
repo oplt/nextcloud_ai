@@ -70,6 +70,14 @@ class Settings(BaseSettings):
     OLLAMA_READINESS_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=60.0)
     OLLAMA_PULL_TIMEOUT_SECONDS: float = Field(default=900.0, ge=30.0, le=3600.0)
     OLLAMA_WARMUP_TIMEOUT_SECONDS: float = Field(default=120.0, ge=5.0, le=900.0)
+    LLM_REQUEST_TIMEOUT_SECONDS: float = Field(default=120.0, ge=1.0, le=900.0)
+    LLM_MAX_RETRIES: int = Field(default=2, ge=0, le=8)
+    LLM_RETRY_BACKOFF_SECONDS: float = Field(default=0.5, ge=0.0, le=10.0)
+    LLM_CACHE_TTL_SECONDS: int = Field(default=600, ge=0, le=86400)
+    LLM_CACHE_MAX_ENTRIES: int = Field(default=1000, ge=0, le=100000)
+    LLM_FALLBACK_PROVIDER: Literal["stub", "none"] = "stub"
+    LLM_COST_INPUT_PER_1K: float = Field(default=0.0, ge=0.0)
+    LLM_COST_OUTPUT_PER_1K: float = Field(default=0.0, ge=0.0)
 
     CHAT_VERIFICATION_SHADOW_MODE: bool = False
 

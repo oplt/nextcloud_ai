@@ -4,6 +4,8 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID
 
+from pydantic import BaseModel
+
 from .common_schema import TimestampedSchema
 from .connector_schema import ConnectorRead
 
@@ -24,3 +26,10 @@ class SyncJobRead(TimestampedSchema):
     payload_json: dict[str, Any] | None = None
     result_json: dict[str, Any] | None = None
     connector: ConnectorRead | None = None
+
+
+class SyncJobListRead(BaseModel):
+    items: list[SyncJobRead]
+    total: int
+    page: int
+    page_size: int

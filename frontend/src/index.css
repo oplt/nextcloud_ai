@@ -3352,3 +3352,126 @@ label > small,
 .selected-intelligence-document::-webkit-scrollbar-track {
   background: transparent;
 }
+
+.status-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.7rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  border: 1px solid transparent;
+  margin-right: 0.35rem;
+}
+
+.status-badge--neutral {
+  background: rgba(148, 163, 184, 0.2);
+  color: #475569;
+  border-color: rgba(71, 85, 105, 0.2);
+}
+
+.status-badge--success {
+  background: rgba(16, 185, 129, 0.18);
+  color: #047857;
+  border-color: rgba(4, 120, 87, 0.22);
+}
+
+.status-badge--warning {
+  background: rgba(245, 158, 11, 0.2);
+  color: #b45309;
+  border-color: rgba(180, 83, 9, 0.24);
+}
+
+.status-badge--danger {
+  background: rgba(239, 68, 68, 0.18);
+  color: #b91c1c;
+  border-color: rgba(185, 28, 28, 0.25);
+}
+
+.status-badge--info {
+  background: rgba(37, 99, 235, 0.17);
+  color: #1d4ed8;
+  border-color: rgba(29, 78, 216, 0.25);
+}
+
+.empty-state--ui {
+  min-height: 10rem;
+  gap: 0.5rem;
+}
+
+.empty-state__icon {
+  display: grid;
+  place-items: center;
+  width: 2.25rem;
+  height: 2.25rem;
+  border-radius: 999px;
+  background: rgba(148, 163, 184, 0.22);
+  color: #475569;
+}
+
+.empty-state__action {
+  margin-top: 0.35rem;
+}
+
+.drawer-form {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.drawer-form__header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: flex-start;
+  padding: 1rem 1rem 0.5rem;
+  border-bottom: 1px solid var(--line);
+}
+
+.drawer-form__header h3 {
+  margin: 0;
+}
+
+.drawer-form__header p {
+  margin: 0.35rem 0 0;
+  color: var(--text-soft);
+  font-size: 0.85rem;
+}
+
+.drawer-form__content {
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.drawer-form__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.75rem 1rem;
+  border-top: 1px solid var(--line);
+}
+
+.documents-controls {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+}
+
+.filter-card--compact {
+  padding: 1rem 1.1rem;
+}
+
+.data-table__header-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.tooltip-info {
+  margin-left: 0.35rem;
+  color: var(--text-soft);
+}

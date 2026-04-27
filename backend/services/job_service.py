@@ -20,6 +20,14 @@ class SyncJobReservation:
     created: bool
 
 
+@dataclass(slots=True)
+class SyncJobPage:
+    items: list[SyncJob]
+    total: int
+    page: int
+    page_size: int
+
+
 class JobService:
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -79,21 +87,61 @@ class JobService:
         return reservation.job
 
     async def list_jobs(
-        self, connector_id: str | None = None, *, limit: int = 100
+        self,
+        connector_id: str | None = None,
+        *,
+        offset: int = 0,
+        limit: int = 100,
     ) -> list[SyncJob]:
         if connector_id:
-            return await self.repo.list_by_connector(connector_id, limit=limit)
-        return await self.repo.list(limit=limit, order_by=SyncJob.created_at.desc())
+            return await self.repo.list_by_connector(
+                connector_id, offset=offset, limit=limit
+            )
+        return await self.repo.list(
+            offset=offset, limit=limit, order_by=SyncJob.created_at.desc()
+        )
 
     async def list_jobs_for_actor(
-        self, *, actor: User, connector_id: str | None = None, limit: int = 100
+        self,
+        *,
+        actor: User,
+        connector_id: str | None = None,
+        offset: int = 0,
+        limit: int = 100,
     ) -> list[SyncJob]:
         actor_auth = _user_to_auth(actor)
         if actor_auth.is_superuser:
-            return await self.list_jobs(connector_id=connector_id, limit=limit)
+            return await self.list_jobs(
+                connector_id=connector_id, offset=offset, limit=limit
+            )
         return await self.repo.list_visible_to_user(
-            user_id=actor.id, connector_id=connector_id, limit=limit
+            user_id=actor.id, connector_id=connector_id, offset=offset, limit=limit
         )
+
+    async def list_jobs_page_for_actor(
+        self,
+        *,
+        actor: User,
+        connector_id: str | None = None,
+        page: int = 1,
+        page_size: int = 50,
+    ) -> SyncJobPage:
+        offset = max(0, (page - 1) * page_size)
+        items = await self.list_jobs_for_actor(
+            actor=actor,
+            connector_id=connector_id,
+            offset=offset,
+            limit=page_size,
+        )
+        actor_auth = _user_to_auth(actor)
+        if actor_auth.is_superuser:
+            total = await self.repo.count_by_connector(connector_id=connector_id)
+        else:
+            total = await self.repo.count_visible_to_user(
+                user_id=actor.id,
+                connector_id=connector_id,
+            )
+        return SyncJobPage(items=items, total=total, page=page, page_size=page_size)
 
     async def get_job(self, job_id: str) -> SyncJob:
         job = await self.repo.get(job_id)

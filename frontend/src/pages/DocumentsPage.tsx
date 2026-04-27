@@ -4,6 +4,8 @@ import Drawer from '@mui/material/Drawer';
 
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
+import { DrawerForm } from '../components/ui/DrawerForm';
+import { EmptyState } from '../components/ui/EmptyState';
 import { AppSelectField } from '../components/ui/AppSelectField';
 import { AppTextField } from '../components/ui/AppTextField';
 import type { Connector, DocumentDetail, DocumentFilterFormState, DocumentSummary } from '../types/api';
@@ -69,6 +71,7 @@ export function DocumentsPage({
   const [sortDirection, setSortDirection] = useState<SortDirection>('desc');
   const [currentPage, setCurrentPage] = useState(1);
   const [viewerOpen, setViewerOpen] = useState(false);
+  const [filtersOpen, setFiltersOpen] = useState(false);
 
   const availableMimeTypes = useMemo(
     () =>
@@ -156,6 +159,22 @@ export function DocumentsPage({
 
   const totalPages = Math.max(1, Math.ceil(sortedDocuments.length / ROWS_PER_PAGE));
   const effectiveCurrentPage = Math.min(currentPage, totalPages);
+  const activeFilterCount = useMemo(
+    () =>
+      [
+        filters.query,
+        filters.connector_id,
+        filters.mime_type,
+        filters.path_prefix,
+        filters.modified_after,
+        filters.modified_before,
+        filters.document_type,
+        filters.business_domain,
+        filters.parse_status,
+        filters.needs_review ? 'needs_review' : '',
+      ].filter(Boolean).length,
+    [filters],
+  );
 
   const paginatedDocuments = useMemo(() => {
     const start = (effectiveCurrentPage - 1) * ROWS_PER_PAGE;
@@ -205,17 +224,43 @@ export function DocumentsPage({
             Refreshing document catalog…
           </Alert>
         ) : null}
-        <AppCard component="section" className="card filter-card">
+        <AppCard component="section" className="card filter-card filter-card--compact">
           <header className="panel-header">
             <div>
-              <h3>Document filters</h3>
-              <p className="filter-card__meta">Slice the catalog by connector, file type, path, and modified date.</p>
+              <h3>Catalog controls</h3>
+              <p className="filter-card__meta">
+                {activeFilterCount > 0
+                  ? `${activeFilterCount} filters active`
+                  : 'No active filters'}
+              </p>
             </div>
-            <AppButton type="button" variant="outlined" onClick={() => updateFilters(INITIAL_FILTERS)}>
-              Reset
-            </AppButton>
+            <div className="documents-controls">
+              <AppButton type="button" variant="outlined" onClick={() => setFiltersOpen(true)}>
+                Filters
+              </AppButton>
+              <AppButton type="button" variant="text" onClick={() => updateFilters(INITIAL_FILTERS)}>
+                Reset
+              </AppButton>
+            </div>
           </header>
+        </AppCard>
 
+        <DrawerForm
+          open={filtersOpen}
+          onClose={() => setFiltersOpen(false)}
+          title="Document filters"
+          description="Slice the catalog by connector, type, path, and review signals."
+          actions={
+            <>
+              <AppButton type="button" variant="text" onClick={() => updateFilters(INITIAL_FILTERS)}>
+                Reset
+              </AppButton>
+              <AppButton type="button" onClick={() => setFiltersOpen(false)}>
+                Apply
+              </AppButton>
+            </>
+          }
+        >
           <div className="filter-grid">
             <AppTextField
               label="Search"
@@ -315,22 +360,29 @@ export function DocumentsPage({
               InputLabelProps={{ shrink: true }}
             />
           </div>
-        </AppCard>
+        </DrawerForm>
 
-        <DocumentTable
-          documents={paginatedDocuments}
-          totalDocuments={sortedDocuments.length}
-          selectedDocumentId={selectedDocumentId}
-          sortColumn={sortColumn}
-          sortDirection={sortDirection}
-          currentPage={effectiveCurrentPage}
-          totalPages={totalPages}
-          rowsPerPage={ROWS_PER_PAGE}
-          sectionCollapsible
-          onPageChange={setCurrentPage}
-          onSort={handleSort}
-          onSelect={(document) => void handleSelectDocument(document)}
-        />
+        {sortedDocuments.length === 0 ? (
+          <EmptyState
+            title="No matching documents"
+            description="Adjust filters or run a new connector sync."
+          />
+        ) : (
+          <DocumentTable
+            documents={paginatedDocuments}
+            totalDocuments={sortedDocuments.length}
+            selectedDocumentId={selectedDocumentId}
+            sortColumn={sortColumn}
+            sortDirection={sortDirection}
+            currentPage={effectiveCurrentPage}
+            totalPages={totalPages}
+            rowsPerPage={ROWS_PER_PAGE}
+            sectionCollapsible
+            onPageChange={setCurrentPage}
+            onSort={handleSort}
+            onSelect={(document) => void handleSelectDocument(document)}
+          />
+        )}
       </div>
 
       <Drawer

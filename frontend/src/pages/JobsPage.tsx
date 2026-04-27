@@ -5,7 +5,11 @@ import Alert from '@mui/material/Alert';
 
 import { AppButton } from '../components/ui/AppButton';
 import { AppCard } from '../components/ui/AppCard';
+import { EmptyState } from '../components/ui/EmptyState';
 import { AppSelectField } from '../components/ui/AppSelectField';
+import { StatusBadge } from '../components/ui/StatusBadge';
+import { statusToneFromValue } from '../components/ui/statusTone';
+import { TooltipInfo } from '../components/ui/TooltipInfo';
 import type { Connector, SyncJob } from '../types/api';
 
 type JobsPageProps = {
@@ -98,12 +102,12 @@ function JobProgressBar({ job }: { job: SyncJob }) {
 
 function EmptyJobs() {
   return (
-    <div className="empty-state jobs-empty-state">
-      <div className="empty-state-icon" aria-hidden="true">
-        <ScheduleOutlinedIcon fontSize="medium" />
-      </div>
-      <span>No jobs available for the current filters.</span>
-    </div>
+    <EmptyState
+      title="No jobs for this filter"
+      description="Try changing status or connector filters."
+      icon={<ScheduleOutlinedIcon fontSize="medium" />}
+      className="jobs-empty-state"
+    />
   );
 }
 
@@ -133,6 +137,7 @@ export function JobsPage({
   useEffect(() => {
     const raw = (searchParams.get('status') ?? '').toLowerCase();
     if (raw === 'failed' || raw === 'active' || raw === 'completed' || raw === 'all') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setStatusFilter(raw as JobFilter);
     }
   }, [searchParams]);
@@ -176,7 +181,10 @@ export function JobsPage({
       <AppCard component="section" className="card jobs-board">
         <header className="panel-header jobs-board__header">
           <div>
-            <h3>Background jobs</h3>
+            <h3>
+              Background jobs
+              <TooltipInfo title="Jobs are auto-polled and cached to reduce duplicate network requests." />
+            </h3>
             <p className="jobs-board__meta">
               {refreshing ? 'Polling…' : 'Auto-refresh every 5 seconds'}
               {lastUpdatedAt ? ` · Updated ${formatTimestamp(lastUpdatedAt)}` : ''}
@@ -235,9 +243,9 @@ export function JobsPage({
                     <div className="jobs-page__headline">
                       <strong>{connectorName}</strong>
                       <div className="jobs-page__pills">
-                        <span className={`pill pill--${job.status}`}>{job.status}</span>
+                        <StatusBadge label={job.status} tone={statusToneFromValue(job.status)} />
                         {job.retry_count > 0 ? (
-                          <span className="pill pill--pending">retry {job.retry_count}</span>
+                          <StatusBadge label={`retry ${job.retry_count}`} tone="warning" />
                         ) : null}
                       </div>
                     </div>

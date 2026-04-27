@@ -129,6 +129,13 @@ export type SyncJob = {
   updated_at: string;
 };
 
+export type SyncJobListResponse = {
+  items: SyncJob[];
+  total: number;
+  page: number;
+  page_size: number;
+};
+
 export type DocumentSummary = {
   id: string;
   connector_id: string | null;
@@ -179,6 +186,13 @@ export type DocumentSummary = {
   needs_review: boolean;
   created_at: string;
   updated_at: string;
+};
+
+export type DocumentListResponse = {
+  items: DocumentSummary[];
+  total: number;
+  page: number;
+  page_size: number;
 };
 
 export type DocumentChunk = {
@@ -248,6 +262,11 @@ export type WorkflowTask = {
   reason?: string | null;
   recommended_action?: string | null;
   review_status?: 'suggested' | 'needs_review' | 'approved' | 'dismissed' | string | null;
+  workflow_stage?: string | null;
+  blocked_by_task_ids?: string[];
+  acceptance_criteria?: Array<Record<string, unknown>>;
+  suggested_owner_roles?: string[];
+  suggested_reviewer_roles?: string[];
   document_file_name?: string | null;
   document_file_path?: string | null;
   document_connector_id?: string | null;
@@ -441,6 +460,8 @@ export type DocumentListFilters = {
   source_type?: string | null;
   needs_review?: boolean | null;
   low_confidence?: boolean | null;
+  page?: number;
+  page_size?: number;
 };
 
 export type DocumentFilterFormState = {
