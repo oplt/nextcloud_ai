@@ -7,7 +7,7 @@ services:
       - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./deployment/postgres/init:/docker-entrypoint-initdb.d:ro
+      - ./deployment/postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -64,6 +64,9 @@ services:
 
         echo "Running Alembic migrations against: $$DATABASE_URL"
 
+        # Defense in depth for existing volumes created before postgres-init SQL.
+        # Extension creation also lives in Alembic (00c7539a7dcd + a1b2c3d4e5f6).
+        # Do not patch migration source files at runtime.
         echo "Ensuring pgvector extension exists..."
         python - <<'PYVEC'
         import asyncio
@@ -80,27 +83,6 @@ services:
 
         asyncio.run(main())
         PYVEC
-
-        mkdir -p backend/alembic/versions
-
-        if ! find backend/alembic/versions -maxdepth 1 -type f -name "*.py" | grep -q .; then
-          echo "No Alembic revision files found. Generating initial migration..."
-          alembic -c backend/alembic.ini revision --autogenerate -m "generate tables"
-        else
-          echo "Alembic revision files found. Skipping autogenerate."
-        fi
-
-        GENERATED_REVISION="$$(ls -t backend/alembic/versions/*.py | head -n 1)"
-
-        if grep -q "pgvector.sqlalchemy" "$$GENERATED_REVISION" && ! grep -q "import pgvector" "$$GENERATED_REVISION"; then
-          echo "Patching generated migration with pgvector import..."
-          sed -i '/import sqlalchemy as sa/a import pgvector' "$$GENERATED_REVISION"
-        fi
-
-        if grep -q "VECTOR" "$$GENERATED_REVISION" && ! grep -q "CREATE EXTENSION IF NOT EXISTS vector" "$$GENERATED_REVISION"; then
-          echo "Patching generated migration with pgvector extension creation..."
-          sed -i '/def upgrade()/a\    op.execute("CREATE EXTENSION IF NOT EXISTS vector")' "$$GENERATED_REVISION"
-        fi
 
         echo "Applying migrations..."
         alembic -c backend/alembic.ini upgrade head

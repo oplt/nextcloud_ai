@@ -4,7 +4,6 @@ import json
 import logging
 import re
 import uuid
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -14,9 +13,19 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..ai.citations import build_snippet
 from ..ai.follow_up_classifier import FollowUpClassification
 from ..ai import session_memory as chat_memory
-from ..ai.llm_client import LLMClientFactory, LLMClientProtocol
+from ..ai.llm_client import LLMClientFactory, LLMClientProtocol, consume_generation_usage
 from ..ai.prompt_builder import GROUNDED_PROMPT_VERSION, build_grounded_prompt
-from ..ai.rag_postprocess import rerank_and_truncate_sources
+from ..ai.ollama_llm_client import LLMTimeoutError
+from ..rag.context_packer import pack_evidence_for_prompt
+from ..rag import evidence_verifier as evidence_check
+from ..rag.evidence_extractor import (
+    EvidenceExtractor,
+    EvidenceMatch,
+    AMOUNT_CONTEXT_RE as _AMOUNT_CONTEXT_RE,
+    MONEY_RE as _MONEY_RE,
+    PIPE_RANGE_ROW_RE as _PIPE_RANGE_ROW_RE,
+    YEAR_RANGE_RE as _YEAR_RANGE_RE,
+)
 from .query_writer import plan_retrieval_query
 from ..core import observability
 from ..core.config import settings
@@ -42,23 +51,13 @@ _AMOUNT_QUERY_RE = re.compile(
     r"\b(amount|total|balance|due|pay|payable|paid|cost|price|invoice|factuur|bill|charge)\b",
     flags=re.IGNORECASE,
 )
-_MONEY_RE = re.compile(
-    r"(?:"
-    r"€\s*\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?"
-    r"|\d{1,3}(?:[.,\s]\d{3})*[.,]\d{2}\s*(?:eur|euro|€)"
-    r"|\b(?:eur|euro)\s*\d{1,3}(?:[.,\s]\d{3})*(?:[.,]\d{1,2})?"
-    r")",
-    flags=re.IGNORECASE,
-)
-_AMOUNT_CONTEXT_RE = re.compile(
-    r"\b(total|amount|balance|due|payable|pay|invoice|factuur|bill|charge|incl|btw|vat|te betalen|bedrag)\b",
-    flags=re.IGNORECASE,
-)
 _DUE_DATE_QUERY_RE = re.compile(
     r"\b(due date|deadline|payment date|pay before|pay by|te betalen voor|vervaldatum)\b|\bwhen\b.*\b(due|pay|payable)\b",
     flags=re.IGNORECASE,
 )
-_DATE_VALUE_RE = re.compile(r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b")
+_DATE_VALUE_RE = re.compile(
+    r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:19|20)\d{2}[/-]\d{1,2}[/-]\d{1,2}\b"
+)
 _DUE_DATE_CONTEXT_RE = re.compile(
     r"\b(due|deadline|payable|pay before|pay by|payment|te betalen voor|vervaldatum)\b",
     flags=re.IGNORECASE,
@@ -72,27 +71,19 @@ _SUMMARY_QUERY_RE = re.compile(
     flags=re.IGNORECASE,
 )
 _INSUFFICIENT_MARKERS = (
-    'could not verify',
-    'could not find',
-    'not enough',
-    'insufficient',
-    'do not have enough',
-    'no indexed source',
-    'no source',
+    "could not verify",
+    "could not find",
+    "not enough",
+    "insufficient",
+    "do not have enough",
+    "no indexed source",
+    "no source",
 )
 _DEICTIC_FOLLOW_UP_RE = re.compile(
     r"\b(it|its|they|them|this|that|these|those|there|here|same)\b",
     flags=re.IGNORECASE,
 )
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
-_YEAR_RANGE_RE = re.compile(
-    r"\b((?:19|20)\d{2})\b.{0,48}?(?:-|to|through|until|–|—).{0,48}?\b((?:19|20)\d{2}|present|current|now)\b",
-    flags=re.IGNORECASE,
-)
-_PIPE_RANGE_ROW_RE = re.compile(
-    r"(?P<label>[^|\n]{2,120}?)\s*\|\s*(?P<context>[^|\n]{2,100}?)\s*\|\s*(?P<start>(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})\s*[-–—]\s*(?P<end>(?:(?:[A-Z][a-z]{2,8}\s+)?(?:19|20)\d{2})|present|current|now)",
-    flags=re.IGNORECASE,
-)
 _START_WORK_QUERY_RE = re.compile(
     r"\bwhen\b.{0,50}\b(?:start|started|begin|began|join|joined)\b.{0,80}\b(?:work|working|role|job|position|employment|at)\b",
     flags=re.IGNORECASE,
@@ -160,274 +151,12 @@ _AMOUNT_QUERY_TERMS = {
     "charge",
 }
 
-_FIELD_VALUE_RE = re.compile(
-    r"(?P<field>[A-Za-z][A-Za-z0-9 _./\-]{1,70})\s*(?:[:=]|\|)\s*(?P<value>[^|\n]{1,180})",
-    flags=re.IGNORECASE,
-)
-_START_MARKER_RE = re.compile(
-    r"\b(?:since|from|started|start(?:ed)?\s+(?:in|on)?|joined|join(?:ed)?\s+(?:in|on)?|began|begin(?:s)?\s+(?:in|on)?)\b",
-    flags=re.IGNORECASE,
-)
 _MONTH_YEAR_RE = re.compile(
     r"\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|"
     r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:19|20)\d{2}\b",
     flags=re.IGNORECASE,
 )
 
-
-@dataclass(slots=True)
-class EvidenceMatch:
-    """Reusable direct-evidence match used before grounded generation."""
-
-    kind: str
-    value: str
-    source: ChatSource
-    score: float
-    label: str = ""
-    context: str = ""
-    start: str = ""
-    end: str = ""
-
-
-class EvidenceExtractor:
-    """Small, domain-neutral extraction primitives for common RAG answers.
-
-    These methods intentionally extract evidence shapes, not business-domain answers.
-    Domain answer builders can combine them with question intent and source scoring.
-    """
-
-    @staticmethod
-    def source_text(source: ChatSource) -> str:
-        return " ".join(
-            part
-            for part in [
-                source.content or "",
-                source.snippet or "",
-                source.section_title or "",
-                source.heading_path or "",
-                source.file_name or "",
-                source.file_path or "",
-                ]
-            if part
-        )
-
-    @staticmethod
-    def lines(source: ChatSource) -> list[str]:
-        text = "\n".join(
-            part
-            for part in [
-                source.content or "",
-                source.snippet or "",
-                source.section_title or "",
-                source.heading_path or "",
-                ]
-            if part
-        )
-        out: list[str] = []
-        for raw_line in text.splitlines():
-            line = " ".join(raw_line.split()).strip()
-            if line:
-                out.append(line)
-        if not out and text.strip():
-            out.append(" ".join(text.split()))
-        return out
-
-    @staticmethod
-    def normalize_entity_terms(terms: list[str]) -> list[str]:
-        return [re.sub(r"[^a-z0-9]+", "", term.lower()) for term in terms if term]
-
-    @classmethod
-    def entity_match_score(cls, entity_terms: list[str], text: str) -> float:
-        if not entity_terms:
-            return 0.0
-        normalized_text = re.sub(r"[^a-z0-9]+", "", text.lower())
-        score = 0.0
-        for term in cls.normalize_entity_terms(entity_terms):
-            if not term:
-                continue
-            if term in normalized_text:
-                score += 1.0
-            elif len(term) >= 6 and term[:6] in normalized_text:
-                score += 0.7
-        return score
-
-    @classmethod
-    def date_range_extractor(cls, sources: list[ChatSource]) -> list[EvidenceMatch]:
-        matches: list[EvidenceMatch] = []
-        for source in sources:
-            for line in cls.lines(source):
-                for match in _PIPE_RANGE_ROW_RE.finditer(line):
-                    label = " ".join(match.group("label").split()).strip(":- ")
-                    context = " ".join(match.group("context").split()).strip(":- ")
-                    start = match.group("start").strip()
-                    end = match.group("end").strip()
-                    matches.append(
-                        EvidenceMatch(
-                            kind="date_range",
-                            value=f"{start} - {end}",
-                            source=source,
-                            score=source.score + 0.30,
-                            label=label,
-                            context=context,
-                            start=start,
-                            end=end,
-                        )
-                    )
-                for match in _YEAR_RANGE_RE.finditer(line):
-                    start = match.group(1).strip()
-                    end = match.group(2).strip()
-                    context_start = max(0, match.start() - 120)
-                    context_end = min(len(line), match.end() + 120)
-                    context = " ".join(line[context_start:context_end].split()).strip(":- ")
-                    matches.append(
-                        EvidenceMatch(
-                            kind="date_range",
-                            value=f"{start} - {end}",
-                            source=source,
-                            score=source.score + 0.15,
-                            label=context,
-                            context=context,
-                            start=start,
-                            end=end,
-                        )
-                    )
-        return matches
-
-    @classmethod
-    def amount_extractor(
-            cls, sources: list[ChatSource], *, entity_terms: list[str] | None = None
-    ) -> list[EvidenceMatch]:
-        matches: list[EvidenceMatch] = []
-        terms = entity_terms or []
-        for source in sources:
-            text = cls.source_text(source)
-            entity_score = cls.entity_match_score(terms, text)
-            if terms and entity_score <= 0:
-                continue
-            for match in _MONEY_RE.finditer(text):
-                amount = " ".join(match.group(0).replace("€", " EUR").split())
-                if amount.lower().startswith("eur"):
-                    amount = amount[3:].strip() + " EUR"
-                start = max(0, match.start() - 90)
-                end = min(len(text), match.end() + 90)
-                context = text[start:end]
-                score = source.score + entity_score * 5.0
-                if _AMOUNT_CONTEXT_RE.search(context):
-                    score += 3.0
-                if re.search(r"\b(te betalen|payable|total|invoice total|factuur.*bedrag|bedrag)\b", context, re.I):
-                    score += 4.0
-                matches.append(
-                    EvidenceMatch(
-                        kind="amount", value=amount, source=source, score=score, context=context
-                    )
-                )
-        return sorted(matches, key=lambda item: item.score, reverse=True)
-
-    @classmethod
-    def field_value_extractor(
-            cls,
-            sources: list[ChatSource],
-            *,
-            field_terms: list[str] | None = None,
-            entity_terms: list[str] | None = None,
-    ) -> list[EvidenceMatch]:
-        matches: list[EvidenceMatch] = []
-        fields = [term.lower() for term in (field_terms or [])]
-        entities = entity_terms or []
-        for source in sources:
-            source_text = cls.source_text(source)
-            entity_score = cls.entity_match_score(entities, source_text)
-            if entities and entity_score <= 0:
-                continue
-            for line in cls.lines(source):
-                for match in _FIELD_VALUE_RE.finditer(line):
-                    field = " ".join(match.group("field").split()).strip()
-                    value = " ".join(match.group("value").split()).strip()
-                    if fields and not any(term in field.lower() for term in fields):
-                        continue
-                    matches.append(
-                        EvidenceMatch(
-                            kind="field_value",
-                            value=value,
-                            source=source,
-                            score=source.score + entity_score * 3.0 + 1.5,
-                            label=field,
-                            context=line,
-                        )
-                    )
-        return sorted(matches, key=lambda item: item.score, reverse=True)
-
-    @classmethod
-    def table_row_extractor(
-            cls, sources: list[ChatSource], *, entity_terms: list[str] | None = None
-    ) -> list[EvidenceMatch]:
-        matches: list[EvidenceMatch] = []
-        terms = entity_terms or []
-        for source in sources:
-            for line in cls.lines(source):
-                if "|" not in line or line.count("|") < 2:
-                    continue
-                cells = [" ".join(cell.split()).strip() for cell in line.strip("|").split("|")]
-                cells = [cell for cell in cells if cell]
-                if len(cells) < 2:
-                    continue
-                row_text = " | ".join(cells)
-                entity_score = cls.entity_match_score(terms, row_text)
-                if terms and entity_score <= 0:
-                    continue
-                matches.append(
-                    EvidenceMatch(
-                        kind="table_row",
-                        value=row_text,
-                        source=source,
-                        score=source.score + entity_score * 3.0 + min(len(cells), 6) * 0.1,
-                        label=cells[0],
-                        context=row_text,
-                    )
-                )
-        return sorted(matches, key=lambda item: item.score, reverse=True)
-
-    @classmethod
-    def entity_proximity_extractor(
-            cls,
-            sources: list[ChatSource],
-            *,
-            entity_terms: list[str],
-            value_pattern: re.Pattern[str],
-            context_window: int = 180,
-            require_start_marker: bool = False,
-    ) -> list[EvidenceMatch]:
-        matches: list[EvidenceMatch] = []
-        compact_terms = cls.normalize_entity_terms(entity_terms)
-        if not compact_terms:
-            return matches
-        for source in sources:
-            text = cls.source_text(source)
-            compact_text = re.sub(r"[^a-z0-9]+", "", text.lower())
-            if not any(term and term in compact_text for term in compact_terms):
-                continue
-            for value_match in value_pattern.finditer(text):
-                start = max(0, value_match.start() - context_window)
-                end = min(len(text), value_match.end() + context_window)
-                context = text[start:end]
-                entity_score = cls.entity_match_score(entity_terms, context)
-                if entity_score <= 0:
-                    continue
-                if require_start_marker and not _START_MARKER_RE.search(context):
-                    continue
-                score = source.score + entity_score * 4.0
-                if _START_MARKER_RE.search(context):
-                    score += 3.0
-                matches.append(
-                    EvidenceMatch(
-                        kind="entity_proximity",
-                        value=value_match.group(0),
-                        source=source,
-                        score=score,
-                        context=" ".join(context.split()),
-                    )
-                )
-        return sorted(matches, key=lambda item: item.score, reverse=True)
 
 
 def _same_question_text(left: str, right: str) -> bool:
@@ -436,16 +165,17 @@ def _same_question_text(left: str, right: str) -> bool:
 
     return normalize(left) == normalize(right)
 
+
 # How many prior messages to load for context (user + assistant alternating).
 _HISTORY_WINDOW = 10
 
 
 class ChatService:
     def __init__(
-            self,
-            session: AsyncSession,
-            retrieval_service: RetrievalService | None = None,
-            llm_client: LLMClientProtocol | None = None,
+        self,
+        session: AsyncSession,
+        retrieval_service: RetrievalService | None = None,
+        llm_client: LLMClientProtocol | None = None,
     ) -> None:
         self.session = session
         self.retrieval_service = retrieval_service or RetrievalService(session)
@@ -455,27 +185,27 @@ class ChatService:
         self.audit = AuditService(session)
 
     async def _get_or_create_session(
-            self, *, user: User, request: ChatAskRequest
+        self, *, user: User, request: ChatAskRequest
     ) -> ChatSession:
         if request.session_id:
             return await self._get_session_for_user(request.session_id, user)
 
         chat_session = ChatSession(
-            user_id=user.id, title=request.question.strip()[:80] or 'New chat'
+            user_id=user.id, title=request.question.strip()[:80] or "New chat"
         )
         await self.session_repo.add(chat_session, flush=True)
         return chat_session
 
     async def _get_session_for_user(
-            self,
-            session_id: str | UUID,
-            user: User,
+        self,
+        session_id: str | UUID,
+        user: User,
     ) -> ChatSession:
         existing = await self.session_repo.get(session_id)
         if existing is None:
-            raise NotFoundError('Chat session not found')
+            raise NotFoundError("Chat session not found")
         if existing.user_id != user.id:
-            raise AuthorizationError('Chat session does not belong to this user')
+            raise AuthorizationError("Chat session does not belong to this user")
         return existing
 
     @staticmethod
@@ -483,20 +213,20 @@ class ChatService:
         chat_session.updated_at = datetime.now(timezone.utc)
 
     async def patch_session_memory(
-            self,
-            *,
-            user: User,
-            session_id: str | UUID,
-            payload: ChatMemoryPatchRequest,
+        self,
+        *,
+        user: User,
+        session_id: str | UUID,
+        payload: ChatMemoryPatchRequest,
     ) -> dict[str, object]:
         chat_session = await self._get_session_for_user(session_id, user)
-        mem = chat_memory.normalize_memory(getattr(chat_session, 'memory_json', None))
+        mem = chat_memory.normalize_memory(getattr(chat_session, "memory_json", None))
         if payload.clear:
             mem = chat_memory.empty_memory()
         if payload.items:
             chat_memory.apply_memory_item_patch(mem, payload.items)
         if payload.focus_lock_document_ids is not None:
-            mem['focus_lock_document_ids'] = list(payload.focus_lock_document_ids)[:24]
+            mem["focus_lock_document_ids"] = list(payload.focus_lock_document_ids)[:24]
         chat_memory.prune_expired_items(mem)
         chat_session.memory_json = dict(mem)
         self._touch_session(chat_session)
@@ -507,20 +237,20 @@ class ChatService:
         chat_session = await self._get_session_for_user(session_id, actor)
         await self.session_repo.delete(chat_session)
         await self.audit.log(
-            action='chat.deleted',
-            resource_type='chat_session',
+            action="chat.deleted",
+            resource_type="chat_session",
             resource_id=str(chat_session.id),
-            message='Chat session deleted',
+            message="Chat session deleted",
             user=actor,
         )
         await self.session.commit()
 
     @staticmethod
     def _extract_preferred_document_ids(
-            prior_messages_orm: list[ChatMessage],
+        prior_messages_orm: list[ChatMessage],
     ) -> list[UUID]:
         for msg in reversed(prior_messages_orm):
-            if msg.role != 'assistant':
+            if msg.role != "assistant":
                 continue
             citations = msg.citations_json
             if not citations:
@@ -528,7 +258,7 @@ class ChatService:
             seen: set[str] = set()
             ids: list[UUID] = []
             for citation in citations:
-                raw_id = citation.get('document_id')
+                raw_id = citation.get("document_id")
                 if raw_id and str(raw_id) not in seen:
                     seen.add(str(raw_id))
                     try:
@@ -541,17 +271,17 @@ class ChatService:
 
     @staticmethod
     def _extract_preferred_chunk_refs(
-            prior_messages_orm: list[ChatMessage],
+        prior_messages_orm: list[ChatMessage],
     ) -> list[tuple[UUID, UUID]]:
         for msg in reversed(prior_messages_orm):
-            if msg.role != 'assistant':
+            if msg.role != "assistant":
                 continue
             citations = msg.citations_json or []
             refs: list[tuple[UUID, UUID]] = []
             seen: set[str] = set()
             for citation in citations:
-                raw_chunk_id = citation.get('chunk_id')
-                raw_document_id = citation.get('document_id')
+                raw_chunk_id = citation.get("chunk_id")
+                raw_document_id = citation.get("document_id")
                 if not raw_chunk_id or not raw_document_id:
                     continue
                 try:
@@ -559,7 +289,7 @@ class ChatService:
                     document_id = UUID(str(raw_document_id))
                 except ValueError:
                     continue
-                key = f'{document_id}:{chunk_id}'
+                key = f"{document_id}:{chunk_id}"
                 if key in seen:
                     continue
                 seen.add(key)
@@ -570,26 +300,49 @@ class ChatService:
 
     @staticmethod
     def _looks_like_contextual_follow_up(question: str) -> bool:
-        lowered = f' {question.lower()} '
-        if any(marker in lowered for marker in (' after ', ' before ', ' next ', ' previous ', ' then ', ' later ', ' following ', ' subsequent ', ' prior ')):
+        lowered = f" {question.lower()} "
+        if any(
+            marker in lowered
+            for marker in (
+                " after ",
+                " before ",
+                " next ",
+                " previous ",
+                " then ",
+                " later ",
+                " following ",
+                " subsequent ",
+                " prior ",
+            )
+        ):
             return True
         return bool(_DEICTIC_FOLLOW_UP_RE.search(question))
 
     @staticmethod
     def _neighbor_offsets_for_question(question: str) -> list[int]:
-        lowered = f' {question.lower()} '
-        if any(marker in lowered for marker in (' after ', ' next ', ' then ', ' later ', ' following ', ' subsequent ')):
+        lowered = f" {question.lower()} "
+        if any(
+            marker in lowered
+            for marker in (
+                " after ",
+                " next ",
+                " then ",
+                " later ",
+                " following ",
+                " subsequent ",
+            )
+        ):
             return [1, 2]
-        if any(marker in lowered for marker in (' before ', ' previous ', ' prior ')):
+        if any(marker in lowered for marker in (" before ", " previous ", " prior ")):
             return [-1, -2]
         return [-1, 1]
 
     @staticmethod
     def _source_from_chunk(chunk: DocumentChunk, *, score: float) -> ChatSource:
         document = chunk.document
-        file_name = document.file_name if document is not None else ''
-        file_path = document.file_path if document is not None else ''
-        content = chunk.content or ''
+        file_name = document.file_name if document is not None else ""
+        file_path = document.file_path if document is not None else ""
+        content = chunk.content or ""
         return ChatSource(
             chunk_id=chunk.id,
             document_id=chunk.document_id,
@@ -605,13 +358,19 @@ class ChatService:
         )
 
     async def _augment_follow_up_sources_with_neighbors(
-            self,
-            *,
-            question: str,
-            sources: list[ChatSource],
-            preferred_chunk_refs: list[tuple[UUID, UUID]],
+        self,
+        *,
+        question: str,
+        sources: list[ChatSource],
+        preferred_chunk_refs: list[tuple[UUID, UUID]],
+        auth: AuthContext,
+        document_ids_scope: list[UUID] | None = None,
     ) -> list[ChatSource]:
-        if not sources or not preferred_chunk_refs or not self._looks_like_contextual_follow_up(question):
+        if (
+            not sources
+            or not preferred_chunk_refs
+            or not self._looks_like_contextual_follow_up(question)
+        ):
             return sources
 
         offsets = self._neighbor_offsets_for_question(question)
@@ -624,7 +383,12 @@ class ChatService:
         for document_id, chunk_id in preferred_chunk_refs:
             doc_key = str(document_id)
             if doc_key not in by_doc_chunks:
-                by_doc_chunks[doc_key] = await chunk_repo.list_by_document(document_id)
+                by_doc_chunks[doc_key] = await chunk_repo.list_authorized_by_document(
+                    document_id=document_id,
+                    auth=auth,
+                    document_ids_scope=document_ids_scope,
+                    limit=128,
+                )
             chunks = by_doc_chunks[doc_key]
             index_by_chunk_id = {str(chunk.id): idx for idx, chunk in enumerate(chunks)}
             anchor_index = index_by_chunk_id.get(str(chunk_id))
@@ -654,12 +418,16 @@ class ChatService:
         return [*sources, *neighbor_sources]
 
     async def _build_follow_up_neighbor_sources(
-            self,
-            *,
-            question: str,
-            preferred_chunk_refs: list[tuple[UUID, UUID]],
+        self,
+        *,
+        question: str,
+        preferred_chunk_refs: list[tuple[UUID, UUID]],
+        auth: AuthContext,
+        document_ids_scope: list[UUID] | None = None,
     ) -> list[ChatSource]:
-        if not preferred_chunk_refs or not self._looks_like_contextual_follow_up(question):
+        if not preferred_chunk_refs or not self._looks_like_contextual_follow_up(
+            question
+        ):
             return []
 
         offsets = self._neighbor_offsets_for_question(question)
@@ -671,7 +439,12 @@ class ChatService:
         for document_id, chunk_id in preferred_chunk_refs:
             doc_key = str(document_id)
             if doc_key not in by_doc_chunks:
-                by_doc_chunks[doc_key] = await chunk_repo.list_by_document(document_id)
+                by_doc_chunks[doc_key] = await chunk_repo.list_authorized_by_document(
+                    document_id=document_id,
+                    auth=auth,
+                    document_ids_scope=document_ids_scope,
+                    limit=128,
+                )
             chunks = by_doc_chunks[doc_key]
             index_by_chunk_id = {str(chunk.id): idx for idx, chunk in enumerate(chunks)}
             anchor_index = index_by_chunk_id.get(str(chunk_id))
@@ -696,11 +469,13 @@ class ChatService:
         return sources
 
     async def _augment_question_sources_from_same_documents(
-            self,
-            *,
-            question: str,
-            sources: list[ChatSource],
-            max_sources: int,
+        self,
+        *,
+        question: str,
+        sources: list[ChatSource],
+        max_sources: int,
+        auth: AuthContext,
+        document_ids_scope: list[UUID] | None = None,
     ) -> list[ChatSource]:
         if not sources:
             return sources
@@ -727,17 +502,26 @@ class ChatService:
         boosted_sources: list[tuple[float, ChatSource]] = []
         base_score = max((source.score for source in sources), default=0.72)
         for document_id in document_ids[:3]:
-            chunks = await chunk_repo.list_by_document(document_id)
+            chunks = await chunk_repo.list_authorized_by_document(
+                document_id=document_id,
+                auth=auth,
+                document_ids_scope=document_ids_scope,
+                limit=128,
+            )
             document_key = str(document_id)
             anchor_chunk_ids = source_chunk_ids_by_document.get(document_key, set())
             anchor_indexes = {
-                chunk.chunk_index for chunk in chunks if str(chunk.id) in anchor_chunk_ids
+                chunk.chunk_index
+                for chunk in chunks
+                if str(chunk.id) in anchor_chunk_ids
             }
             for chunk in chunks:
                 chunk_key = str(chunk.id)
                 if chunk_key in existing_ids:
                     continue
-                source = self._source_from_chunk(chunk, score=max(0.5, base_score - 0.01))
+                source = self._source_from_chunk(
+                    chunk, score=max(0.5, base_score - 0.01)
+                )
                 relevance = self._same_document_chunk_relevance(
                     question_terms=query_terms,
                     years=years,
@@ -759,11 +543,13 @@ class ChatService:
         return [source for _, source in boosted_sources[:max_sources]] + sources
 
     async def _augment_summary_sources_from_same_documents(
-            self,
-            *,
-            question: str,
-            sources: list[ChatSource],
-            max_sources: int,
+        self,
+        *,
+        question: str,
+        sources: list[ChatSource],
+        max_sources: int,
+        auth: AuthContext,
+        document_ids_scope: list[UUID] | None = None,
     ) -> list[ChatSource]:
         if not _SUMMARY_QUERY_RE.search(question) or not sources:
             return sources
@@ -783,7 +569,12 @@ class ChatService:
         seen_body_ids: set[str] = set()
         base_score = max((source.score for source in sources), default=0.72)
         for document_id in document_ids[:2]:
-            for chunk in await chunk_repo.list_by_document(document_id):
+            for chunk in await chunk_repo.list_authorized_by_document(
+                document_id=document_id,
+                auth=auth,
+                document_ids_scope=document_ids_scope,
+                limit=128,
+            ):
                 chunk_key = str(chunk.id)
                 source = existing_by_id.get(chunk_key) or self._source_from_chunk(
                     chunk, score=max(0.5, base_score - 0.02)
@@ -803,6 +594,26 @@ class ChatService:
         selected_ids = {str(source.chunk_id) for source in selected_sources}
         return selected_sources + [
             source for source in sources if str(source.chunk_id) not in selected_ids
+        ]
+
+    async def _recheck_sources_authorized(
+        self,
+        *,
+        sources: list[ChatSource],
+        auth: AuthContext,
+        document_ids_scope: list[UUID] | None = None,
+    ) -> list[ChatSource]:
+        if not sources:
+            return sources
+        visible = await DocumentChunkRepository(
+            self.session
+        ).filter_authorized_document_ids(
+            document_ids=[source.document_id for source in sources],
+            auth=auth,
+            document_ids_scope=document_ids_scope,
+        )
+        return [
+            source for source in sources if str(source.document_id) in visible
         ]
 
     @classmethod
@@ -873,13 +684,13 @@ class ChatService:
 
     @classmethod
     def _same_document_chunk_relevance(
-            cls,
-            *,
-            question_terms: list[str],
-            years: list[int],
-            source: ChatSource,
-            chunk: DocumentChunk,
-            anchor_indexes: set[int],
+        cls,
+        *,
+        question_terms: list[str],
+        years: list[int],
+        source: ChatSource,
+        chunk: DocumentChunk,
+        anchor_indexes: set[int],
     ) -> float:
         text = " ".join(
             [
@@ -888,7 +699,7 @@ class ChatService:
                 chunk.heading_path or "",
                 source.file_name or "",
                 source.file_path or "",
-                ]
+            ]
         ).lower()
         score = 0.0
         if question_terms:
@@ -900,11 +711,15 @@ class ChatService:
             if _AMOUNT_CONTEXT_RE.search(text):
                 score += 2.0
         if anchor_indexes:
-            nearest = min(
-                abs(chunk.chunk_index - anchor)
-                for anchor in anchor_indexes
-                if anchor >= 0
-            ) if any(anchor >= 0 for anchor in anchor_indexes) else None
+            nearest = (
+                min(
+                    abs(chunk.chunk_index - anchor)
+                    for anchor in anchor_indexes
+                    if anchor >= 0
+                )
+                if any(anchor >= 0 for anchor in anchor_indexes)
+                else None
+            )
             if nearest is not None and nearest <= 16:
                 score += max(0.2, 2.0 / (nearest + 1))
         return score
@@ -949,7 +764,9 @@ class ChatService:
         return score
 
     @staticmethod
-    def _parse_active_context_document_ids(document_ids: list[str] | None) -> list[UUID]:
+    def _parse_active_context_document_ids(
+        document_ids: list[str] | None,
+    ) -> list[UUID]:
         parsed_ids: list[UUID] = []
         seen_ids: set[str] = set()
         for raw_id in document_ids or []:
@@ -993,8 +810,8 @@ class ChatService:
 
     @staticmethod
     def _build_active_context_documents(
-            sources: list[ChatSource],
-            active_document_ids: list[UUID],
+        sources: list[ChatSource],
+        active_document_ids: list[UUID],
     ) -> list[dict[str, str]]:
         source_documents: dict[str, dict[str, str]] = {}
         for source in sources:
@@ -1002,9 +819,9 @@ class ChatService:
             if document_key in source_documents:
                 continue
             source_documents[document_key] = {
-                'document_id': document_key,
-                'file_name': source.file_name,
-                'file_path': source.file_path,
+                "document_id": document_key,
+                "file_name": source.file_name,
+                "file_path": source.file_path,
             }
 
         documents: list[dict[str, str]] = []
@@ -1017,23 +834,37 @@ class ChatService:
     @staticmethod
     def _build_no_sources_answer() -> str:
         return (
-            'I could not find indexed source material for that question. '
-            'The relevant file may not be synced yet, may not have been chunked and embedded, '
-            'or you may not have access to it.'
+            "I could not find indexed source material for that question. "
+            "The relevant file may not be synced yet, may not have been chunked and embedded, "
+            "or you may not have access to it."
         )
 
     @staticmethod
-    def _build_document_search_answer(results: list[ChatDocumentResult]) -> str:
-        lines = ["I found these matching documents:"]
-        for index, item in enumerate(results[:8], start=1):
+    def _build_document_search_answer(
+        results: list[ChatDocumentResult],
+        *,
+        total: int | None = None,
+    ) -> str:
+        shown = results[:8]
+        if total is None:
+            header = "I found these matching documents:"
+        elif total > len(shown):
+            header = (
+                f"Matched {total} documents. Showing {len(shown)}. "
+                "This list is not the full set."
+            )
+        else:
+            header = f"Matched {total} documents:"
+        lines = [header]
+        for index, item in enumerate(shown, start=1):
             lines.append(f"[{index}] {item.file_name} - {item.file_path}")
         return "\n".join(lines)
 
     @staticmethod
     def _build_empty_answer() -> str:
         return (
-            'I could not produce an answer because the language model returned an empty response. '
-            'Your question was saved in the chat history.'
+            "I could not produce an answer because the language model returned an empty response. "
+            "Your question was saved in the chat history."
         )
 
     @staticmethod
@@ -1045,7 +876,7 @@ class ChatService:
             payload = None
 
         if isinstance(payload, dict):
-            for key in ('error', 'detail', 'message'):
+            for key in ("error", "detail", "message"):
                 value = payload.get(key)
                 if isinstance(value, str) and value.strip():
                     detail = value.strip()
@@ -1057,69 +888,37 @@ class ChatService:
                 detail = response_text
 
         if detail is None:
-            detail = f'HTTP {exc.response.status_code}'
+            detail = f"HTTP {exc.response.status_code}"
 
-        return ' '.join(detail.split())
+        return " ".join(detail.split())
 
     def _build_failure_answer(self, exc: Exception) -> str:
         if isinstance(exc, httpx.TimeoutException):
             return (
-                'I could not answer because the embedding or language model request timed out. '
-                'Your question was saved in the chat history.'
+                "I could not answer because the embedding or language model request timed out. "
+                "Your question was saved in the chat history."
             )
         if isinstance(exc, httpx.HTTPStatusError):
             detail = self._extract_upstream_error_detail(exc)
             return (
-                'I could not answer because the AI backend returned an error: '
-                f'{detail}. Your question was saved in the chat history.'
+                "I could not answer because the AI backend returned an error: "
+                f"{detail}. Your question was saved in the chat history."
             )
         if isinstance(exc, httpx.RequestError):
             return (
-                'I could not answer because the embedding or language model service was unreachable. '
-                'Your question was saved in the chat history.'
+                "I could not answer because the embedding or language model service was unreachable. "
+                "Your question was saved in the chat history."
             )
         return (
-            'I could not answer because the retrieval or generation pipeline failed. '
-            'Your question was saved in the chat history.'
+            "I could not answer because the retrieval or generation pipeline failed. "
+            "Your question was saved in the chat history."
         )
 
     @staticmethod
     def _filter_sources_to_citations(
-            answer: str, sources: list[ChatSource]
+        answer: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]]:
-        if not sources:
-            return answer, []
-
-        cited_indexes: list[int] = []
-        seen_indexes: set[int] = set()
-        for match in _CITATION_RE.finditer(answer):
-            source_index = int(match.group(1))
-            if source_index < 1 or source_index > len(sources):
-                continue
-            if source_index in seen_indexes:
-                continue
-            seen_indexes.add(source_index)
-            cited_indexes.append(source_index)
-
-        if not cited_indexes:
-            return answer, []
-
-        remapped_indexes = {
-            original: new
-            for new, original in enumerate(cited_indexes, start=1)
-        }
-
-        filtered_sources = [sources[idx - 1] for idx in cited_indexes]
-        normalized_answer = _CITATION_RE.sub(
-            lambda m: (
-                f"[{remapped_indexes[int(m.group(1))]}]"
-                if int(m.group(1)) in remapped_indexes
-                else ''
-            ),
-            answer,
-        )
-        normalized_answer = re.sub(r'\s{2,}', ' ', normalized_answer).strip()
-        return normalized_answer, filtered_sources
+        return evidence_check.filter_sources_to_citations(answer, sources)
 
     @staticmethod
     def _answer_style_rules(question: str) -> list[str]:
@@ -1161,103 +960,121 @@ class ChatService:
                 source.heading_path or "",
                 source.file_name or "",
                 source.file_path or "",
-                ]
+            ]
         )
-
-    @classmethod
-    def _source_evidence_lines(cls, source: ChatSource) -> list[str]:
-        text = "\n".join(
-            [
-                source.content or "",
-                source.snippet or "",
-                source.section_title or "",
-                source.heading_path or "",
-                ]
-        )
-        lines: list[str] = []
-        for raw_line in text.splitlines():
-            line = " ".join(raw_line.split()).strip()
-            if line:
-                lines.append(line)
-        if not lines and text.strip():
-            lines.append(" ".join(text.split()))
-        return lines
 
     @classmethod
     def _build_direct_answer(
-            cls, *, question: str, sources: list[ChatSource], trace_id: str
+        cls, *, question: str, sources: list[ChatSource], trace_id: str
     ) -> tuple[str, list[ChatSource], dict[str, object]] | None:
-        summary_answer = cls._build_extractive_summary_answer(question=question, sources=sources)
+        summary_answer = cls._build_extractive_summary_answer(
+            question=question, sources=sources
+        )
         if summary_answer is not None:
             answer, cited_sources = summary_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "summary",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "summary",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
 
-        title_answer = cls._build_direct_title_answer(question=question, sources=sources)
+        title_answer = cls._build_direct_title_answer(
+            question=question, sources=sources
+        )
         if title_answer is not None:
             answer, cited_sources = title_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "title",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "title",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
 
-        due_date_answer = cls._build_direct_due_date_answer(question=question, sources=sources)
+        due_date_answer = cls._build_direct_due_date_answer(
+            question=question, sources=sources
+        )
         if due_date_answer is not None:
             answer, cited_sources = due_date_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "due_date",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "due_date",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
 
-        amount_answer = cls._build_direct_amount_answer(question=question, sources=sources)
+        amount_answer = cls._build_direct_amount_answer(
+            question=question, sources=sources
+        )
         if amount_answer is not None:
             answer, cited_sources = amount_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "amount",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "amount",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
 
-        employment_start_answer = cls._build_direct_employment_start_answer(question=question, sources=sources)
+        employment_start_answer = cls._build_direct_employment_start_answer(
+            question=question, sources=sources
+        )
         if employment_start_answer is not None:
             answer, cited_sources = employment_start_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "employment_start",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "employment_start",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
 
-        range_answer = cls._build_direct_range_answer(question=question, sources=sources)
+        range_answer = cls._build_direct_range_answer(
+            question=question, sources=sources
+        )
         if range_answer is not None:
             answer, cited_sources = range_answer
-            return answer, cited_sources, {
-                "result": "direct_extraction",
-                "direct_extraction_type": "date_range_rows",
-                "trace_id": trace_id,
-                "shadow_mode": False,
-            }
+            return (
+                answer,
+                cited_sources,
+                {
+                    "result": "direct_extraction",
+                    "direct_extraction_type": "date_range_rows",
+                    "trace_id": trace_id,
+                    "shadow_mode": False,
+                },
+            )
         return None
 
     @classmethod
     def _build_direct_due_date_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if not _DUE_DATE_QUERY_RE.search(question):
             return None
         entity_terms = cls._direct_answer_entity_terms(question)
         matches = EvidenceExtractor.entity_proximity_extractor(
             sources,
-            entity_terms=entity_terms or ["due", "deadline", "payment", "payable", "vervaldatum"],
+            entity_terms=entity_terms
+            or ["due", "deadline", "payment", "payable", "vervaldatum"],
             value_pattern=_DATE_VALUE_RE,
             context_window=120,
         )
@@ -1269,7 +1086,7 @@ class ChatService:
 
     @classmethod
     def _build_direct_title_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if _SUMMARY_QUERY_RE.search(question):
             return None
@@ -1289,7 +1106,11 @@ class ChatService:
             score = source.score
             if years:
                 score += 3.0
-            if re.search(r"\b(article|paper|journal|publication)\b", evidence, flags=re.IGNORECASE):
+            if re.search(
+                r"\b(article|paper|journal|publication)\b",
+                evidence,
+                flags=re.IGNORECASE,
+            ):
                 score += 2.0
             candidate = (score, title, source)
             if best is None or candidate[0] > best[0]:
@@ -1302,7 +1123,9 @@ class ChatService:
     @staticmethod
     def _source_can_answer_title_query(source: ChatSource, evidence: str) -> bool:
         file_hint = f"{source.file_name or ''} {source.file_path or ''}".lower()
-        if re.search(r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)", file_hint):
+        if re.search(
+            r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)", file_hint
+        ):
             return False
         return bool(
             re.search(
@@ -1314,14 +1137,20 @@ class ChatService:
 
     @staticmethod
     def _title_from_source(source: ChatSource) -> str | None:
-        candidates = [source.file_name or "", source.heading_path or "", source.section_title or ""]
+        candidates = [
+            source.file_name or "",
+            source.heading_path or "",
+            source.section_title or "",
+        ]
         for candidate in candidates:
             value = candidate.strip()
             if not value:
                 continue
             if "/" in value:
                 value = value.split("/")[-1].strip()
-            value = re.sub(r"\.(pdf|docx?|odt|txt|md)$", "", value, flags=re.IGNORECASE).strip()
+            value = re.sub(
+                r"\.(pdf|docx?|odt|txt|md)$", "", value, flags=re.IGNORECASE
+            ).strip()
             value = re.split(r"\s*>\s*", value)[0].strip()
             value = re.sub(r"\s*-\s+", ": ", value).strip(" :-")
             if len(value) >= 8 and value.lower() not in {"introduction", "appendix"}:
@@ -1330,7 +1159,7 @@ class ChatService:
 
     @classmethod
     def _build_direct_amount_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if _DUE_DATE_QUERY_RE.search(question):
             return None
@@ -1346,17 +1175,21 @@ class ChatService:
 
     @classmethod
     def _build_direct_range_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         years = cls._requested_years(question)
         if len(years) < 2:
             return None
         query_start, query_end = min(years), max(years)
-        rows_by_key: dict[tuple[str, int, int], tuple[str, str, str, ChatSource, int, int, int]] = {}
+        rows_by_key: dict[
+            tuple[str, int, int], tuple[str, str, str, ChatSource, int, int, int]
+        ] = {}
         for match in EvidenceExtractor.date_range_extractor(sources):
             if not cls._looks_like_clean_range_label(match.label):
                 continue
-            if match.context and not cls._looks_like_clean_range_label(match.context, allow_short=True):
+            if match.context and not cls._looks_like_clean_range_label(
+                match.context, allow_short=True
+            ):
                 continue
             start_year = cls._first_year(match.start)
             end_year = cls._first_year(match.end) or 9999
@@ -1386,12 +1219,23 @@ class ChatService:
             )
         if not rows_by_key:
             return None
-        rows = sorted(rows_by_key.values(), key=lambda item: (item[4], item[5], item[0].lower()))[:6]
+        rows = sorted(
+            rows_by_key.values(), key=lambda item: (item[4], item[5], item[0].lower())
+        )[:6]
         cited_sources = [row[3] for row in rows]
         lines = [
-            f"- {label} ({context}, {date_range}) [{index}]" if context
+            f"- {label} ({context}, {date_range}) [{index}]"
+            if context
             else f"- {label} ({date_range}) [{index}]"
-            for index, (label, context, date_range, _source, _start, _end, _spec) in enumerate(rows, start=1)
+            for index, (
+                label,
+                context,
+                date_range,
+                _source,
+                _start,
+                _end,
+                _spec,
+            ) in enumerate(rows, start=1)
         ]
         return "\n".join(lines), cited_sources
 
@@ -1415,7 +1259,7 @@ class ChatService:
 
     @classmethod
     def _build_direct_employment_start_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if not _START_WORK_QUERY_RE.search(question):
             return None
@@ -1423,20 +1267,20 @@ class ChatService:
             term
             for term in cls._direct_answer_entity_terms(question)
             if term
-               not in {
-                   "start",
-                   "started",
-                   "begin",
-                   "began",
-                   "join",
-                   "joined",
-                   "work",
-                   "working",
-                   "role",
-                   "job",
-                   "position",
-                   "employment",
-               }
+            not in {
+                "start",
+                "started",
+                "begin",
+                "began",
+                "join",
+                "joined",
+                "work",
+                "working",
+                "role",
+                "job",
+                "position",
+                "employment",
+            }
         ]
         subject = cls._employment_subject(question)
 
@@ -1452,9 +1296,9 @@ class ChatService:
             if _EMPLOYMENT_CONTEXT_RE.search(combined):
                 score += 2.0
             if match.source.file_name and re.search(
-                    r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)",
-                    match.source.file_name,
-                    re.I,
+                r"(^|[^a-z0-9])(cv|resume|curriculum[-_\s]*vitae)([^a-z0-9]|$)",
+                match.source.file_name,
+                re.I,
             ):
                 score += 1.0
             candidate = EvidenceMatch(
@@ -1471,14 +1315,18 @@ class ChatService:
                 best_range = candidate
 
         if best_range is not None:
-            target = cls._employment_target(best_range.label, best_range.context, entity_terms)
+            target = cls._employment_target(
+                best_range.label, best_range.context, entity_terms
+            )
             if best_range.end:
                 return (
                     f"{subject} started working at {target} in {best_range.start} "
                     f"(listed range: {best_range.start} - {best_range.end}) [1]",
                     [best_range.source],
                 )
-            return f"{subject} started working at {target} in {best_range.start} [1]", [best_range.source]
+            return f"{subject} started working at {target} in {best_range.start} [1]", [
+                best_range.source
+            ]
 
         # Generic fallback for free-text CV/resume prose, e.g.
         # "Selahaddin Eyyubi University ... Software Developer ... started in 2021".
@@ -1501,7 +1349,9 @@ class ChatService:
         if proximity_matches:
             best = proximity_matches[0]
             target = cls._employment_target(best.context, "", entity_terms)
-            return f"{subject} started working at {target} in {best.value} [1]", [best.source]
+            return f"{subject} started working at {target} in {best.value} [1]", [
+                best.source
+            ]
 
         return None
 
@@ -1537,7 +1387,9 @@ class ChatService:
     @staticmethod
     def _employment_target(label: str, context: str, entity_terms: list[str]) -> str:
         candidates = [label, context]
-        compact_terms = [re.sub(r"[^a-z0-9]+", "", term.lower()) for term in entity_terms]
+        compact_terms = [
+            re.sub(r"[^a-z0-9]+", "", term.lower()) for term in entity_terms
+        ]
         for candidate in candidates:
             compact_candidate = re.sub(r"[^a-z0-9]+", "", candidate.lower())
             if any(term and term in compact_candidate for term in compact_terms):
@@ -1550,7 +1402,12 @@ class ChatService:
             if term.lower() not in {"when"}:
                 return term
         for term in re.findall(r"[a-zöüğşıç'-]{4,}", question.lower()):
-            if term not in _GENERIC_QUERY_STOPWORDS and term not in {"started", "start", "work", "working"}:
+            if term not in _GENERIC_QUERY_STOPWORDS and term not in {
+                "started",
+                "start",
+                "work",
+                "working",
+            }:
                 return term.capitalize()
         return "They"
 
@@ -1563,27 +1420,19 @@ class ChatService:
         ]
 
     @staticmethod
-    def _entity_match_score(entity_terms: list[str], text: str) -> float:
-        if not entity_terms:
-            return 0.0
-        normalized = re.sub(r"[^a-z0-9]+", "", text.lower())
-        score = 0.0
-        for term in entity_terms:
-            compact = re.sub(r"[^a-z0-9]+", "", term.lower())
-            if not compact:
-                continue
-            if compact in normalized:
-                score += 1.0
-            elif len(compact) >= 6 and compact[:6] in normalized:
-                score += 0.7
-        return score
-
-    @staticmethod
     def _looks_like_clean_range_label(value: str, *, allow_short: bool = False) -> bool:
         cleaned = value.strip()
         if len(cleaned) < (2 if allow_short else 3) or len(cleaned) > 90:
             return False
-        if any(marker in cleaned for marker in ("●", "Context above", "Context below", "Extracted table facts")):
+        if any(
+            marker in cleaned
+            for marker in (
+                "●",
+                "Context above",
+                "Context below",
+                "Extracted table facts",
+            )
+        ):
             return False
         return True
 
@@ -1601,7 +1450,7 @@ class ChatService:
 
     @classmethod
     def _looks_like_title_only_summary_answer(
-            cls, *, question: str, answer: str, sources: list[ChatSource]
+        cls, *, question: str, answer: str, sources: list[ChatSource]
     ) -> bool:
         if not _SUMMARY_QUERY_RE.search(question):
             return False
@@ -1654,13 +1503,13 @@ class ChatService:
             if 0 <= lowered.find(starter) <= 220
         ]
         if positions:
-            cleaned = cleaned[min(positions):].strip(" -:")
+            cleaned = cleaned[min(positions) :].strip(" -:")
         cleaned = re.sub(r"^[^.!?]{0,120}\s>\s", "", cleaned).strip(" -:")
         return cleaned
 
     @classmethod
     def _build_extractive_summary_answer(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[str, list[ChatSource]] | None:
         if not _SUMMARY_QUERY_RE.search(question):
             return None
@@ -1671,7 +1520,9 @@ class ChatService:
             text = " ".join((source.content or source.snippet or "").split())
             if len(text) < 120:
                 continue
-            section = f"{source.section_title or ''} {source.heading_path or ''}".lower()
+            section = (
+                f"{source.section_title or ''} {source.heading_path or ''}".lower()
+            )
             for raw_sentence in re.split(r"(?<=[.!?])\s+", text):
                 sentence = cls._clean_summary_sentence(raw_sentence)
                 words = re.findall(r"\b\w+\b", sentence)
@@ -1680,22 +1531,39 @@ class ChatService:
                 if not re.match(r"[A-Z]", sentence):
                     continue
                 sentence_lower = sentence.lower()
-                if "this paper" in sentence_lower and not sentence_lower.startswith("this paper"):
+                if "this paper" in sentence_lower and not sentence_lower.startswith(
+                    "this paper"
+                ):
                     continue
-                if "this article" in sentence_lower and not sentence_lower.startswith("this article"):
+                if "this article" in sentence_lower and not sentence_lower.startswith(
+                    "this article"
+                ):
                     continue
-                if cls._title_from_source(source) and cls._title_from_source(source).lower() in sentence_lower:
+                if (
+                    cls._title_from_source(source)
+                    and cls._title_from_source(source).lower() in sentence_lower
+                ):
                     continue
                 score = 0.0
-                if re.search(r"\b(this paper|this article|study|analy[sz]es|examines)\b", sentence_lower):
+                if re.search(
+                    r"\b(this paper|this article|study|analy[sz]es|examines)\b",
+                    sentence_lower,
+                ):
                     score += 4.0
-                if re.search(r"\b(result|show|find|impact|effect|significant)\b", sentence_lower):
+                if re.search(
+                    r"\b(result|show|find|impact|effect|significant)\b", sentence_lower
+                ):
                     score += 3.0
-                if re.search(r"\b(imports?|exports?|foreign trade|labor market|employment|wages?)\b", sentence_lower):
+                if re.search(
+                    r"\b(imports?|exports?|foreign trade|labor market|employment|wages?)\b",
+                    sentence_lower,
+                ):
                     score += 2.0
                 if re.search(r"\babstract\b", section):
                     score += 2.0
-                if re.search(r"\b(results?|findings?|discussion|conclusion)\b", section):
+                if re.search(
+                    r"\b(results?|findings?|discussion|conclusion)\b", section
+                ):
                     score += 1.5
                 score += max(0.0, 2.0 - (source_order * 0.25))
                 if score <= 0:
@@ -1712,7 +1580,9 @@ class ChatService:
         selected: list[tuple[str, ChatSource]] = []
         selected_source_ids: set[str] = set()
         method_candidates = [
-            item for item in candidates if item[2].lower().startswith("this paper analy")
+            item
+            for item in candidates
+            if item[2].lower().startswith("this paper analy")
         ]
         ordered_candidates = [
             *sorted(method_candidates, key=lambda item: (item[1], -item[0]))[:1],
@@ -1761,7 +1631,10 @@ class ChatService:
         if label_match:
             possible_question = label_match.group(1).strip()
             possible_answer = label_match.group(2).strip()
-            if _same_question_text(possible_question, cleaned_question) and possible_answer:
+            if (
+                _same_question_text(possible_question, cleaned_question)
+                and possible_answer
+            ):
                 return possible_answer
 
         candidates = {
@@ -1772,7 +1645,7 @@ class ChatService:
             if not candidate:
                 continue
             if cleaned_answer.lower().startswith(candidate.lower()):
-                remainder = cleaned_answer[len(candidate):].strip()
+                remainder = cleaned_answer[len(candidate) :].strip()
                 remainder = re.sub(
                     r"^(?:[?？!.。:：\-–—]+|\banswer\s*[:：])\s*",
                     "",
@@ -1785,10 +1658,10 @@ class ChatService:
 
     @classmethod
     def _prioritize_sources_for_question(
-            cls,
-            *,
-            question: str,
-            sources: list[ChatSource],
+        cls,
+        *,
+        question: str,
+        sources: list[ChatSource],
     ) -> list[ChatSource]:
         del question
         return sorted(sources, key=lambda source: source.score, reverse=True)
@@ -1796,66 +1669,174 @@ class ChatService:
     @staticmethod
     def _looks_like_claim_challenge(question: str) -> bool:
         lowered = f" {question.lower()} "
-        challenge_terms = (' not ', ' never ', ' wrong ', ' incorrect ', ' are you sure ', ' he never ', ' she never ')
+        challenge_terms = (
+            " not ",
+            " never ",
+            " wrong ",
+            " incorrect ",
+            " are you sure ",
+            " he never ",
+            " she never ",
+        )
         return any(term in lowered for term in challenge_terms)
 
     @staticmethod
     def _source_texts(sources: list[ChatSource]) -> list[str]:
         texts: list[str] = []
         for source in sources:
-            source_text = (source.content or source.snippet or '').strip()
+            source_text = (source.content or source.snippet or "").strip()
             if source_text:
                 texts.append(f" {source_text.lower()} ")
         return texts
 
+    _EVIDENCE_STOPWORDS = frozenset(
+        {
+            "a",
+            "an",
+            "the",
+            "is",
+            "are",
+            "was",
+            "were",
+            "be",
+            "to",
+            "of",
+            "in",
+            "on",
+            "for",
+            "and",
+            "or",
+            "at",
+            "by",
+            "from",
+            "with",
+            "that",
+            "this",
+            "it",
+            "as",
+            "i",
+            "we",
+            "you",
+            "they",
+            "have",
+            "has",
+            "had",
+            "not",
+            "no",
+            "yes",
+            "can",
+            "could",
+            "would",
+            "should",
+            "will",
+            "may",
+            "might",
+            "do",
+            "does",
+            "did",
+            "about",
+            "into",
+            "than",
+            "then",
+            "there",
+            "their",
+            "total",
+            "amount",
+            "served",
+        }
+    )
+
+    @classmethod
+    def _evidence_terms(cls, text: str) -> set[str]:
+        tokens = {
+            token.lower()
+            for token in re.findall(r"[a-z0-9]+(?:[.\-][a-z0-9]+)*", text.lower())
+            if token
+        }
+        return {
+            token
+            for token in tokens
+            if len(token) >= 3 and token not in cls._EVIDENCE_STOPWORDS
+        }
+
+    @classmethod
+    def _extract_claim_markers(cls, text: str) -> set[str]:
+        """Amounts/IDs that must appear in supporting sources when present in the answer."""
+        markers: set[str] = set()
+        lowered = text.lower()
+        for match in re.finditer(
+            r"\b(?:eur|usd|gbp|\$|€)\s*[\d][\d.,]*|\b[\d][\d.,]*\s*(?:eur|usd|gbp)\b",
+            lowered,
+        ):
+            markers.add(re.sub(r"\s+", "", match.group(0)))
+        for match in re.finditer(r"\b(?:inv|invoice)[- ]?[a-z0-9\-./]+\b", lowered):
+            markers.add(re.sub(r"\s+", "", match.group(0)))
+        for match in re.finditer(r"\b\d{4,}\b", lowered):
+            markers.add(match.group(0))
+        return markers
+
+    @classmethod
+    def _source_supports_answer_text(
+        cls, *, answer: str, source: ChatSource
+    ) -> bool:
+        source_text = f" { (source.content or source.snippet or '').lower() } "
+        if not source_text.strip():
+            return False
+        markers = cls._extract_claim_markers(answer)
+        if markers:
+            compact_source = re.sub(r"\s+", "", source_text)
+            if not any(marker in compact_source or marker in source_text for marker in markers):
+                return False
+        answer_terms = cls._evidence_terms(answer)
+        if not answer_terms:
+            return False
+        source_terms = cls._evidence_terms(source_text)
+        if not source_terms:
+            return False
+        overlap = answer_terms & source_terms
+        # Require meaningful overlap; a lunch menu must not support an invoice total.
+        min_hits = 1 if markers else max(2, (len(answer_terms) + 2) // 3)
+        return len(overlap) >= min_hits
+
+    def _answer_is_supported(
+        self,
+        *,
+        question: str,
+        answer: str,
+        cited_sources: list[ChatSource],
+    ) -> bool:
+        ok, _checks = evidence_check.answer_is_supported(
+            question=question, answer=answer, cited_sources=cited_sources
+        )
+        return ok
+
+    @classmethod
+    def _select_supporting_sources(
+        cls,
+        *,
+        question: str,
+        answer: str,
+        sources: list[ChatSource],
+        max_sources: int = 2,
+    ) -> list[ChatSource]:
+        return evidence_check.select_supporting_sources(
+            question=question,
+            answer=answer,
+            sources=sources,
+            max_sources=max_sources,
+        )
+
     @staticmethod
     def _requested_years(question: str) -> list[int]:
-        years: list[int] = []
-        seen: set[int] = set()
-        for match in _YEAR_RE.finditer(question):
-            year = int(match.group(0))
-            if year in seen:
-                continue
-            seen.add(year)
-            years.append(year)
-        return years
+        return evidence_check.requested_years(question)
 
     @staticmethod
     def _source_supports_years(source: ChatSource, years: list[int]) -> bool:
-        if not years:
-            return True
-        text = " ".join(
-            [
-                source.content or "",
-                source.snippet or "",
-                source.file_name or "",
-                source.file_path or "",
-                source.section_title or "",
-                source.heading_path or "",
-                ]
-        ).lower()
-        if not text:
-            return False
-        exact_years = {int(match.group(0)) for match in _YEAR_RE.finditer(text)}
-        ranges: list[tuple[int, int]] = []
-        for match in _YEAR_RANGE_RE.finditer(text):
-            start = int(match.group(1))
-            end_raw = match.group(2).lower()
-            end = 9999 if end_raw in {"present", "current", "now"} else int(end_raw)
-            if end < start:
-                start, end = end, start
-            ranges.append((start, end))
-        for year in years:
-            if year in exact_years:
-                continue
-            if any(start <= year <= end for start, end in ranges):
-                continue
-            return False
-        return True
+        return evidence_check.source_supports_years(source, years)
 
     @classmethod
     def _filter_sources_for_question_constraints(
-            cls, *, question: str, sources: list[ChatSource]
+        cls, *, question: str, sources: list[ChatSource]
     ) -> tuple[list[ChatSource], dict[str, object]]:
         years = cls._requested_years(question)
         if not years:
@@ -1878,109 +1859,25 @@ class ChatService:
             "after": len(filtered),
         }
 
-    def _answer_is_supported(
-            self,
-            *,
-            question: str,
-            answer: str,
-            cited_sources: list[ChatSource],
-    ) -> bool:
-        if not cited_sources:
-            return False
-        if self._is_insufficient_answer(answer):
-            return True
-
-        source_texts = self._source_texts(cited_sources)
-        if not source_texts:
-            return False
-
-        years = self._requested_years(question)
-        if years and not all(
-                self._source_supports_years(source, years) for source in cited_sources
-        ):
-            return False
-        return True
-
-    @classmethod
-    def _select_supporting_sources(
-            cls,
-            *,
-            question: str,
-            answer: str,
-            sources: list[ChatSource],
-            max_sources: int = 2,
-    ) -> list[ChatSource]:
-        if not sources:
-            return []
-
-        source_texts = [
-            ((source.content or source.snippet or '').strip().lower(), source)
-            for source in sources
-        ]
-        source_texts = [(text, source) for text, source in source_texts if text]
-        if not source_texts:
-            return []
-
-        years = cls._requested_years(question)
-        if years:
-            source_texts = [
-                (text, source)
-                for text, source in source_texts
-                if cls._source_supports_years(source, years)
-            ]
-            if not source_texts:
-                return []
-
-        del answer
-        supporting: list[ChatSource] = []
-        for text, source in source_texts:
-            del text
-            supporting.append(source)
-            if len(supporting) >= max_sources:
-                break
-
-        if supporting:
-            return supporting
-        return [source_texts[0][1]]
-
     @staticmethod
     def _append_citations(answer: str, count: int) -> str:
-        trimmed = answer.strip()
-        if not trimmed or count <= 0:
-            return trimmed
-        suffix = ''.join(f'[{index}]' for index in range(1, count + 1))
-        return f'{trimmed} {suffix}'
+        return evidence_check.append_citations(answer, count)
 
     @staticmethod
-    def _build_source_fallback_answer(sources: list[ChatSource]) -> str:
-        if not sources:
-            return (
-                'I could not answer because the embedding or language model request timed out. '
-                'Your question was saved in the chat history.'
-            )
-        cited_bits: list[str] = []
-        for index, source in enumerate(sources[:2], start=1):
-            text = (source.content or source.snippet or '').strip()
-            if not text:
-                continue
-            cited_bits.append(f'{build_snippet(text, limit=280)} [{index}]')
-        if not cited_bits:
-            return (
-                'I found source material, but could not summarize it because the language model timed out.'
-            )
-        return 'I found relevant indexed source material: ' + ' '.join(cited_bits)
+    def _build_source_fallback_answer(
+        sources: list[ChatSource], *, mode: str = "extractive_llm_outage"
+    ) -> tuple[str, list[ChatSource], str]:
+        return evidence_check.build_extractive_fallback(sources, mode=mode)
 
     def _build_unverified_answer(self, question: str) -> str:
-        if self._looks_like_claim_challenge(question):
-            return 'I could not verify that claim from the indexed sources.'
-        return 'I could not verify that from the indexed sources.'
+        return evidence_check.unverified_answer(question)
 
     def _llm_model_id(self) -> str:
         client = self.llm_client
-        model = getattr(client, 'model', None)
+        model = getattr(client, "model", None)
         if model is not None:
             return str(model)
-        return 'stub'
+        return "stub"
 
     @staticmethod
     def _empty_llm_usage() -> dict[str, object]:
@@ -1995,7 +1892,9 @@ class ChatService:
         }
 
     def _record_llm_usage(self, usage_totals: dict[str, object]) -> None:
-        usage = getattr(self.llm_client, "last_usage", None)
+        usage = consume_generation_usage()
+        if not isinstance(usage, dict):
+            usage = getattr(self.llm_client, "last_usage", None)
         if not isinstance(usage, dict):
             return
 
@@ -2018,107 +1917,113 @@ class ChatService:
             usage_totals["fallback_used"] = True
         if bool(usage.get("cached")):
             usage_totals["cache_hits"] = int(usage_totals.get("cache_hits", 0)) + 1
+        err = usage.get("primary_error_type")
+        if err:
+            usage_totals["last_error_type"] = str(err)
 
     def _retrieval_settings_snapshot(
-            self,
-            *,
-            request: ChatAskRequest,
-            retrieval_query: str,
-            is_follow_up: bool,
-            follow_up: FollowUpClassification | None = None,
+        self,
+        *,
+        request: ChatAskRequest,
+        retrieval_query: str,
+        is_follow_up: bool,
+        follow_up: FollowUpClassification | None = None,
     ) -> dict[str, object]:
         filters_dump: object = None
         if request.retrieval_filters is not None:
-            filters_dump = request.retrieval_filters.model_dump(mode='json')
+            filters_dump = request.retrieval_filters.model_dump(mode="json")
         snap: dict[str, object] = {
-            'top_k': request.top_k,
-            'document_ids': [str(d) for d in (request.document_ids or [])],
-            'retrieval_filters': filters_dump,
-            'active_context_document_ids': list(request.active_context_document_ids or []),
-            'is_follow_up': is_follow_up,
-            'retrieval_query': retrieval_query,
+            "top_k": request.top_k,
+            "document_ids": [str(d) for d in (request.document_ids or [])],
+            "retrieval_filters": filters_dump,
+            "active_context_document_ids": list(
+                request.active_context_document_ids or []
+            ),
+            "is_follow_up": is_follow_up,
+            "retrieval_query": retrieval_query,
         }
         if follow_up is not None:
-            snap['follow_up_confidence'] = follow_up.confidence
-            snap['follow_up_reasons'] = list(follow_up.reasons)
+            snap["follow_up_confidence"] = follow_up.confidence
+            snap["follow_up_reasons"] = list(follow_up.reasons)
         return snap
 
     @staticmethod
     def _compute_answer_confidence(
-            sources: list[ChatSource],
-            verification_summary: dict[str, object] | None,
+        sources: list[ChatSource],
+        verification_summary: dict[str, object] | None,
     ) -> float | None:
         if verification_summary is None:
             return None
-        result = verification_summary.get('result')
+        result = verification_summary.get("result")
         top = max((s.score for s in sources), default=0.0)
-        if result == 'passed':
+        if result == "passed":
             return round(min(0.99, 0.52 + 0.42 * top), 3)
-        if result in {'insufficient_answer', 'empty_llm'}:
+        if result in {"insufficient_answer", "empty_llm"}:
             return round(0.15 + 0.25 * top, 3)
-        if result in {'no_sources', 'no_inline_citations', 'support_check_failed'}:
+        if result in {"no_sources", "no_inline_citations", "support_check_failed"}:
             return round(0.12 + 0.2 * top, 3)
         return round(0.2 + 0.15 * top, 3)
 
     async def _maybe_summarize_session(
-            self,
-            *,
-            chat_session: ChatSession,
-            messages: list[ChatMessage],
-            mem: dict[str, object],
+        self,
+        *,
+        chat_session: ChatSession,
+        messages: list[ChatMessage],
+        mem: dict[str, object],
     ) -> None:
         if len(messages) < settings.RAG_SESSION_SUMMARY_MESSAGE_THRESHOLD:
             return
         head = messages[: max(0, len(messages) - 8)]
         if len(head) < 6:
             return
-        lines = [f'{m.role}: {m.content[:520]}' for m in head]
+        lines = [f"{m.role}: {m.content[:520]}" for m in head]
         prompt = (
-                'Summarize durable facts and unresolved threads from this chat prefix '
-                'in 4-6 sentences for future turns. Do not invent facts.\n\n'
-                + '\n'.join(lines)
+            "Summarize durable facts and unresolved threads from this chat prefix "
+            "in 4-6 sentences for future turns. Do not invent facts.\n\n"
+            + "\n".join(lines)
         )
         try:
             summary = (await self.llm_client.generate(prompt)).strip()
             if summary:
-                mem['session_summary'] = summary[:4000]
+                mem["session_summary"] = summary[:4000]
                 chat_session.memory_json = dict(mem)
         except Exception:
-            logger.exception(
-                'chat.session_summary_failed session=%s', chat_session.id
-            )
+            logger.exception("chat.session_summary_failed session=%s", chat_session.id)
 
     def _verify_and_normalize_answer(
-            self,
-            *,
-            question: str,
-            answer: str,
-            sources: list[ChatSource],
-            shadow_mode: bool,
-            trace_id: str,
+        self,
+        *,
+        question: str,
+        answer: str,
+        sources: list[ChatSource],
+        shadow_mode: bool,
+        trace_id: str,
     ) -> tuple[str, list[ChatSource], dict[str, object]]:
         verification: dict[str, object] = {
-            'shadow_mode': shadow_mode,
-            'trace_id': trace_id,
+            "shadow_mode": shadow_mode,
+            "trace_id": trace_id,
         }
         if answer == self._build_empty_answer():
-            verification['result'] = 'empty_llm'
+            verification["result"] = "empty_llm"
             return answer, sources, verification
 
         answer = self._strip_leading_question_echo(question=question, answer=answer)
+        normalized_answer, cited_sources = self._filter_sources_to_citations(
+            answer, sources
+        )
 
-        normalized_answer, cited_sources = self._filter_sources_to_citations(answer, sources)
         if self._looks_like_title_only_summary_answer(
-                question=question, answer=normalized_answer, sources=sources
+            question=question, answer=normalized_answer, sources=sources
         ):
             extractive_summary = self._build_extractive_summary_answer(
                 question=question,
                 sources=sources,
             )
             if extractive_summary is not None:
-                verification['result'] = 'summary_extractive_fallback'
+                verification["result"] = "summary_extractive_fallback"
+                verification["answer_mode"] = "extractive_summary"
                 return extractive_summary[0], extractive_summary[1], verification
-            verification['result'] = 'summary_title_only'
+            verification["result"] = "summary_title_only"
             supporting_sources = cited_sources or self._select_supporting_sources(
                 question=question,
                 answer=normalized_answer,
@@ -2136,70 +2041,30 @@ class ChatService:
                     verification,
                 )
             return title_only_answer, [], verification
-        if self._is_insufficient_answer(normalized_answer):
-            verification['result'] = 'insufficient_answer'
-            supporting_sources = cited_sources or self._select_supporting_sources(
-                question=question,
-                answer=normalized_answer,
-                sources=sources,
-                max_sources=4,
-            )
-            return normalized_answer, supporting_sources, verification
 
-        if not cited_sources:
-            supporting_sources = self._select_supporting_sources(
-                question=question,
-                answer=normalized_answer,
-                sources=sources,
-            )
-            if supporting_sources and self._answer_is_supported(
-                    question=question,
-                    answer=normalized_answer,
-                    cited_sources=supporting_sources,
-            ):
-                verification['result'] = 'auto_cited'
-                verification['auto_citation_applied'] = True
-                verification['auto_citation_count'] = len(supporting_sources)
-                return (
-                    self._append_citations(normalized_answer, len(supporting_sources)),
-                    supporting_sources,
-                    verification,
-                )
-
-            strict_answer = self._build_unverified_answer(question)
-            verification['result'] = 'no_inline_citations'
-            verification['strict_answer_would_be'] = strict_answer
-            if shadow_mode:
-                verification['shadow_kept_raw'] = True
-                logger.warning(
-                    'chat.verification.shadow_skip_no_citations %s',
-                    json.dumps({'trace_id': trace_id}),
-                )
-                return answer.strip(), [], verification
-            return strict_answer, [], verification
-
-        support = self._answer_is_supported(
-            question=question, answer=normalized_answer, cited_sources=cited_sources
+        verified = evidence_check.verify_and_normalize_answer(
+            question=question,
+            answer=answer,
+            sources=sources,
+            shadow_mode=shadow_mode,
+            strip_question_echo=False,
         )
-        verification['support_check_passed'] = support
-        if not support:
-            strict_answer = self._build_unverified_answer(question)
-            verification['result'] = 'support_check_failed'
-            verification['strict_answer_would_be'] = strict_answer
-            if shadow_mode:
-                verification['shadow_keeps_citation_answer'] = True
-                logger.warning(
-                    'chat.verification.shadow_skip_support_check %s',
-                    json.dumps({'trace_id': trace_id, 'question': question[:240]}),
-                )
-                return normalized_answer, cited_sources, verification
-            return strict_answer, [], verification
-
-        verification['result'] = 'passed'
-        return normalized_answer, cited_sources, verification
+        verification.update(verified.as_dict())
+        verification["trace_id"] = trace_id
+        if verified.result == "no_inline_citations" and shadow_mode:
+            logger.warning(
+                "chat.verification.shadow_skip_no_citations %s",
+                json.dumps({"trace_id": trace_id}),
+            )
+        if verified.result == "support_check_failed" and shadow_mode:
+            logger.warning(
+                "chat.verification.shadow_skip_support_check %s",
+                json.dumps({"trace_id": trace_id, "question": question[:240]}),
+            )
+        return verified.answer, verified.sources, verification
 
     async def ask(
-            self, *, user: User, auth: AuthContext, request: ChatAskRequest
+        self, *, user: User, auth: AuthContext, request: ChatAskRequest
     ) -> ChatAskResponse:
         question = request.question.strip() or request.question
         trace_id = request.request_id or str(uuid.uuid4())
@@ -2213,13 +2078,13 @@ class ChatService:
         prior_before = await self.message_repo.list_by_session(
             chat_session.id, limit=_HISTORY_WINDOW
         )
-        mem = chat_memory.normalize_memory(getattr(chat_session, 'memory_json', None))
+        mem = chat_memory.normalize_memory(getattr(chat_session, "memory_json", None))
         if request.clear_session_memory:
             mem = chat_memory.empty_memory()
         if request.memory_items_patch:
             chat_memory.apply_memory_item_patch(mem, request.memory_items_patch)
         if request.focus_lock_document_ids:
-            mem['focus_lock_document_ids'] = [
+            mem["focus_lock_document_ids"] = [
                 str(x) for x in request.focus_lock_document_ids
             ][:24]
         chat_memory.prune_expired_items(mem)
@@ -2231,7 +2096,7 @@ class ChatService:
             self.llm_client.last_usage = None
 
         user_message = ChatMessage(
-            session_id=chat_session.id, role='user', content=question
+            session_id=chat_session.id, role="user", content=question
         )
         self._touch_session(chat_session)
         await self.message_repo.add(user_message, flush=True)
@@ -2243,10 +2108,12 @@ class ChatService:
             m for m in prior_before if m.id != user_message.id
         ]
         history: list[dict[str, str]] = [
-            {'role': m.role, 'content': m.content} for m in prior_orm_messages
+            {"role": m.role, "content": m.content} for m in prior_orm_messages
         ]
 
-        preferred_document_ids = self._extract_preferred_document_ids(prior_orm_messages)
+        preferred_document_ids = self._extract_preferred_document_ids(
+            prior_orm_messages
+        )
         preferred_chunk_refs = self._extract_preferred_chunk_refs(prior_orm_messages)
         requested_active_context_document_ids = self._parse_active_context_document_ids(
             request.active_context_document_ids
@@ -2269,12 +2136,12 @@ class ChatService:
         filename_scoped_document_ids: list[UUID] = []
         filename_references: list[str] = []
         filename_scope_attempted = False
-        answer = ''
+        answer = ""
         retrieval_debug_payload: dict[str, object] = {}
         memory_applied_payload: dict[str, object] = {
-            'session_summary_present': bool(mem.get('session_summary')),
-            'structured_items': len(mem.get('long_term_items') or []),
-            'focus_lock_count': len(mem.get('focus_lock_document_ids') or []),
+            "session_summary_present": bool(mem.get("session_summary")),
+            "structured_items": len(mem.get("long_term_items") or []),
+            "focus_lock_count": len(mem.get("focus_lock_document_ids") or []),
         }
         rerank_stats: dict[str, object] = {}
         candidate_sources_for_metrics: list[ChatSource] | None = None
@@ -2293,18 +2160,18 @@ class ChatService:
         except Exception as exc:
             retrieval_error_type = type(exc).__name__
             logger.exception(
-                'chat.retrieval_query_failed session=%s trace=%s',
+                "chat.retrieval_query_failed session=%s trace=%s",
                 chat_session.id,
                 trace_id,
             )
             answer = self._build_failure_answer(exc)
             verification_summary = {
-                'result': 'retrieval_query_failed',
-                'error_type': retrieval_error_type,
-                'shadow_mode': shadow_mode,
-                'trace_id': trace_id,
+                "result": "retrieval_query_failed",
+                "error_type": retrieval_error_type,
+                "shadow_mode": shadow_mode,
+                "trace_id": trace_id,
             }
-            observability.record_rag_stage_error(stage='retrieval_query')
+            observability.record_rag_stage_error(stage="retrieval_query")
         else:
             retrieval_settings_snapshot = self._retrieval_settings_snapshot(
                 request=request,
@@ -2314,48 +2181,25 @@ class ChatService:
             )
             if is_follow_up:
                 logger.debug(
-                    'Follow-up detected. Rewritten query: %r Preferred docs: %s',
+                    "Follow-up detected. Rewritten query: %r Preferred docs: %s",
                     retrieval_query,
                     preferred_document_ids,
                 )
 
-            if DocumentSearchService.is_document_discovery_query(retrieval_query):
-                search_results = await DocumentSearchService(self.session).search(
-                    query=retrieval_query,
-                    auth=auth,
-                    filters=request.retrieval_filters,
-                    limit=settings.RAG_FINAL_TOP_N,
-                )
-                document_results = [
-                    ChatDocumentResult.model_validate(result.as_dict())
-                    for result in search_results
-                ]
-                if document_results:
-                    active_context_document_ids = self._merge_document_ids(
-                        [UUID(str(item.document_id)) for item in document_results],
-                        follow_up_document_ids,
-                    )
-                    answer = self._build_document_search_answer(document_results)
-                    verification_summary = {
-                        'result': 'document_search',
-                        'shadow_mode': shadow_mode,
-                        'trace_id': trace_id,
-                    }
-                    retrieval_debug_payload = {
-                        'document_search': {
-                            'applied': True,
-                            'result_count': len(document_results),
-                        }
-                    }
-                    candidate_sources_for_metrics = []
+            explicit_document_ids = request.document_ids or None
+            lock_ids = self._parse_active_context_document_ids(
+                [str(x) for x in (mem.get("focus_lock_document_ids") or [])]
+            )
+            pinned_scope = explicit_document_ids or (lock_ids or None)
+            catalog = DocumentSearchService(self.session)
 
-            if not document_results:
+            if pinned_scope is None:
                 filename_references = DocumentSearchService.extract_file_references(
                     retrieval_query
                 )
                 if filename_references:
                     filename_scope_attempted = True
-                    search_results = await DocumentSearchService(self.session).search(
+                    search_results = await catalog.search(
                         query=" ".join(filename_references),
                         auth=auth,
                         filters=request.retrieval_filters,
@@ -2388,48 +2232,118 @@ class ChatService:
                             "matched_documents": 0,
                         }
 
-            explicit_document_ids = request.document_ids or None
+            hard_scope = pinned_scope or (filename_scoped_document_ids or None)
+            catalog_answered = False
+            if hard_scope is None and catalog.is_exhaustive_catalog_query(
+                retrieval_query
+            ):
+                catalog_answered = True
+                total = await catalog.count(
+                    query=retrieval_query,
+                    auth=auth,
+                    filters=request.retrieval_filters,
+                )
+                search_results = await catalog.search(
+                    query=retrieval_query,
+                    auth=auth,
+                    filters=request.retrieval_filters,
+                    limit=settings.RAG_FINAL_TOP_N,
+                )
+                document_results = [
+                    ChatDocumentResult.model_validate(result.as_dict())
+                    for result in search_results
+                ]
+                answer = self._build_document_search_answer(
+                    document_results, total=total
+                )
+                verification_summary = {
+                    "result": "document_catalog",
+                    "matched_total": total,
+                    "shown": len(document_results),
+                    "complete": total <= len(document_results),
+                    "shadow_mode": shadow_mode,
+                    "trace_id": trace_id,
+                }
+                retrieval_debug_payload = {
+                    "document_search": {
+                        "applied": True,
+                        "intent": "exhaustive",
+                        "matched_total": total,
+                        "result_count": len(document_results),
+                    }
+                }
+                candidate_sources_for_metrics = []
+            elif hard_scope is None and catalog.is_document_discovery_query(
+                retrieval_query
+            ):
+                search_results = await catalog.search(
+                    query=retrieval_query,
+                    auth=auth,
+                    filters=request.retrieval_filters,
+                    limit=settings.RAG_FINAL_TOP_N,
+                )
+                document_results = [
+                    ChatDocumentResult.model_validate(result.as_dict())
+                    for result in search_results
+                ]
+                if document_results:
+                    active_context_document_ids = self._merge_document_ids(
+                        [UUID(str(item.document_id)) for item in document_results],
+                        follow_up_document_ids,
+                    )
+                    answer = self._build_document_search_answer(document_results)
+                    verification_summary = {
+                        "result": "document_search",
+                        "shadow_mode": shadow_mode,
+                        "trace_id": trace_id,
+                    }
+                    retrieval_debug_payload = {
+                        "document_search": {
+                            "applied": True,
+                            "intent": "navigation",
+                            "result_count": len(document_results),
+                        }
+                    }
+                    candidate_sources_for_metrics = []
+
             retrieval_document_ids = explicit_document_ids
             retrieval_preferred_document_ids = None
-            lock_ids = self._parse_active_context_document_ids(
-                [str(x) for x in (mem.get('focus_lock_document_ids') or [])]
-            )
             if lock_ids and explicit_document_ids is None:
                 retrieval_document_ids = lock_ids
             if (
-                    filename_scoped_document_ids
-                    and explicit_document_ids is None
-                    and not lock_ids
+                filename_scoped_document_ids
+                and explicit_document_ids is None
+                and not lock_ids
             ):
                 retrieval_document_ids = filename_scoped_document_ids
             if (
-                    requested_active_context_document_ids
-                    and is_follow_up
-                    and explicit_document_ids is None
-                    and not lock_ids
-                    and not filename_scoped_document_ids
+                requested_active_context_document_ids
+                and is_follow_up
+                and explicit_document_ids is None
+                and not lock_ids
+                and not filename_scoped_document_ids
             ):
                 retrieval_document_ids = requested_active_context_document_ids
             elif (
-                    follow_up_document_ids
-                    and is_follow_up
-                    and explicit_document_ids is None
-                    and not lock_ids
-                    and not filename_scoped_document_ids
+                follow_up_document_ids
+                and is_follow_up
+                and explicit_document_ids is None
+                and not lock_ids
+                and not filename_scoped_document_ids
             ):
                 retrieval_preferred_document_ids = follow_up_document_ids
 
             try:
-                if document_results:
+                if document_results or catalog_answered:
                     retrieval = None
                 elif filename_scope_attempted and not filename_scoped_document_ids:
                     retrieval = None
                     answer = self._build_no_sources_answer()
                     verification_summary = {
-                        'result': 'filename_reference_not_found',
-                        'filename_references': filename_references,
-                        'shadow_mode': shadow_mode,
-                        'trace_id': trace_id,
+                        "result": "filename_reference_not_found",
+                        "filename_references": filename_references,
+                        "shadow_mode": shadow_mode,
+                        "trace_id": trace_id,
                     }
                 else:
                     retrieval = await self.retrieval_service.retrieve(
@@ -2443,7 +2357,7 @@ class ChatService:
             except Exception as exc:
                 retrieval_error_type = type(exc).__name__
                 logger.exception(
-                    'chat.retrieval_failed session=%s trace=%s',
+                    "chat.retrieval_failed session=%s trace=%s",
                     chat_session.id,
                     trace_id,
                 )
@@ -2451,114 +2365,191 @@ class ChatService:
                     await self._build_follow_up_neighbor_sources(
                         question=question,
                         preferred_chunk_refs=preferred_chunk_refs,
+                        auth=auth,
+                        document_ids_scope=retrieval_document_ids,
                     )
                     if is_follow_up and preferred_chunk_refs
                     else []
                 )
                 if fallback_sources:
-                    sources = fallback_sources
-                    candidate_sources_for_metrics = fallback_sources
-                    active_context_document_ids = self._merge_document_ids(
-                        self._extract_document_ids_from_sources(fallback_sources),
-                        follow_up_document_ids,
+                    sources = await self._recheck_sources_authorized(
+                        sources=fallback_sources,
+                        auth=auth,
+                        document_ids_scope=retrieval_document_ids,
                     )
-                    retrieval_debug_payload = {
-                        'fallback': 'last_cited_neighbor_chunks',
-                        'retrieval_error_type': retrieval_error_type,
-                    }
-                    try:
-                        memory_note = chat_memory.build_memory_prompt_block(mem)
-                        prompt = build_grounded_prompt(
-                            question=question,
-                            sources=fallback_sources,
-                            history=history if history else None,
-                            memory_block=memory_note or None,
-                            extra_rules=self._answer_style_rules(question),
-                        )
-                        raw_answer = (await self.llm_client.generate(prompt)).strip()
-                        self._record_llm_usage(llm_usage_summary)
-                    except Exception as llm_exc:
-                        llm_error_type = type(llm_exc).__name__
-                        sources = fallback_sources[:2]
-                        answer = self._build_source_fallback_answer(sources)
+                    if not sources:
+                        answer = self._build_failure_answer(exc)
                         verification_summary = {
-                            'result': 'retrieval_failed_source_fallback',
-                            'error_type': retrieval_error_type,
-                            'llm_error_type': llm_error_type,
-                            'shadow_mode': shadow_mode,
-                            'trace_id': trace_id,
+                            "result": "retrieval_failed",
+                            "error_type": retrieval_error_type,
+                            "shadow_mode": shadow_mode,
+                            "trace_id": trace_id,
                         }
+                        observability.record_rag_stage_error(stage="retrieval")
                     else:
-                        if not raw_answer:
+                        fallback_sources = sources
+                        candidate_sources_for_metrics = fallback_sources
+                        active_context_document_ids = self._merge_document_ids(
+                            self._extract_document_ids_from_sources(fallback_sources),
+                            follow_up_document_ids,
+                        )
+                        retrieval_debug_payload = {
+                            "fallback": "last_cited_neighbor_chunks",
+                            "retrieval_error_type": retrieval_error_type,
+                        }
+                        try:
+                            memory_note = chat_memory.build_memory_prompt_block(mem)
+                            prompt = build_grounded_prompt(
+                                question=question,
+                                sources=fallback_sources,
+                                history=history if history else None,
+                                memory_block=memory_note or None,
+                                extra_rules=self._answer_style_rules(question),
+                            )
+                            raw_answer = (await self.llm_client.generate(prompt)).strip()
+                            self._record_llm_usage(llm_usage_summary)
+                        except Exception as llm_exc:
+                            llm_error_type = type(llm_exc).__name__
                             sources = fallback_sources[:2]
-                            answer = self._build_source_fallback_answer(sources)
+                            answer, sources, fallback_mode = (
+                                self._build_source_fallback_answer(
+                                    sources, mode="extractive_retrieval_llm_outage"
+                                )
+                            )
                             verification_summary = {
-                                'result': 'retrieval_failed_source_fallback',
-                                'error_type': retrieval_error_type,
-                                'shadow_mode': shadow_mode,
-                                'trace_id': trace_id,
+                                "result": fallback_mode,
+                                "answer_mode": fallback_mode,
+                                "error_type": retrieval_error_type,
+                                "llm_error_type": llm_error_type,
+                                "shadow_mode": shadow_mode,
+                                "trace_id": trace_id,
                             }
                         else:
-                            answer, sources, verification_summary = self._verify_and_normalize_answer(
-                                question=question,
-                                answer=raw_answer,
-                                sources=fallback_sources,
-                                shadow_mode=shadow_mode,
-                                trace_id=trace_id,
-                            )
-                            verification_summary['retrieval_error_type'] = retrieval_error_type
-                            verification_summary['retrieval_fallback'] = 'last_cited_neighbor_chunks'
+                            if not raw_answer:
+                                sources = fallback_sources[:2]
+                                answer, sources, fallback_mode = (
+                                    self._build_source_fallback_answer(
+                                        sources, mode="extractive_empty_llm"
+                                    )
+                                )
+                                verification_summary = {
+                                    "result": fallback_mode,
+                                    "answer_mode": fallback_mode,
+                                    "error_type": retrieval_error_type,
+                                    "shadow_mode": shadow_mode,
+                                    "trace_id": trace_id,
+                                }
+                            else:
+                                answer, sources, verification_summary = (
+                                    self._verify_and_normalize_answer(
+                                        question=question,
+                                        answer=raw_answer,
+                                        sources=fallback_sources,
+                                        shadow_mode=shadow_mode,
+                                        trace_id=trace_id,
+                                    )
+                                )
+                                verification_summary["retrieval_error_type"] = (
+                                    retrieval_error_type
+                                )
+                                verification_summary["retrieval_fallback"] = (
+                                    "last_cited_neighbor_chunks"
+                                )
                 else:
                     answer = self._build_failure_answer(exc)
                     verification_summary = {
-                        'result': 'retrieval_failed',
-                        'error_type': retrieval_error_type,
-                        'shadow_mode': shadow_mode,
-                        'trace_id': trace_id,
+                        "result": "retrieval_failed",
+                        "error_type": retrieval_error_type,
+                        "shadow_mode": shadow_mode,
+                        "trace_id": trace_id,
                     }
-                observability.record_rag_stage_error(stage='retrieval')
+                observability.record_rag_stage_error(stage="retrieval")
             else:
                 if retrieval is None:
                     pass
                 else:
                     previous_retrieval_debug = dict(retrieval_debug_payload)
                     retrieval_debug_payload = dict(
-                        getattr(retrieval, 'retrieval_debug', {}) or {}
+                        getattr(retrieval, "retrieval_debug", {}) or {}
                     )
                     retrieval_debug_payload.update(previous_retrieval_debug)
-                    candidate_sources = rerank_and_truncate_sources(
-                        question,
-                        self._prioritize_sources_for_question(
-                            question=question,
-                            sources=retrieval.sources,
-                        ),
-                        stats_out=rerank_stats,
+                    # Expand / auth / dedupe first — then one packing pass.
+                    candidate_sources = self._prioritize_sources_for_question(
+                        question=question,
+                        sources=retrieval.sources,
                     )
                     if is_follow_up and preferred_chunk_refs:
-                        candidate_sources = await self._augment_follow_up_sources_with_neighbors(
+                        candidate_sources = (
+                            await self._augment_follow_up_sources_with_neighbors(
+                                question=question,
+                                sources=candidate_sources,
+                                preferred_chunk_refs=preferred_chunk_refs,
+                                auth=auth,
+                                document_ids_scope=retrieval_document_ids,
+                            )
+                        )
+                    candidate_sources = (
+                        await self._augment_question_sources_from_same_documents(
                             question=question,
                             sources=candidate_sources,
-                            preferred_chunk_refs=preferred_chunk_refs,
+                            max_sources=max(20, request.top_k * 3),
+                            auth=auth,
+                            document_ids_scope=retrieval_document_ids,
                         )
-                    candidate_sources = await self._augment_question_sources_from_same_documents(
-                        question=question,
-                        sources=candidate_sources,
-                        max_sources=max(20, request.top_k * 3),
                     )
-                    candidate_sources = await self._augment_summary_sources_from_same_documents(
-                        question=question,
-                        sources=candidate_sources,
-                        max_sources=max(12, request.top_k * 2),
+                    candidate_sources = (
+                        await self._augment_summary_sources_from_same_documents(
+                            question=question,
+                            sources=candidate_sources,
+                            max_sources=max(12, request.top_k * 2),
+                            auth=auth,
+                            document_ids_scope=retrieval_document_ids,
+                        )
                     )
-                    candidate_sources = self._dedupe_employment_sources(candidate_sources)
-                    candidate_sources, constraint_debug = self._filter_sources_for_question_constraints(
-                        question=question,
+                    candidate_sources = await self._recheck_sources_authorized(
                         sources=candidate_sources,
+                        auth=auth,
+                        document_ids_scope=retrieval_document_ids,
+                    )
+                    candidate_sources = self._dedupe_employment_sources(
+                        candidate_sources
+                    )
+                    candidate_sources, constraint_debug = (
+                        self._filter_sources_for_question_constraints(
+                            question=question,
+                            sources=candidate_sources,
+                        )
                     )
                     if constraint_debug.get("time_filter_applied"):
-                        retrieval_debug_payload["question_constraints"] = constraint_debug
+                        retrieval_debug_payload["question_constraints"] = (
+                            constraint_debug
+                        )
+
+                    memory_note = chat_memory.build_memory_prompt_block(mem)
+                    style_rules = self._answer_style_rules(question)
+                    instructions_overhead = (
+                        "grounded-assistant\n"
+                        + "\n".join(style_rules)
+                        + (memory_note or "")
+                    )
+                    packed = pack_evidence_for_prompt(
+                        candidate_sources,
+                        question=question,
+                        history=history if history else None,
+                        memory_block=memory_note or None,
+                        instructions_text=instructions_overhead,
+                        context_tokens=settings.RAG_PROMPT_CONTEXT_TOKENS,
+                        output_reserve_tokens=settings.RAG_PROMPT_OUTPUT_RESERVE_TOKENS,
+                        margin_tokens=settings.RAG_PROMPT_MARGIN_TOKENS,
+                        per_source_cap_tokens=settings.RAG_PROMPT_PER_SOURCE_CAP_TOKENS,
+                    )
+                    candidate_sources = packed.sources
+                    rerank_stats.update(packed.as_dict())
+                    retrieval_debug_payload["context_pack"] = packed.as_dict()
                     candidate_sources_for_metrics = candidate_sources
-                    grounded_document_ids = getattr(retrieval, 'grounded_document_ids', [])
+                    grounded_document_ids = getattr(
+                        retrieval, "grounded_document_ids", []
+                    )
                     active_context_document_ids = self._merge_document_ids(
                         list(grounded_document_ids),
                         self._extract_document_ids_from_sources(candidate_sources),
@@ -2569,9 +2560,9 @@ class ChatService:
                         answer = self._build_no_sources_answer()
                         sources = []
                         verification_summary = {
-                            'result': 'no_sources',
-                            'shadow_mode': shadow_mode,
-                            'trace_id': trace_id,
+                            "result": "no_sources",
+                            "shadow_mode": shadow_mode,
+                            "trace_id": trace_id,
                         }
                     else:
                         direct_answer = self._build_direct_answer(
@@ -2583,74 +2574,90 @@ class ChatService:
                             answer, sources, verification_summary = direct_answer
                         else:
                             try:
-                                memory_note = chat_memory.build_memory_prompt_block(mem)
                                 prompt = build_grounded_prompt(
                                     question=question,
                                     sources=candidate_sources,
                                     history=history if history else None,
                                     memory_block=memory_note or None,
-                                    extra_rules=self._answer_style_rules(question),
+                                    extra_rules=style_rules,
                                 )
-                                raw_answer = (await self.llm_client.generate(prompt)).strip()
+                                raw_answer = (
+                                    await self.llm_client.generate(prompt)
+                                ).strip()
                                 self._record_llm_usage(llm_usage_summary)
                             except Exception as exc:
                                 llm_error_type = type(exc).__name__
                                 logger.exception(
-                                    'chat.llm_failed session=%s trace=%s',
+                                    "chat.llm_failed session=%s trace=%s",
                                     chat_session.id,
                                     trace_id,
                                 )
-                                if isinstance(exc, httpx.TimeoutException):
-                                    sources = candidate_sources[:2]
-                                    answer = self._build_source_fallback_answer(sources)
-                                    verification_summary = {
-                                        'result': 'llm_timeout_source_fallback',
-                                        'error_type': llm_error_type,
-                                        'shadow_mode': shadow_mode,
-                                        'trace_id': trace_id,
-                                    }
-                                else:
-                                    answer = self._build_failure_answer(exc)
-                                    sources = []
-                                    verification_summary = {
-                                        'result': 'llm_failed',
-                                        'error_type': llm_error_type,
-                                        'shadow_mode': shadow_mode,
-                                        'trace_id': trace_id,
-                                    }
-                                observability.record_rag_stage_error(stage='llm')
+                                mode = (
+                                    "extractive_llm_timeout"
+                                    if isinstance(
+                                        exc, (httpx.TimeoutException, LLMTimeoutError)
+                                    )
+                                    else "extractive_llm_outage"
+                                )
+                                answer, sources, fallback_mode = (
+                                    self._build_source_fallback_answer(
+                                        candidate_sources, mode=mode
+                                    )
+                                )
+                                verification_summary = {
+                                    "result": fallback_mode,
+                                    "answer_mode": fallback_mode,
+                                    "error_type": (
+                                        getattr(exc, "error_type", None)
+                                        or type(exc).__name__
+                                    ),
+                                    "shadow_mode": shadow_mode,
+                                    "trace_id": trace_id,
+                                }
+                                observability.record_rag_stage_error(stage="llm")
                             else:
                                 if not raw_answer:
-                                    answer = self._build_empty_answer()
-                                    sources = candidate_sources
+                                    answer, sources, fallback_mode = (
+                                        self._build_source_fallback_answer(
+                                            candidate_sources,
+                                            mode="extractive_empty_llm",
+                                        )
+                                    )
                                     verification_summary = {
-                                        'result': 'empty_llm',
-                                        'shadow_mode': shadow_mode,
-                                        'trace_id': trace_id,
+                                        "result": fallback_mode,
+                                        "answer_mode": fallback_mode,
+                                        "shadow_mode": shadow_mode,
+                                        "trace_id": trace_id,
                                     }
                                 else:
-                                    answer, sources, verification_summary = self._verify_and_normalize_answer(
-                                        question=question,
-                                        answer=raw_answer,
-                                        sources=candidate_sources,
-                                        shadow_mode=shadow_mode,
-                                        trace_id=trace_id,
+                                    answer, sources, verification_summary = (
+                                        self._verify_and_normalize_answer(
+                                            question=question,
+                                            answer=raw_answer,
+                                            sources=candidate_sources,
+                                            shadow_mode=shadow_mode,
+                                            trace_id=trace_id,
+                                        )
                                     )
 
         cited_document_ids = self._extract_document_ids_from_sources(sources)
         if cited_document_ids:
-            active_context_document_ids = self._merge_document_ids(cited_document_ids, follow_up_document_ids)
+            active_context_document_ids = self._merge_document_ids(
+                cited_document_ids, follow_up_document_ids
+            )
 
-        answer_confidence_value = self._compute_answer_confidence(sources, verification_summary)
+        answer_confidence_value = self._compute_answer_confidence(
+            sources, verification_summary
+        )
         if verification_summary:
             observability.record_rag_verification(
-                result=str(verification_summary.get('result')),
+                result=str(verification_summary.get("result")),
                 shadow_mode=shadow_mode,
             )
-            if shadow_mode and verification_summary.get('shadow_kept_raw'):
-                observability.record_rag_shadow_override(reason='no_inline_citations')
-            if shadow_mode and verification_summary.get('shadow_keeps_citation_answer'):
-                observability.record_rag_shadow_override(reason='support_check_failed')
+            if shadow_mode and verification_summary.get("shadow_kept_raw"):
+                observability.record_rag_shadow_override(reason="no_inline_citations")
+            if shadow_mode and verification_summary.get("shadow_keeps_citation_answer"):
+                observability.record_rag_shadow_override(reason="support_check_failed")
         if candidate_sources_for_metrics is not None:
             observability.record_rag_citation_filter(
                 before_count=len(candidate_sources_for_metrics),
@@ -2658,36 +2665,42 @@ class ChatService:
             )
         if rerank_stats:
             observability.record_rag_rerank_event(
-                order_changed=bool(rerank_stats.get('order_changed')),
-                content_truncated_count=int(rerank_stats.get('sources_content_truncated') or 0),
+                order_changed=bool(rerank_stats.get("order_changed")),
+                content_truncated_count=int(
+                    rerank_stats.get("sources_content_truncated") or 0
+                ),
             )
-        observability.record_rag_low_confidence_answer(confidence=answer_confidence_value)
+        observability.record_rag_low_confidence_answer(
+            confidence=answer_confidence_value
+        )
 
-        model_label = f'{llm_provider}:{llm_model_id}'
+        model_label = f"{llm_provider}:{llm_model_id}"
         generation_metadata: dict[str, object] = {
-            'trace_id': trace_id,
-            'llm_provider': llm_provider,
-            'llm_model_id': llm_model_id,
-            'llm_usage': llm_usage_summary,
-            'grounded_prompt_version': prompt_version,
-            'retrieval': retrieval_settings_snapshot,
-            'verification': verification_summary,
-            'retrieval_debug': retrieval_debug_payload,
-            'memory_applied': memory_applied_payload,
-            'answer_confidence': answer_confidence_value,
+            "trace_id": trace_id,
+            "llm_provider": llm_provider,
+            "llm_model_id": llm_model_id,
+            "llm_usage": llm_usage_summary,
+            "grounded_prompt_version": prompt_version,
+            "retrieval": retrieval_settings_snapshot,
+            "verification": verification_summary,
+            "retrieval_debug": retrieval_debug_payload,
+            "memory_applied": memory_applied_payload,
+            "answer_confidence": answer_confidence_value,
         }
         if retrieval_error_type:
-            generation_metadata['retrieval_error_type'] = retrieval_error_type
+            generation_metadata["retrieval_error_type"] = retrieval_error_type
         if llm_error_type:
-            generation_metadata['llm_error_type'] = llm_error_type
+            generation_metadata["llm_error_type"] = llm_error_type
 
         chat_session.memory_json = dict(mem)
 
         assistant_message = ChatMessage(
             session_id=chat_session.id,
-            role='assistant',
+            role="assistant",
             content=answer,
-            citations_json=([source.model_dump(mode='json') for source in sources] or None),
+            citations_json=(
+                [source.model_dump(mode="json") for source in sources] or None
+            ),
             model_name=model_label,
             generation_metadata_json=generation_metadata,
         )

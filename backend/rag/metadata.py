@@ -47,4 +47,3 @@ def _permission_scope(document: Document) -> str:
     if document.allowed_group_ids:
         scopes.append("groups")
     return ",".join(scopes) if scopes else "private"
-

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections import Counter
 from collections.abc import Iterable
 from datetime import UTC, datetime, timedelta
 import logging
@@ -39,6 +38,7 @@ from ..schemas.intelligence_schema import (
     IntelligenceOverviewRead,
     IntelligenceSpotlightDocumentRead,
 )
+
 logger = logging.getLogger(__name__)
 
 _MEETING_HINTS = (
@@ -118,6 +118,7 @@ def _current_document_type(value: str | None) -> str:
 class ProductIntelligenceService:
     _overview_cache: dict[str, tuple[float, IntelligenceOverviewRead]] = {}
     _overview_cache_ttl_seconds = 15.0
+    _overview_cache_max_entries = 64
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
@@ -125,6 +126,147 @@ class ProductIntelligenceService:
         self.insight_repo = DocumentInsightRepository(session)
         self.task_repo = WorkflowTaskRepository(session)
         self.graph_repo = KnowledgeGraphRepository(session)
+
+    @classmethod
+    def invalidate_overview_cache(cls) -> None:
+        cls._overview_cache.clear()
+
+    @classmethod
+    def _store_overview_cache(
+        cls, cache_key: str, expires_at: float, payload: IntelligenceOverviewRead
+    ) -> None:
+        cls._overview_cache[cache_key] = (expires_at, payload)
+        while len(cls._overview_cache) > cls._overview_cache_max_entries:
+            # Drop arbitrary oldest insertion (dict preserves order on 3.7+).
+            cls._overview_cache.pop(next(iter(cls._overview_cache)))
+
+    async def build_overview(
+        self,
+        *,
+        auth: AuthContext,
+        task_search: str | None = None,
+        blocked_by_task_id: UUID | str | None = None,
+    ) -> IntelligenceOverviewRead:
+        cache_key = (
+            f"user={auth.user_id}|super={auth.is_superuser}|groups={','.join(sorted(auth.groups))}|"
+            f"search={(task_search or '').strip().lower()}|blocked={blocked_by_task_id or ''}"
+        )
+        now = time.monotonic()
+        cached = self._overview_cache.get(cache_key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        if not settings.PRODUCT_INTELLIGENCE_ENABLED:
+            payload = IntelligenceOverviewRead(
+                intelligence_feature_enabled=False,
+                wedge="disabled",
+                document_type_counts={},
+                business_domain_counts={},
+                task_status_counts={},
+                queue_counts={},
+                open_tasks=[],
+                spotlight_documents=[],
+            )
+            self._store_overview_cache(
+                cache_key, now + self._overview_cache_ttl_seconds, payload
+            )
+            return payload.model_copy(deep=True)
+
+        # Totals are SQL aggregates over all visible documents — not the spotlight page.
+        type_counter = await self.document_repo.count_visible_by_field(
+            auth=auth, field="document_type"
+        )
+        domain_counter = await self.document_repo.count_visible_by_field(
+            auth=auth, field="business_domain"
+        )
+        task_status_counter = await self.task_repo.count_by_status_visible_to_auth(
+            auth=auth
+        )
+        queue_counter = await self.task_repo.count_open_by_queue_visible_to_auth(
+            auth=auth
+        )
+
+        visible_open_tasks = (
+            await self.task_repo.list_open_with_documents_visible_to_auth(
+                auth=auth,
+                limit=30,
+                search_query=task_search,
+                blocked_by_task_id=blocked_by_task_id,
+            )
+        )
+        spotlight_docs = await self.document_repo.list_spotlight_documents(
+            auth=auth, limit=24
+        )
+
+        spotlight_documents: list[IntelligenceSpotlightDocumentRead] = []
+        for document in spotlight_docs:
+            insight_types = [insight.insight_type for insight in document.insights]
+            classification = _current_document_type(
+                document.document_type
+                or self._extract_classification(document.insights)
+            )
+            if not insight_types and not document.workflow_tasks:
+                continue
+            open_doc_tasks = [
+                task
+                for task in document.workflow_tasks
+                if task.status in OPEN_WORKFLOW_STATUSES
+            ]
+            spotlight_documents.append(
+                IntelligenceSpotlightDocumentRead(
+                    document_id=document.id,
+                    file_name=document.file_name,
+                    file_path=document.file_path,
+                    connector_id=document.connector_id,
+                    classification=classification,
+                    insight_types=insight_types,
+                    open_task_count=len(open_doc_tasks),
+                    queue_names=sorted({task.queue_name for task in open_doc_tasks}),
+                    modified_at=document.modified_at,
+                    updated_at=document.updated_at,
+                )
+            )
+
+        open_task_reads = [
+            IntelligenceOpenTaskRead.model_validate(
+                {
+                    **task_bundle.task.__dict__,
+                    "document_file_name": task_bundle.document.file_name
+                    if task_bundle.document is not None
+                    else None,
+                    "document_file_path": task_bundle.document.file_path
+                    if task_bundle.document is not None
+                    else None,
+                    "document_connector_id": task_bundle.document.connector_id
+                    if task_bundle.document is not None
+                    else None,
+                }
+            )
+            for task_bundle in visible_open_tasks[:25]
+        ]
+        spotlight_documents.sort(
+            key=lambda item: (
+                item.open_task_count,
+                len(item.insight_types),
+                item.updated_at,
+            ),
+            reverse=True,
+        )
+
+        payload = IntelligenceOverviewRead(
+            intelligence_feature_enabled=True,
+            wedge="document-intelligence",
+            document_type_counts=dict(type_counter),
+            business_domain_counts=dict(domain_counter),
+            task_status_counts=dict(task_status_counter),
+            queue_counts=dict(queue_counter),
+            open_tasks=open_task_reads,
+            spotlight_documents=spotlight_documents[:12],
+        )
+        self._store_overview_cache(
+            cache_key, now + self._overview_cache_ttl_seconds, payload
+        )
+        return payload.model_copy(deep=True)
 
     async def rebuild_document_intelligence(
         self, *, document: Document, parsed_document: ParsedDocument
@@ -147,7 +289,8 @@ class ProductIntelligenceService:
             document_id=document.id,
             insight_type="classification",
             title=f"{classification.replace('_', ' ').title()} document",
-            summary=document.document_type_reason or "Document classification stored on the document record.",
+            summary=document.document_type_reason
+            or "Document classification stored on the document record.",
             confidence=confidence,
             payload_json=intel_prov.merge_provenance(
                 {
@@ -284,6 +427,7 @@ class ProductIntelligenceService:
         )
 
         await self._dispatch_task_hooks(tasks=tasks, document=document)
+        self.invalidate_overview_cache()
 
     async def clear_document_intelligence(self, document_id: UUID | str) -> None:
         if not hasattr(self.session, "execute"):
@@ -312,168 +456,6 @@ class ProductIntelligenceService:
             }
         )
 
-    async def build_overview(
-        self,
-        *,
-        auth: AuthContext,
-        task_search: str | None = None,
-        blocked_by_task_id: UUID | str | None = None,
-    ) -> IntelligenceOverviewRead:
-        cache_key = (
-            f"user={auth.user_id}|super={auth.is_superuser}|groups={','.join(sorted(auth.groups))}|"
-            f"search={(task_search or '').strip().lower()}|blocked={blocked_by_task_id or ''}"
-        )
-        now = time.monotonic()
-        cached = self._overview_cache.get(cache_key)
-        if cached and cached[0] > now:
-            return cached[1].model_copy(deep=True)
-
-        if not settings.PRODUCT_INTELLIGENCE_ENABLED:
-            payload = IntelligenceOverviewRead(
-                intelligence_feature_enabled=False,
-                wedge="disabled",
-                document_type_counts={},
-                business_domain_counts={},
-                task_status_counts={},
-                queue_counts={},
-                open_tasks=[],
-                spotlight_documents=[],
-            )
-            self._overview_cache[cache_key] = (
-                now + self._overview_cache_ttl_seconds,
-                payload,
-            )
-            return payload.model_copy(deep=True)
-
-        documents = await self.document_repo.search(
-            auth=auth,
-            limit=200,
-            include_intelligence=True,
-        )
-        visible_open_tasks = await self.task_repo.list_open_with_documents_visible_to_auth(
-            auth=auth,
-            limit=30,
-            search_query=task_search,
-            blocked_by_task_id=blocked_by_task_id,
-        )
-
-        type_counter: Counter[str] = Counter()
-        domain_counter: Counter[str] = Counter()
-        task_status_counter: Counter[str] = Counter()
-        queue_counter: Counter[str] = Counter()
-        spotlight_documents: list[IntelligenceSpotlightDocumentRead] = []
-        for document in documents:
-            insight_types = [insight.insight_type for insight in document.insights]
-            classification = _current_document_type(
-                document.document_type or self._extract_classification(document.insights)
-            )
-            domain = document.business_domain or "unknown"
-            if classification != "unclassified":
-                type_counter[classification] += 1
-            if domain != "unknown":
-                domain_counter[domain] += 1
-            for task in document.workflow_tasks:
-                task_status_counter[task.status] += 1
-                if task.status in OPEN_WORKFLOW_STATUSES:
-                    queue_counter[task.queue_name] += 1
-            if not insight_types and not document.workflow_tasks:
-                continue
-            open_doc_tasks = [
-                task for task in document.workflow_tasks if task.status in OPEN_WORKFLOW_STATUSES
-            ]
-            spotlight_documents.append(
-                IntelligenceSpotlightDocumentRead(
-                    document_id=document.id,
-                    file_name=document.file_name,
-                    file_path=document.file_path,
-                    connector_id=document.connector_id,
-                    classification=classification,
-                    insight_types=insight_types,
-                    open_task_count=len(open_doc_tasks),
-                    queue_names=sorted({task.queue_name for task in open_doc_tasks}),
-                    modified_at=document.modified_at,
-                    updated_at=document.updated_at,
-                )
-            )
-
-        open_task_reads = [
-            IntelligenceOpenTaskRead.model_validate(
-                {
-                    **task_bundle.task.__dict__,
-                    "document_file_name": task_bundle.document.file_name
-                    if task_bundle.document is not None
-                    else None,
-                    "document_file_path": task_bundle.document.file_path
-                    if task_bundle.document is not None
-                    else None,
-                    "document_connector_id": task_bundle.document.connector_id
-                    if task_bundle.document is not None
-                    else None,
-                }
-            )
-            for task_bundle in visible_open_tasks[:25]
-        ]
-        spotlight_documents.sort(
-            key=lambda item: (item.open_task_count, len(item.insight_types), item.updated_at),
-            reverse=True,
-        )
-
-        payload = IntelligenceOverviewRead(
-            intelligence_feature_enabled=True,
-            wedge="document-intelligence",
-            document_type_counts=dict(type_counter),
-            business_domain_counts=dict(domain_counter),
-            task_status_counts=dict(task_status_counter),
-            queue_counts=dict(queue_counter),
-            open_tasks=open_task_reads,
-            spotlight_documents=spotlight_documents[:12],
-        )
-        self._overview_cache[cache_key] = (
-            now + self._overview_cache_ttl_seconds,
-            payload,
-        )
-        return payload.model_copy(deep=True)
-
-    def _classify_document(
-        self, *, document: Document, lowered: str
-    ) -> tuple[str, float, list[str]]:
-        signals: list[str] = []
-        scores = Counter[str]()
-        haystack = f"{document.file_name.lower()} {document.file_path.lower()} {lowered[:4000]}"
-
-        if document.mime_type == "message/rfc822" or document.file_name.lower().endswith(".eml"):
-            scores["email"] += 5
-            signals.append("email_source")
-        if any(hint in haystack for hint in _MEETING_HINTS):
-            scores["meeting"] += 4
-            signals.append("meeting_terms")
-        if any(hint in haystack for hint in _CONTRACT_HINTS):
-            scores["contract"] += 4
-            signals.append("contract_terms")
-        if any(hint in haystack for hint in _COMPLIANCE_HINTS):
-            scores["compliance"] += 4
-            signals.append("compliance_terms")
-        if any(hint in haystack for hint in _POLICY_HINTS):
-            scores["policy"] += 2
-            signals.append("policy_terms")
-
-        if "speaker:" in lowered or re.search(r"^[A-Z][A-Za-z]+(?: [A-Z][A-Za-z]+){0,2}:", lowered, flags=re.MULTILINE):
-            scores["meeting"] += 3
-            signals.append("speaker_pattern")
-        if "shall" in lowered or "must" in lowered:
-            scores["contract"] += 2
-            signals.append("obligation_language")
-        if "iso 27001" in lowered or "non-compliant" in lowered:
-            scores["compliance"] += 3
-            signals.append("standard_gap_terms")
-
-        if not scores:
-            return "general", 0.45, ["fallback"]
-
-        classification, score = scores.most_common(1)[0]
-        confidence = min(0.95, 0.5 + (score * 0.08))
-        return classification, confidence, signals
-
     def _extract_meeting_payload(
         self, text: str, metadata: dict[str, object]
     ) -> dict[str, object] | None:
@@ -493,8 +475,14 @@ class ProductIntelligenceService:
         if from_header := str(metadata.get("from") or ""):
             participants.extend(self._extract_people(from_header))
         participants = list(dict.fromkeys(participants))[:10]
-        summary = self._summarize_text(text, fallback_sentences=decisions, max_sentences=2)
-        primary_owner = action_items[0]["owner_label"] if action_items and action_items[0].get("owner_label") else None
+        summary = self._summarize_text(
+            text, fallback_sentences=decisions, max_sentences=2
+        )
+        primary_owner = (
+            action_items[0]["owner_label"]
+            if action_items and action_items[0].get("owner_label")
+            else None
+        )
         return {
             "summary": summary,
             "decisions": decisions,
@@ -505,7 +493,11 @@ class ProductIntelligenceService:
 
     def _extract_contract_payload(self, text: str) -> dict[str, object] | None:
         lowered = text.lower()
-        if not any(hint in lowered for hint in _CONTRACT_HINTS) and "shall" not in lowered and "must" not in lowered:
+        if (
+            not any(hint in lowered for hint in _CONTRACT_HINTS)
+            and "shall" not in lowered
+            and "must" not in lowered
+        ):
             return None
 
         obligations = self._extract_sentences(
@@ -516,7 +508,15 @@ class ProductIntelligenceService:
             text, ("renew", "auto-renew", "renewal", "term"), limit=4
         )
         penalties = self._extract_sentences(
-            text, ("penalty", "liquidated damages", "termination fee", "late fee", "interest"), limit=4
+            text,
+            (
+                "penalty",
+                "liquidated damages",
+                "termination fee",
+                "late fee",
+                "interest",
+            ),
+            limit=4,
         )
         counterparties = self._extract_counterparties(text)
         summary = self._summarize_text(
@@ -551,7 +551,9 @@ class ProductIntelligenceService:
             else:
                 gap_controls.append(control_name)
         coverage_ratio = len(covered_controls) / max(len(_CONTROL_CHECKLIST), 1)
-        severity = "high" if len(gap_controls) >= 5 else "medium" if gap_controls else "low"
+        severity = (
+            "high" if len(gap_controls) >= 5 else "medium" if gap_controls else "low"
+        )
         summary = (
             "Suggestion (keyword checklist only, not an audit): "
             f"coverage {len(covered_controls)}/{len(_CONTROL_CHECKLIST)} checklist items matched in text. "
@@ -670,7 +672,9 @@ class ProductIntelligenceService:
                                 score=0.86,
                             )
                         ],
-                        suggested_task_payload=dict(action_item) if isinstance(action_item, dict) else {},
+                        suggested_task_payload=dict(action_item)
+                        if isinstance(action_item, dict)
+                        else {},
                         keyword_overlap=0.82,
                         source_agreement=0.70,
                         document_classification_confidence=confidence,
@@ -690,7 +694,9 @@ class ProductIntelligenceService:
 
         if contract_insight and contract_payload:
             for deadline in contract_payload.get("deadlines", [])[:6]:
-                title = str(deadline.get("title") or deadline.get("sentence") or "").strip()
+                title = str(
+                    deadline.get("title") or deadline.get("sentence") or ""
+                ).strip()
                 if not title:
                     continue
                 due_at = self._parse_date(str(deadline.get("due_at") or ""))
@@ -712,7 +718,9 @@ class ProductIntelligenceService:
                                 score=0.84,
                             )
                         ],
-                        suggested_task_payload=dict(deadline) if isinstance(deadline, dict) else {},
+                        suggested_task_payload=dict(deadline)
+                        if isinstance(deadline, dict)
+                        else {},
                         keyword_overlap=0.78,
                         source_agreement=0.65,
                         document_classification_confidence=confidence,
@@ -730,11 +738,15 @@ class ProductIntelligenceService:
                     presentation="deadline_candidate",
                 )
 
-            for index, obligation in enumerate(list(contract_payload.get("obligations", []))[:4]):
+            for index, obligation in enumerate(
+                list(contract_payload.get("obligations", []))[:4]
+            ):
                 excerpt = str(obligation).strip()
                 if not excerpt:
                     continue
-                title = self._task_title_from_excerpt(excerpt, prefix="Review obligation")
+                title = self._task_title_from_excerpt(
+                    excerpt, prefix="Review obligation"
+                )
                 add_candidate(
                     TaskCandidate(
                         candidate_id=f"{document.id}:contract_obligation:{index}",
@@ -752,7 +764,10 @@ class ProductIntelligenceService:
                                 score=0.82,
                             )
                         ],
-                        suggested_task_payload={"source": "obligations", "obligation": excerpt},
+                        suggested_task_payload={
+                            "source": "obligations",
+                            "obligation": excerpt,
+                        },
                         keyword_overlap=0.80,
                         source_agreement=0.60,
                         document_classification_confidence=confidence,
@@ -784,7 +799,10 @@ class ProductIntelligenceService:
                                 score=0.78,
                             )
                         ],
-                        suggested_task_payload={"source": "renewal_terms", "renewal_term": excerpt},
+                        suggested_task_payload={
+                            "source": "renewal_terms",
+                            "renewal_term": excerpt,
+                        },
                         keyword_overlap=0.72,
                         source_agreement=0.55,
                         document_classification_confidence=confidence,
@@ -792,7 +810,8 @@ class ProductIntelligenceService:
                     insight=contract_insight,
                     queue_name="contracts",
                     priority="normal",
-                    owner_label=str(contract_payload.get("primary_counterparty") or "") or None,
+                    owner_label=str(contract_payload.get("primary_counterparty") or "")
+                    or None,
                     methods=[intel_prov.METHOD_SENTENCE_MARKER_PARSE],
                     evidence_tier=intel_prov.EVIDENCE_HEURISTIC_PARSE,
                     presentation="review_candidate",
@@ -859,7 +878,10 @@ class ProductIntelligenceService:
                             score=0.18,
                         )
                     ],
-                    suggested_task_payload={"classification": classification, "confidence": confidence},
+                    suggested_task_payload={
+                        "classification": classification,
+                        "confidence": confidence,
+                    },
                     document_classification_confidence=confidence,
                     unverified_suggestion=True,
                 ),
@@ -902,7 +924,9 @@ class ProductIntelligenceService:
             default=None,
         )
         triage_priority = (
-            "high" if any(task.priority == "high" for task in triage_targets) else "normal"
+            "high"
+            if any(task.priority == "high" for task in triage_targets)
+            else "normal"
         )
         triage_payload = {
             "workflow_stage": "queued",
@@ -1031,8 +1055,12 @@ class ProductIntelligenceService:
         edges: list[KnowledgeEdgeDraft] = []
         seen_nodes: set[tuple[str, str]] = set()
 
-        def add_node(node_type: str, label: str, *, metadata_json: dict | None = None) -> tuple[str, str]:
-            external_key = self._scoped_graph_external_key(connector_id, node_type, label)
+        def add_node(
+            node_type: str, label: str, *, metadata_json: dict | None = None
+        ) -> tuple[str, str]:
+            external_key = self._scoped_graph_external_key(
+                connector_id, node_type, label
+            )
             key = (node_type, external_key)
             if key not in seen_nodes:
                 seen_nodes.add(key)
@@ -1057,7 +1085,12 @@ class ProductIntelligenceService:
                 )
             return key
 
-        def add_edge(target_key: tuple[str, str], relation_type: str, *, metadata_json: dict | None = None) -> None:
+        def add_edge(
+            target_key: tuple[str, str],
+            relation_type: str,
+            *,
+            metadata_json: dict | None = None,
+        ) -> None:
             edges.append(
                 KnowledgeEdgeDraft(
                     source_key=("document", str(document.id)),
@@ -1133,7 +1166,9 @@ class ProductIntelligenceService:
         if not settings.TASK_WEBHOOK_URL or not tasks:
             return
 
-        async with httpx.AsyncClient(timeout=settings.TASK_WEBHOOK_TIMEOUT_SECONDS) as client:
+        async with httpx.AsyncClient(
+            timeout=settings.TASK_WEBHOOK_TIMEOUT_SECONDS
+        ) as client:
             for task in tasks:
                 review_status = (task.metadata_json or {}).get("review_status")
                 if review_status == "suggested":
@@ -1150,20 +1185,34 @@ class ProductIntelligenceService:
                     "owner_label": task.owner_label,
                     "due_at": task.due_at.isoformat() if task.due_at else None,
                     "review_status": review_status,
-                    "confidence_level": (task.metadata_json or {}).get("confidence_level"),
-                    "confidence_score": (task.metadata_json or {}).get("confidence_score"),
-                    "evidence_method": (task.metadata_json or {}).get("evidence_method"),
-                    "blocked_by_task_ids": (task.metadata_json or {}).get("blocked_by_task_ids", []),
-                    "acceptance_criteria": (task.metadata_json or {}).get("acceptance_criteria", []),
+                    "confidence_level": (task.metadata_json or {}).get(
+                        "confidence_level"
+                    ),
+                    "confidence_score": (task.metadata_json or {}).get(
+                        "confidence_score"
+                    ),
+                    "evidence_method": (task.metadata_json or {}).get(
+                        "evidence_method"
+                    ),
+                    "blocked_by_task_ids": (task.metadata_json or {}).get(
+                        "blocked_by_task_ids", []
+                    ),
+                    "acceptance_criteria": (task.metadata_json or {}).get(
+                        "acceptance_criteria", []
+                    ),
                     "metadata_json": task.metadata_json,
                 }
                 try:
-                    response = await client.post(settings.TASK_WEBHOOK_URL, json=payload)
+                    response = await client.post(
+                        settings.TASK_WEBHOOK_URL, json=payload
+                    )
                     response.raise_for_status()
                     task.hook_status = "delivered"
                     task.hook_response = f"HTTP {response.status_code}"
                 except Exception as exc:
-                    logger.warning("Task webhook delivery failed for task %s: %s", task.id, exc)
+                    logger.warning(
+                        "Task webhook delivery failed for task %s: %s", task.id, exc
+                    )
                     task.hook_status = "failed"
                     task.hook_response = str(exc)[:500]
                 task.hook_last_attempt_at = datetime.now(UTC)
@@ -1208,10 +1257,16 @@ class ProductIntelligenceService:
             if not normalized:
                 continue
             if "action item:" in lowered:
-                title = normalized.split("Action item:", 1)[-1].split("action item:", 1)[-1].strip()
+                title = (
+                    normalized.split("Action item:", 1)[-1]
+                    .split("action item:", 1)[-1]
+                    .strip()
+                )
             elif lowered.startswith(("todo", "next step")):
                 title = normalized.split(":", 1)[-1].strip()
-            elif re.match(r"^[A-Z][a-z]+(?: [A-Z][a-z]+){0,2}\s+(?:to|will)\s+", normalized):
+            elif re.match(
+                r"^[A-Z][a-z]+(?: [A-Z][a-z]+){0,2}\s+(?:to|will)\s+", normalized
+            ):
                 title = normalized
             else:
                 continue
@@ -1234,7 +1289,14 @@ class ProductIntelligenceService:
 
     def _extract_deadlines(self, text: str) -> list[dict[str, object]]:
         results: list[dict[str, object]] = []
-        markers = ("by ", "within ", "no later than", "renewal", "effective date", "termination")
+        markers = (
+            "by ",
+            "within ",
+            "no later than",
+            "renewal",
+            "effective date",
+            "termination",
+        )
         for sentence in _SENTENCE_RE.split(text):
             normalized = " ".join(sentence.split())
             lowered = normalized.lower()
@@ -1334,7 +1396,13 @@ class ProductIntelligenceService:
         names: list[str] = []
         for candidate in _PERSON_RE.findall(text):
             normalized = " ".join(candidate.split())
-            if normalized.lower() in {"subject", "from", "date", "attachments", "action items"}:
+            if normalized.lower() in {
+                "subject",
+                "from",
+                "date",
+                "attachments",
+                "action items",
+            }:
                 continue
             if normalized not in names:
                 names.append(normalized)
@@ -1342,7 +1410,9 @@ class ProductIntelligenceService:
 
     @staticmethod
     def _extract_projects(text: str) -> list[str]:
-        return list(dict.fromkeys(match.strip() for match in _PROJECT_RE.findall(text)))[:8]
+        return list(
+            dict.fromkeys(match.strip() for match in _PROJECT_RE.findall(text))
+        )[:8]
 
     @staticmethod
     def _summarize_text(
@@ -1356,7 +1426,9 @@ class ProductIntelligenceService:
             for sentence in _SENTENCE_RE.split(text)
             if len(sentence.split()) >= 5
         ]
-        selected = candidates[:max_sentences] or (fallback_sentences or [])[:max_sentences]
+        selected = (
+            candidates[:max_sentences] or (fallback_sentences or [])[:max_sentences]
+        )
         summary = " ".join(selected).strip()
         return summary[:800] if summary else "No summary available."
 
@@ -1396,7 +1468,9 @@ class ProductIntelligenceService:
         return re.sub(r"[^a-z0-9]+", "-", label.lower()).strip("-") or node_type
 
     @staticmethod
-    def _scoped_graph_external_key(connector_id: UUID, node_type: str, label: str) -> str:
+    def _scoped_graph_external_key(
+        connector_id: UUID, node_type: str, label: str
+    ) -> str:
         slug = ProductIntelligenceService._node_key(node_type, label)
         raw = f"{connector_id}:{node_type}:{slug}"
         return raw[:240]

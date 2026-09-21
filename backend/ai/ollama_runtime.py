@@ -151,7 +151,9 @@ class OllamaRuntimeService:
         return f"Unable to reach Ollama at {exc.request.url}: {exc}"
 
     async def _list_models(self) -> list[str]:
-        async with self._client(self.settings.OLLAMA_READINESS_TIMEOUT_SECONDS) as client:
+        async with self._client(
+            self.settings.OLLAMA_READINESS_TIMEOUT_SECONDS
+        ) as client:
             try:
                 response = await client.get(f"{self.base_url}/api/tags")
                 response.raise_for_status()
@@ -174,7 +176,10 @@ class OllamaRuntimeService:
             try:
                 response = await client.post(
                     f"{self.base_url}/api/embed",
-                    json={"model": self.settings.OLLAMA_EMBEDDING_MODEL, "input": "warmup"},
+                    json={
+                        "model": self.settings.OLLAMA_EMBEDDING_MODEL,
+                        "input": "warmup",
+                    },
                 )
                 response.raise_for_status()
                 return
@@ -185,7 +190,10 @@ class OllamaRuntimeService:
             # Backward compatibility with older Ollama versions.
             response = await client.post(
                 f"{self.base_url}/api/embeddings",
-                json={"model": self.settings.OLLAMA_EMBEDDING_MODEL, "prompt": "warmup"},
+                json={
+                    "model": self.settings.OLLAMA_EMBEDDING_MODEL,
+                    "prompt": "warmup",
+                },
             )
             response.raise_for_status()
 
@@ -212,7 +220,9 @@ class OllamaRuntimeService:
             return self._base_status(ready=False, error=self._format_http_error(exc))
 
         required_models = self._required_models()
-        missing_models = [model for model in required_models if model not in available_models]
+        missing_models = [
+            model for model in required_models if model not in available_models
+        ]
         if missing_models:
             error = f"Missing required Ollama models: {', '.join(missing_models)}"
             return self._base_status(

@@ -40,7 +40,10 @@ class ConnectorRepository(BaseRepository[Connector]):
             stmt = stmt.where(Connector.owner_user_id == user_id)
         else:
             stmt = stmt.where(
-                or_(Connector.owner_user_id == user_id, Connector.owner_user_id.is_(None))
+                or_(
+                    Connector.owner_user_id == user_id,
+                    Connector.owner_user_id.is_(None),
+                )
             )
         result = await self.session.execute(stmt)
         return list(result.scalars().all())

@@ -147,6 +147,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!nc_ai_bridge/lib/
+!nc_ai_bridge/lib/**
 lib64/
 parts/
 sdist/

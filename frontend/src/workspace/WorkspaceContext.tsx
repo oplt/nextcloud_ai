@@ -72,6 +72,7 @@ import {
   type WorkspaceNavItem,
   type WorkspaceSection,
 } from './navConfig';
+import { startJobsPollScheduler } from './jobsPolling';
 
 type BackendStatus = {
   kind: 'checking' | 'ready' | 'degraded' | 'offline';
@@ -80,13 +81,7 @@ type BackendStatus = {
 };
 
 const HEALTH_POLL_INTERVAL_MS = 30_000;
-const ACTIVE_JOBS_POLL_INTERVAL_MS = 5_000;
-const IDLE_JOBS_POLL_INTERVAL_MS = 20_000;
 const DOCUMENTS_POLL_INTERVAL_MS = 15_000;
-
-function isActiveJob(job: SyncJob): boolean {
-  return ['pending', 'queued', 'running', 'processing', 'retrying'].includes(job.status);
-}
 
 export type WorkspaceContextValue = {
   user: User;
@@ -221,6 +216,8 @@ export function WorkspaceProvider({
   const [busy, setBusy] = useState(false);
   const latestChatRequestId = useRef<string | null>(null);
   const jobsRequestInFlight = useRef(false);
+  const jobsRef = useRef(jobs);
+  jobsRef.current = jobs;
 
   const selectedDocumentId = selectedDocument?.id ?? null;
   const isAdmin = Boolean(user?.is_superuser || user?.role?.name === 'admin');
@@ -441,21 +438,25 @@ export function WorkspaceProvider({
       return;
     }
 
-    const jobsPollIntervalMs = jobs.some(isActiveJob)
-      ? ACTIVE_JOBS_POLL_INTERVAL_MS
-      : IDLE_JOBS_POLL_INTERVAL_MS;
+    // Completion-based timer; do not depend on `jobs` (that caused fetch storms).
+    const stop = startJobsPollScheduler({
+      load: loadJobs,
+      getJobs: () => jobsRef.current,
+      isVisible: () => document.visibilityState !== 'hidden',
+    });
 
-    void loadJobs({ silent: jobs.length > 0 });
-    const intervalId = window.setInterval(() => {
-      if (document.visibilityState !== 'hidden') {
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible' && !jobsRequestInFlight.current) {
         void loadJobs({ silent: true });
       }
-    }, jobsPollIntervalMs);
+    };
+    document.addEventListener('visibilitychange', handleVisibilityChange);
 
     return () => {
-      window.clearInterval(intervalId);
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
     };
-  }, [jobs, loadJobs, user, workspaceSection]);
+  }, [loadJobs, user, workspaceSection]);
 
   useEffect(() => {
     if (!user || workspaceSection !== 'documents') {

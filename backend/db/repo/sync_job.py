@@ -50,18 +50,30 @@ class SyncJobRepository(BaseRepository[SyncJob]):
         return result.scalar_one_or_none()
 
     async def reset_stale_running_jobs(self, *, message: str) -> int:
+        """Fail only abandoned jobs whose lease has expired (or never leased)."""
         now = datetime.now(timezone.utc)
         result = await self.session.execute(
             update(SyncJob)
-            .where(SyncJob.status == "running")
+            .where(
+                SyncJob.status.in_(("running", "retrying")),
+                or_(
+                    SyncJob.lease_expires_at.is_(None),
+                    SyncJob.lease_expires_at < now,
+                ),
+            )
             .values(
                 status="failed",
                 completed_at=now,
                 error_message=message,
+                lease_expires_at=None,
             )
         )
         await self.session.commit()
         return int(result.rowcount or 0)
+
+    async def fail_expired_leases(self, *, message: str) -> int:
+        """Same as reset_stale_running_jobs; explicit name for beat/API use."""
+        return await self.reset_stale_running_jobs(message=message)
 
     async def list_visible_to_user(
         self,

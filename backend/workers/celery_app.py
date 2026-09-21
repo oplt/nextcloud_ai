@@ -39,6 +39,14 @@ celery_app.conf.update(
             "task": "backend.workers.indexing_tasks.enqueue_stale_connector_syncs",
             "schedule": settings.NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS,
         },
+        "dispatch-work-outbox": {
+            "task": "backend.workers.indexing_tasks.dispatch_work_outbox",
+            "schedule": 15.0,
+        },
+        "fail-expired-job-leases": {
+            "task": "backend.workers.indexing_tasks.fail_expired_job_leases",
+            "schedule": 60.0,
+        },
     },
 )
 
@@ -52,6 +60,9 @@ def init_worker_process(**kwargs):
 
     try:
         loop.run_until_complete(dispose_db())
+        from ..core.ai_resources import start_ai_resources
+
+        loop.run_until_complete(start_ai_resources(role="worker"))
         logger.info("Worker %s initialized with fresh event loop", os.getpid())
     except Exception:
         logger.warning("Error disposing inherited DB connections", exc_info=True)
@@ -62,6 +73,9 @@ def shutdown_worker_process(**kwargs):
     try:
         loop = asyncio.get_event_loop()
         if not loop.is_closed():
+            from ..core.ai_resources import stop_ai_resources
+
+            loop.run_until_complete(stop_ai_resources())
             loop.run_until_complete(dispose_db())
             loop.close()
         logger.info("Worker %s shutdown complete", os.getpid())
@@ -78,12 +92,15 @@ def _warm_ollama_models() -> None:
             status = await runtime.check_readiness()
 
         if status.ready:
-            logger.info("Celery worker warmed Ollama models: %s", ", ".join(status.required_models.values()))
+            logger.info(
+                "Celery worker warmed Ollama models: %s",
+                ", ".join(status.required_models.values()),
+            )
         else:
             logger.warning(
                 "Celery worker could not prepare Ollama models: %s",
                 status.error or ", ".join(status.missing_models),
-                )
+            )
 
     try:
         asyncio.run(warm_models())

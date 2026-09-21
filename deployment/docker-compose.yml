@@ -24,6 +24,7 @@ services:
       - ../backend/.env
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -79,7 +80,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -95,7 +96,7 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
@@ -103,9 +104,21 @@ services:
         set -eu
 
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        alembic -c alembic.ini upgrade head
-        python -m scripts.seed_admin
-        uvicorn main:app --host 0.0.0.0 --port 8000
+        # Extension also created by Alembic; keep an explicit ensure for older volumes.
+        python - <<'PYVEC'
+        import asyncio, os
+        from sqlalchemy import text
+        from sqlalchemy.ext.asyncio import create_async_engine
+        async def main():
+            engine = create_async_engine(os.environ["DATABASE_URL"], isolation_level="AUTOCOMMIT")
+            async with engine.begin() as conn:
+                await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            await engine.dispose()
+        asyncio.run(main())
+        PYVEC
+        alembic -c backend/alembic.ini upgrade head
+        python -m backend.scripts.seed_admin
+        uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
   worker:
     build:
@@ -117,7 +130,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -133,13 +146,13 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
       - |
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        celery -A workers.celery_app:celery_app worker --loglevel=INFO
+        celery -A backend.workers.celery_app:celery_app worker --loglevel=INFO
 
   scheduler:
     build:
@@ -151,7 +164,7 @@ services:
     environment:
       APP_ENV: production
       DEBUG: "false"
-      PYTHONPATH: /app/backend
+      PYTHONPATH: /app
       POSTGRES_HOST: postgres
       REDIS_URL: redis://redis:6379/0
       CELERY_BROKER_URL: redis://redis:6379/0
@@ -167,13 +180,13 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
-    working_dir: /app/backend
+    working_dir: /app
     command:
       - /bin/sh
       - -c
       - |
         export DATABASE_URL="postgresql+asyncpg://$${POSTGRES_USER}:$${POSTGRES_PASSWORD}@$${POSTGRES_HOST:-postgres}:$${POSTGRES_PORT:-5432}/$${POSTGRES_DB}"
-        celery -A workers.celery_app:celery_app beat --loglevel=INFO
+        celery -A backend.workers.celery_app:celery_app beat --loglevel=INFO
 
   frontend:
     build:

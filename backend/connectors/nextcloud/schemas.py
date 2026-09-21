@@ -18,6 +18,8 @@ class DavNode(BaseModel):
 
 
 class ShareGrant(BaseModel):
+    model_config = {"extra": "ignore", "populate_by_name": True}
+
     share_id: str = Field(validation_alias="id")
     share_type: int = Field(validation_alias="share_type")
     permissions: int
@@ -25,6 +27,9 @@ class ShareGrant(BaseModel):
     uid_owner: str | None = None
     share_with: str | None = None
     display_name_owner: str | None = None
+    password: str | bool | None = None
+    expiration: str | datetime | None = None
+    token: str | None = None
 
 
 class AccessControlEntry(BaseModel):
@@ -32,7 +37,11 @@ class AccessControlEntry(BaseModel):
     owner_user_id: str | None = None
     allowed_user_ids: list[str] = Field(default_factory=list)
     allowed_group_ids: list[str] = Field(default_factory=list)
+    # Kept for schema/DB compatibility; must not imply global corpus read.
     public_link_enabled: bool = False
+    public_link_open_read_observed: bool = False
+    unresolved_share_types: list[int] = Field(default_factory=list)
+    public_link_notes: list[str] = Field(default_factory=list)
     raw_shares: list[ShareGrant] = Field(default_factory=list)
 
 

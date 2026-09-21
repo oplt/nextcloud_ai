@@ -59,15 +59,19 @@ class WorkflowTaskRead(TimestampedSchema):
         self.confidence_level = self.confidence_level or _string_meta(
             meta, validation_meta, "confidence_level"
         )
-        self.confidence_score = self.confidence_score if self.confidence_score is not None else _float_meta(
-            meta, validation_meta, "confidence_score"
+        self.confidence_score = (
+            self.confidence_score
+            if self.confidence_score is not None
+            else _float_meta(meta, validation_meta, "confidence_score")
         )
         self.evidence_method = self.evidence_method or _string_meta(
             meta, validation_meta, "evidence_method"
         )
         if not self.evidence_items:
             evidence_items = meta.get("evidence_items")
-            self.evidence_items = evidence_items if isinstance(evidence_items, list) else []
+            self.evidence_items = (
+                evidence_items if isinstance(evidence_items, list) else []
+            )
         self.reason = self.reason or _string_meta(meta, validation_meta, "reason")
         self.recommended_action = self.recommended_action or _string_meta(
             meta, validation_meta, "recommended_action"

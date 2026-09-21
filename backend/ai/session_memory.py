@@ -19,7 +19,12 @@ def normalize_memory(raw: dict[str, Any] | None) -> dict[str, Any]:
     base = empty_memory()
     if not raw:
         return base
-    for key in ("session_summary", "long_term_items", "focus_lock_document_ids", "version"):
+    for key in (
+        "session_summary",
+        "long_term_items",
+        "focus_lock_document_ids",
+        "version",
+    ):
         if key in raw:
             base[key] = raw[key]
     if not isinstance(base["long_term_items"], list):
@@ -29,7 +34,9 @@ def normalize_memory(raw: dict[str, Any] | None) -> dict[str, Any]:
     return base
 
 
-def prune_expired_items(memory: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
+def prune_expired_items(
+    memory: dict[str, Any], *, now: datetime | None = None
+) -> dict[str, Any]:
     now = now or datetime.now(UTC)
     items = memory.get("long_term_items") or []
     kept: list[dict[str, Any]] = []
@@ -51,7 +58,9 @@ def prune_expired_items(memory: dict[str, Any], *, now: datetime | None = None) 
     return memory
 
 
-def apply_memory_item_patch(memory: dict[str, Any], items: list[dict[str, Any]] | None) -> None:
+def apply_memory_item_patch(
+    memory: dict[str, Any], items: list[dict[str, Any]] | None
+) -> None:
     if not items:
         return
     bucket = memory.setdefault("long_term_items", [])
@@ -77,14 +86,23 @@ def build_memory_prompt_block(memory: dict[str, Any]) -> str:
     parts: list[str] = []
     summary = memory.get("session_summary")
     if isinstance(summary, str) and summary.strip():
-        parts.append("SESSION MEMORY (conversation summary, not evidence):\n" + summary.strip()[:2400])
+        parts.append(
+            "SESSION MEMORY (conversation summary, not evidence):\n"
+            + summary.strip()[:2400]
+        )
     items = memory.get("long_term_items") or []
     lines = []
     for item in items[:12]:
         if isinstance(item, dict) and item.get("text"):
             lines.append(f"- [{item.get('kind', 'note')}] {item['text'][:400]}")
     if lines:
-        parts.append("STRUCTURED MEMORY ITEMS (user-stated goals/notes, not evidence):\n" + "\n".join(lines))
+        parts.append(
+            "STRUCTURED MEMORY ITEMS (user-stated goals/notes, not evidence):\n"
+            + "\n".join(lines)
+        )
     if not parts:
         return ""
-    return "\n\n".join(parts) + "\n\nUse DOCUMENT SOURCES below for factual claims; memory blocks are not evidence.\n"
+    return (
+        "\n\n".join(parts)
+        + "\n\nUse DOCUMENT SOURCES below for factual claims; memory blocks are not evidence.\n"
+    )

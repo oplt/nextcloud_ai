@@ -38,7 +38,10 @@ class ConnectorService:
         self, payload: ConnectorCreate, actor: User
     ) -> Connector:
         owner_user_id = actor.id
-        if payload.owner_user_id is not None and normalize_role_name_from_user(actor) == "admin":
+        if (
+            payload.owner_user_id is not None
+            and normalize_role_name_from_user(actor) == "admin"
+        ):
             if await self.user_repo.get(payload.owner_user_id) is None:
                 raise NotFoundError("Owner user not found")
             owner_user_id = payload.owner_user_id
@@ -52,7 +55,9 @@ class ConnectorService:
         else:
             metadata.update(
                 {
-                    "verify_tls": True if payload.verify_tls is None else payload.verify_tls,
+                    "verify_tls": True
+                    if payload.verify_tls is None
+                    else payload.verify_tls,
                     "port": payload.port,
                     "use_ssl": True if payload.use_ssl is None else payload.use_ssl,
                     "search_criteria": payload.search_criteria or "ALL",
@@ -144,7 +149,9 @@ class ConnectorService:
         allowed = (
             connector_is_manageable_by_identity(connector, auth=actor_auth, user=actor)
             if write
-            else connector_is_visible_to_identity(connector, auth=actor_auth, user=actor)
+            else connector_is_visible_to_identity(
+                connector, auth=actor_auth, user=actor
+            )
         )
         if not allowed:
             raise AuthorizationError("Connector is not assigned to you")
@@ -177,7 +184,9 @@ class ConnectorService:
                 connector.status = "healthy"
                 connector.last_error = None
                 await self.session.commit()
-                return ConnectorTestResponse(ok=True, message="IMAP credentials verified")
+                return ConnectorTestResponse(
+                    ok=True, message="IMAP credentials verified"
+                )
             except Exception as exc:
                 connector.status = "error"
                 connector.last_error = str(exc)
@@ -192,7 +201,9 @@ class ConnectorService:
             connector.status = "healthy"
             connector.last_error = None
             await self.session.commit()
-            return ConnectorTestResponse(ok=True, message="Nextcloud credentials verified")
+            return ConnectorTestResponse(
+                ok=True, message="Nextcloud credentials verified"
+            )
         except Exception as exc:
             connector.status = "error"
             connector.last_error = str(exc)

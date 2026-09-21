@@ -62,7 +62,9 @@ def test_summary_request_with_metadata_only_does_not_use_title_shortcut() -> Non
 
 
 def test_summary_request_gets_summary_specific_prompt_rules() -> None:
-    rules = ChatService._answer_style_rules("summarize the article that Ozgur Polat write in 2012")
+    rules = ChatService._answer_style_rules(
+        "summarize the article that Ozgur Polat write in 2012"
+    )
 
     assert any("summarize the source content itself" in rule for rule in rules)
     assert any("do not answer by only naming the title" in rule for rule in rules)
@@ -120,11 +122,16 @@ def test_summary_sentence_cleaning_removes_pdf_heading_prefix() -> None:
         "Evidence from Turkish Economy > The results of estimations show that impact of production on employment is positive."
     )
 
-    assert cleaned == "The results of estimations show that impact of production on employment is positive."
+    assert (
+        cleaned
+        == "The results of estimations show that impact of production on employment is positive."
+    )
 
 
 def test_summary_chunk_relevance_prefers_article_body_sections() -> None:
-    source = _article_source().model_copy(update={"section_title": "Abstract", "heading_path": "Abstract"})
+    source = _article_source().model_copy(
+        update={"section_title": "Abstract", "heading_path": "Abstract"}
+    )
     chunk = SimpleNamespace(
         content=" ".join(["foreign trade affects labor market outcomes"] * 35),
         section_title="Abstract",
@@ -136,7 +143,9 @@ def test_summary_chunk_relevance_prefers_article_body_sections() -> None:
 
 
 def test_summary_chunk_relevance_ignores_tiny_metadata_chunks() -> None:
-    source = _article_source().model_copy(update={"section_title": "Title", "heading_path": "Title"})
+    source = _article_source().model_copy(
+        update={"section_title": "Title", "heading_path": "Title"}
+    )
     chunk = SimpleNamespace(
         content="The Impact of Foreign Trade on the Labor Market",
         section_title="Title",
@@ -157,6 +166,9 @@ def test_title_request_still_uses_title_shortcut() -> None:
 
     assert result is not None
     answer, sources, summary = result
-    assert answer == "The Impact of Foreign Trade on the Labor Market: Evidence from Turkish Economy [1]"
+    assert (
+        answer
+        == "The Impact of Foreign Trade on the Labor Market: Evidence from Turkish Economy [1]"
+    )
     assert sources == [source]
     assert summary["direct_extraction_type"] == "title"

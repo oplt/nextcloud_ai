@@ -34,7 +34,9 @@ class NextcloudSyncService:
         async def build_item(node: DavNode) -> SyncBatchItem:
             async with semaphore:
                 acl = await self.permissions.build_acl_for_path(
-                    node.path, owner_user_id=self.client.config.username
+                    node.path,
+                    owner_user_id=self.client.config.username,
+                    instance_base_url=str(self.client.config.base_url),
                 )
             return SyncBatchItem(node=node, acl=acl)
 

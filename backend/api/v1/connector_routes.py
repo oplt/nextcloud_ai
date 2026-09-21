@@ -28,9 +28,9 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 @router.post("", response_model=ConnectorRead)
 async def create_connector(
-        payload: ConnectorCreate,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:create")),
+    payload: ConnectorCreate,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("connectors:create")),
 ) -> ConnectorRead:
     connector = await ConnectorService(session).create_connector(
         payload, actor=identity.user
@@ -40,18 +40,20 @@ async def create_connector(
 
 @router.get("", response_model=list[ConnectorRead])
 async def list_connectors(
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:read")),
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("connectors:read")),
 ) -> list[ConnectorRead]:
-    connectors = await ConnectorService(session).list_connectors_for_actor(identity.user)
+    connectors = await ConnectorService(session).list_connectors_for_actor(
+        identity.user
+    )
     return [ConnectorRead.model_validate(connector) for connector in connectors]
 
 
 @router.get("/{connector_id}", response_model=ConnectorRead)
 async def get_connector(
-        connector_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:read")),
+    connector_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("connectors:read")),
 ) -> ConnectorRead:
     connector = await ConnectorService(session).get_connector_for_actor(
         connector_id, actor=identity.user
@@ -61,10 +63,12 @@ async def get_connector(
 
 @router.patch("/{connector_id}", response_model=ConnectorRead)
 async def update_connector(
-        connector_id: str,
-        payload: ConnectorUpdate,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:update_owned")),
+    connector_id: str,
+    payload: ConnectorUpdate,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(
+        permission_required("connectors:update_owned")
+    ),
 ) -> ConnectorRead:
     connector = await ConnectorService(session).update_connector(
         connector_id, payload, actor=identity.user
@@ -74,9 +78,11 @@ async def update_connector(
 
 @router.delete("/{connector_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_connector(
-        connector_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:delete_owned")),
+    connector_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(
+        permission_required("connectors:delete_owned")
+    ),
 ) -> Response:
     await ConnectorService(session).delete_connector(connector_id, actor=identity.user)
     return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -84,9 +90,9 @@ async def delete_connector(
 
 @router.post("/{connector_id}/test", response_model=ConnectorTestResponse)
 async def test_connector(
-        connector_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:test")),
+    connector_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("connectors:test")),
 ) -> ConnectorTestResponse:
     service = ConnectorService(session)
     connector = await service.get_connector_for_actor(
@@ -104,10 +110,10 @@ async def test_connector(
 
 @router.post("/{connector_id}/sync", response_model=SyncJobRead)
 async def sync_connector(
-        connector_id: str,
-        payload: ConnectorSyncRequest,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("connectors:sync_owned")),
+    connector_id: str,
+    payload: ConnectorSyncRequest,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("connectors:sync_owned")),
 ) -> SyncJobRead:
     await ConnectorService(session).get_connector_for_actor(
         connector_id, actor=identity.user, write=True

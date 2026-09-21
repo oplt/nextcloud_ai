@@ -1,0 +1,25 @@
+{
+  "identities": [
+    {
+      "key": "alice",
+      "username": "alice",
+      "display_name": "Alice Eval",
+      "is_superuser": false,
+      "role_name": "user"
+    },
+    {
+      "key": "bob",
+      "username": "bob",
+      "display_name": "Bob Eval",
+      "is_superuser": false,
+      "role_name": "user"
+    },
+    {
+      "key": "admin",
+      "username": "eval-admin",
+      "display_name": "Eval Admin",
+      "is_superuser": true,
+      "role_name": "admin"
+    }
+  ]
+}

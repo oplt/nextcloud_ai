@@ -3,6 +3,7 @@ from __future__ import annotations
 import re
 
 from ..db.models import DocumentChunk
+from .lexical import semantic_json_text
 from .stores import RetrievalCandidate
 
 _TOKEN_RE = re.compile(r"[^\W\s]+", flags=re.UNICODE)
@@ -41,59 +42,65 @@ _DUE_DATE_CONTEXT_RE = re.compile(
 )
 
 
-
 class ContextReranker:
     def __init__(
-            self,
-            *,
-            vector_weight: float = 0.45,
-            keyword_weight: float = 0.35,
-            content_weight: float = 0.20,
+        self,
+        *,
+        vector_weight: float = 0.45,
+        keyword_weight: float = 0.35,
+        content_weight: float = 0.20,
     ) -> None:
         self.vector_weight = max(0.0, min(1.0, vector_weight))
         self.keyword_weight = max(0.0, min(1.0, keyword_weight))
         self.content_weight = max(0.0, min(1.0, content_weight))
 
     def rerank(
-            self,
-            *,
-            question: str,
-            keyword_terms: list[str],
-            candidates: list[RetrievalCandidate],
+        self,
+        *,
+        question: str,
+        keyword_terms: list[str],
+        candidates: list[RetrievalCandidate],
     ) -> list[RetrievalCandidate]:
         question_terms = _terms(question)
         all_terms = _dedupe([*keyword_terms, *question_terms])
 
         for candidate in candidates:
-            candidate.fused_score = self._weighted_fusion(candidate)
+            # Preserve RRF fused_score from HybridRetriever when present.
+            if candidate.fused_score <= 0:
+                candidate.fused_score = self._weighted_fusion(candidate)
             candidate.rerank_score = self._score(
                 question_terms=question_terms,
                 keyword_terms=all_terms,
                 candidate=candidate,
             )
 
-        return sorted(candidates, key=lambda item: item.score, reverse=True)
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.score,
+                item.fused_score,
+                item.candidate_id,
+            ),
+            reverse=True,
+        )
 
     def _score(
-            self,
-            *,
-            question_terms: list[str],
-            keyword_terms: list[str],
-            candidate: RetrievalCandidate,
+        self,
+        *,
+        question_terms: list[str],
+        keyword_terms: list[str],
+        candidate: RetrievalCandidate,
     ) -> float:
         chunk = candidate.chunk
 
         score = (
-                candidate.semantic_score * self.vector_weight
-                + candidate.keyword_score * self.keyword_weight
-                + self._content_score(question_terms, keyword_terms, chunk) * self.content_weight
+            candidate.semantic_score * self.vector_weight
+            + candidate.keyword_score * self.keyword_weight
+            + self._content_score(question_terms, keyword_terms, chunk)
+            * self.content_weight
         )
 
-        total_weight = (
-                self.vector_weight
-                + self.keyword_weight
-                + self.content_weight
-        )
+        total_weight = self.vector_weight + self.keyword_weight + self.content_weight
 
         if total_weight <= 0:
             return self._fallback_score(candidate)
@@ -115,18 +122,18 @@ class ContextReranker:
             max(
                 0.0,
                 (
-                        candidate.semantic_score * self.vector_weight
-                        + candidate.keyword_score * self.keyword_weight
+                    candidate.semantic_score * self.vector_weight
+                    + candidate.keyword_score * self.keyword_weight
                 )
                 / total_weight,
-                ),
+            ),
         )
 
     @staticmethod
     def _content_score(
-            question_terms: list[str],
-            keyword_terms: list[str],
-            chunk: DocumentChunk,
+        question_terms: list[str],
+        keyword_terms: list[str],
+        chunk: DocumentChunk,
     ) -> float:
         terms = _dedupe([*question_terms, *keyword_terms])
         if not terms:
@@ -141,8 +148,18 @@ class ContextReranker:
             ((document.file_path if document is not None else "") or "", 2.0),
             ((document.document_type if document is not None else "") or "", 2.0),
             ((document.business_domain if document is not None else "") or "", 2.0),
-            (_json_text(document.metadata_json) if document is not None else "", 2.5),
-            (_json_text(document.extracted_fields_json) if document is not None else "", 3.0),
+            (
+                semantic_json_text(document.metadata_json)
+                if document is not None
+                else "",
+                2.5,
+            ),
+            (
+                semantic_json_text(document.extracted_fields_json)
+                if document is not None
+                else "",
+                3.0,
+            ),
         ]
 
         score = 0.0
@@ -164,9 +181,7 @@ class ContextReranker:
     @staticmethod
     def _temporal_score(question_terms: list[str], chunk: DocumentChunk) -> float:
         requested_years = [
-            int(term)
-            for term in question_terms
-            if _YEAR_RE.fullmatch(term)
+            int(term) for term in question_terms if _YEAR_RE.fullmatch(term)
         ]
         if not requested_years:
             return 0.0
@@ -220,6 +235,7 @@ class ContextReranker:
             return 0.0
         return 0.45 if _DUE_DATE_CONTEXT_RE.search(text) else 0.0
 
+
 def _terms(text: str) -> list[str]:
     return [
         token.lower()
@@ -251,18 +267,3 @@ def _chunk_search_text(chunk: DocumentChunk) -> str:
             (document.file_path if document is not None else "") or "",
         ]
     )
-
-
-def _json_text(value: dict | None) -> str:
-    if not value:
-        return ""
-    parts: list[str] = []
-    for key, item in value.items():
-        parts.append(str(key))
-        if isinstance(item, dict):
-            parts.append(_json_text(item))
-        elif isinstance(item, list):
-            parts.extend(str(entry) for entry in item)
-        elif item is not None:
-            parts.append(str(item))
-    return " ".join(parts)

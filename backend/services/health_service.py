@@ -114,10 +114,17 @@ class HealthCheckService:
             ):
                 return _ai_runtime_cache_status
 
-            status = await OllamaRuntimeService(settings_obj=self.settings).check_readiness()
+            status = await OllamaRuntimeService(
+                settings_obj=self.settings
+            ).check_readiness()
             _ai_runtime_cache_status = status
             _ai_runtime_cache_checked_at = now
             return status
 
     def check_embedding_provider(self) -> dict[str, object]:
         return embedding_provider_health()
+
+    def check_rerank_runtime(self):
+        from ..rag.rerank_runtime import get_rerank_status
+
+        return get_rerank_status()

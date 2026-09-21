@@ -92,6 +92,16 @@ class Settings(BaseSettings):
     RAG_TRUE_RERANK_ENABLED: bool = True
     RAG_TRUE_RERANK_MODEL: str = Field(default="BAAI/bge-reranker-v2-m3", min_length=1)
     RAG_TRUE_RERANK_TOP_K: int = Field(default=30, ge=1, le=100)
+    # heuristic = keep ContextReranker scores when true rerank unavailable (explicit/observable).
+    # fail = mark not ready; optionally abort startup when RAG_TRUE_RERANK_FAIL_STARTUP is true.
+    RAG_TRUE_RERANK_FALLBACK: Literal["heuristic", "fail"] = "heuristic"
+    RAG_TRUE_RERANK_PRELOAD: bool = True
+    RAG_TRUE_RERANK_FAIL_STARTUP: bool = False
+    # Prompt packing budget (approx tokens; ~4 chars/token).
+    RAG_PROMPT_CONTEXT_TOKENS: int = Field(default=8192, ge=2048, le=128_000)
+    RAG_PROMPT_OUTPUT_RESERVE_TOKENS: int = Field(default=1024, ge=128, le=8192)
+    RAG_PROMPT_MARGIN_TOKENS: int = Field(default=256, ge=32, le=2048)
+    RAG_PROMPT_PER_SOURCE_CAP_TOKENS: int = Field(default=1800, ge=200, le=8000)
 
     PRODUCT_INTELLIGENCE_ENABLED: bool = True
     PRODUCT_INTELLIGENCE_EXTRACTION_MODE: Literal["off", "inline", "async"] = "async"
@@ -107,13 +117,22 @@ class Settings(BaseSettings):
     NEXTCLOUD_REQUEST_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=120.0)
     NEXTCLOUD_CONNECTOR_INTERNAL_BASE_URL: AnyHttpUrl | None = None
     NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS: int = Field(default=30, ge=1, le=3600)
-    NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS: int = Field(
-        default=300, ge=30, le=86400
-    )
-    NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS: int = Field(
-        default=900, ge=60, le=604800
-    )
+    NEXTCLOUD_FALLBACK_SYNC_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=86400)
+    NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS: int = Field(default=900, ge=60, le=604800)
+    SYNC_JOB_LEASE_SECONDS: int = Field(default=120, ge=30, le=3600)
+    SYNC_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=7200)
+    EMBEDDING_MAX_INPUT_CHARS: int = Field(default=24_000, ge=1_000, le=200_000)
+    EMBEDDING_BATCH_MAX_CHARS: int = Field(default=96_000, ge=4_000, le=1_000_000)
+    EMBEDDING_COMPAT_REQUIRED: bool = False
     NEXTCLOUD_SYNC_INGEST_CONCURRENCY: int = Field(default=4, ge=1, le=32)
+    NEXTCLOUD_SYNC_PROGRESS_EVERY: int = Field(default=10, ge=1, le=500)
+    # development: optional local eager when workers absent (cached ping).
+    # never: always enqueue to broker. always: always run in-process.
+    CELERY_LOCAL_MODE: Literal["auto", "never", "always"] = "auto"
+    # IVFFlat probes for authorized ANN (pgvector). Tune after representative load.
+    PGVECTOR_IVFFLAT_PROBES: int = Field(default=10, ge=1, le=1000)
+    # When scoped document_ids length <= this/30, skip SET probes (exact order).
+    PGVECTOR_EXACT_SEARCH_MAX_CANDIDATES: int = Field(default=2000, ge=100, le=100_000)
     EMAIL_CONNECTOR_FETCH_LIMIT: int = Field(default=100, ge=1, le=500)
     EMAIL_INLINE_BLOB_MAX_BYTES: int = Field(default=2_000_000, ge=4096, le=20_000_000)
     TASK_WEBHOOK_URL: str | None = None
@@ -127,7 +146,6 @@ class Settings(BaseSettings):
     TRACE_ID_HEADER_NAME: str = "X-Trace-ID"
     SYNC_TIMEOUT_SECONDS: int = 900
     LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
-
 
     @field_validator("DATABASE_URL", mode="before")
     @classmethod
@@ -154,7 +172,9 @@ class Settings(BaseSettings):
 
         if normalized.startswith("[") and normalized.endswith("]"):
             parsed = json.loads(normalized)
-            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+            if isinstance(parsed, list) and all(
+                isinstance(item, str) for item in parsed
+            ):
                 return parsed
 
         return normalized.strip("'\"")
@@ -286,11 +306,54 @@ class Settings(BaseSettings):
     @model_validator(mode="after")
     def validate_security_settings(self) -> "Settings":
         if self.APP_ENV in {"staging", "production"} and not self.auth_cookie_secure:
-            raise ValueError("AUTH_COOKIE_SECURE must be enabled outside development/test")
+            raise ValueError(
+                "AUTH_COOKIE_SECURE must be enabled outside development/test"
+            )
         if self.AUTH_COOKIE_SAMESITE == "none" and not self.auth_cookie_secure:
             raise ValueError("AUTH_COOKIE_SAMESITE='none' requires AUTH_COOKIE_SECURE")
         if self.csrf_cookie_samesite == "none" and not self.csrf_cookie_secure:
             raise ValueError("CSRF_COOKIE_SAMESITE='none' requires CSRF_COOKIE_SECURE")
+
+        if self.APP_ENV in {"staging", "production"}:
+            placeholder_secrets = {
+                "change-me",
+                "changeme",
+                "secret",
+                "password",
+                "jwt-secret",
+                "nextcloud-bridge",
+            }
+            jwt_secret = self.JWT_SECRET_KEY.get_secret_value().strip().lower()
+            bridge_secret = (
+                self.NEXTCLOUD_BRIDGE_SHARED_SECRET.get_secret_value().strip().lower()
+            )
+            if jwt_secret in placeholder_secrets or len(jwt_secret) < 16:
+                raise ValueError(
+                    "JWT_SECRET_KEY must be a non-placeholder secret in staging/production"
+                )
+            if bridge_secret in placeholder_secrets or len(bridge_secret) < 16:
+                raise ValueError(
+                    "NEXTCLOUD_BRIDGE_SHARED_SECRET must be a non-placeholder secret "
+                    "in staging/production"
+                )
+            if self.NEXTCLOUD_WEBHOOK_SECRET is None or not (
+                self.NEXTCLOUD_WEBHOOK_SECRET.get_secret_value() or ""
+            ).strip():
+                raise ValueError(
+                    "NEXTCLOUD_WEBHOOK_SECRET is required in staging/production"
+                )
+            unsafe_passwords = {
+                "changeme123!",
+                "changeme",
+                "admin",
+                "password",
+                "password123",
+            }
+            if self.FIRST_SUPERUSER_PASSWORD.strip().lower() in unsafe_passwords:
+                raise ValueError(
+                    "FIRST_SUPERUSER_PASSWORD must not use a known default in "
+                    "staging/production"
+                )
         return self
 
 

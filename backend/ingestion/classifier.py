@@ -30,94 +30,240 @@ class WeightedRule:
 
 
 TYPE_RULES: tuple[WeightedRule, ...] = (
-    WeightedRule("email_correspondence", (
-        (r"\bfrom:\s", 3.4), (r"\bto:\s", 3.0), (r"\bsubject:\s", 3.0),
-        (r"\bcc:\s", 2.0), (r"\bre:\s", 1.7), (r"\bfwd:\s", 1.7),
-        (r"\bmessage-id\b", 2.8), (r"\bemail\b", 1.6),
-    )),
-    WeightedRule("invoice_finance", (
-        (r"\binvoice\b", 3.5), (r"\breceipt\b", 2.5), (r"\bpayment due\b", 3.0),
-        (r"\bvat\b", 2.0), (r"\btax\b", 1.0), (r"\btotal amount\b", 2.5),
-        (r"\bpurchase order\b|\bpo[-\s]?\d+\b", 2.8),
-    )),
-    WeightedRule("policy_document", (
-        (r"\bpolicy\b", 3.2), (r"\bprocedure\b", 2.7),
-        (r"\bstandard operating procedure\b|\bsop\b", 3.2),
-        (r"\bhandbook\b", 2.6), (r"\bgovernance\b", 2.0), (r"\bretention\b", 1.7),
-        (r"\bapproval workflow\b", 1.8),
-    )),
-    WeightedRule("contract", (
-        (r"\bagreement\b", 3.0), (r"\bcontract\b", 3.0), (r"\bparty\b|\bparties\b", 1.8),
-        (r"\bterm\b", 1.2), (r"\btermination\b", 2.0), (r"\bconfidentiality\b", 2.2),
-        (r"\bmsa\b|\bnda\b|\bdpa\b", 3.2),
-    )),
-    WeightedRule("legal", (
-        (r"\blegal\b", 2.2), (r"\blitigation\b", 3.0), (r"\bcounsel\b", 2.5),
-        (r"\bclaim\b", 2.0), (r"\bliability\b", 2.0), (r"\bcourt\b", 2.2),
-    )),
-    WeightedRule("compliance", (
-        (r"\bgdpr\b|\biso\s?27001\b|\bsoc\s?2\b", 3.5), (r"\baudit\b", 2.5),
-        (r"\bcompliance\b", 3.0), (r"\bregulation\b", 2.0), (r"\bpolicy\b", 1.5),
-        (r"\bcontrol\b", 1.7), (r"\brisk assessment\b", 2.6),
-    )),
-    WeightedRule("meeting_notes", (
-        (r"\bmeeting minutes\b|\bminutes\b", 3.4), (r"\bmeeting notes\b", 3.4),
-        (r"\battendees\b", 2.0), (r"\bagenda\b", 2.0), (r"\baction items?\b", 2.6),
-        (r"\bdecisions?\b", 2.0),
-    )),
-    WeightedRule("technical_documentation", (
-        (r"\bapi\b", 2.2), (r"\bendpoint\b", 2.5), (r"\binstallation\b", 2.6),
-        (r"\bconfiguration\b", 2.0), (r"\btechnical\b", 2.0), (r"\bmanual\b", 2.4),
-        (r"\bspecification\b|\bspec\b", 2.5), (r"\bdatasheet\b", 3.0),
-    )),
-    WeightedRule("hr", (
-        (r"\bemployee\b", 2.4), (r"\bonboarding\b", 2.6), (r"\bpayroll\b", 3.0),
-        (r"\bleave policy\b", 2.8), (r"\bcv\b|\bresume\b", 3.0), (r"\bbenefits\b", 1.6),
-    )),
-    WeightedRule("sales_proposal", (
-        (r"\bproposal\b", 3.2), (r"\bquote\b|\bquotation\b", 3.0), (r"\brfp\b", 3.0),
-        (r"\boffer\b", 2.2), (r"\bpricing\b", 1.8), (r"\bclient\b", 1.3),
-    )),
-    WeightedRule("project_document", (
-        (r"\bproject plan\b", 3.2), (r"\broadmap\b", 2.6), (r"\brequirements\b", 2.2),
-        (r"\bsprint\b", 2.0), (r"\bmilestone\b", 2.0), (r"\bokr\b", 1.8),
-    )),
-    WeightedRule("support_operations", (
-        (r"\brunbook\b", 3.2), (r"\bincident\b", 2.8), (r"\bticket\b", 2.4),
-        (r"\bsla\b", 2.5), (r"\bsupport\b", 2.0), (r"\bpostmortem\b", 2.8),
-    )),
+    WeightedRule(
+        "email_correspondence",
+        (
+            (r"\bfrom:\s", 3.4),
+            (r"\bto:\s", 3.0),
+            (r"\bsubject:\s", 3.0),
+            (r"\bcc:\s", 2.0),
+            (r"\bre:\s", 1.7),
+            (r"\bfwd:\s", 1.7),
+            (r"\bmessage-id\b", 2.8),
+            (r"\bemail\b", 1.6),
+        ),
+    ),
+    WeightedRule(
+        "invoice_finance",
+        (
+            (r"\binvoice\b", 3.5),
+            (r"\breceipt\b", 2.5),
+            (r"\bpayment due\b", 3.0),
+            (r"\bvat\b", 2.0),
+            (r"\btax\b", 1.0),
+            (r"\btotal amount\b", 2.5),
+            (r"\bpurchase order\b|\bpo[-\s]?\d+\b", 2.8),
+        ),
+    ),
+    WeightedRule(
+        "policy_document",
+        (
+            (r"\bpolicy\b", 3.2),
+            (r"\bprocedure\b", 2.7),
+            (r"\bstandard operating procedure\b|\bsop\b", 3.2),
+            (r"\bhandbook\b", 2.6),
+            (r"\bgovernance\b", 2.0),
+            (r"\bretention\b", 1.7),
+            (r"\bapproval workflow\b", 1.8),
+        ),
+    ),
+    WeightedRule(
+        "contract",
+        (
+            (r"\bagreement\b", 3.0),
+            (r"\bcontract\b", 3.0),
+            (r"\bparty\b|\bparties\b", 1.8),
+            (r"\bterm\b", 1.2),
+            (r"\btermination\b", 2.0),
+            (r"\bconfidentiality\b", 2.2),
+            (r"\bmsa\b|\bnda\b|\bdpa\b", 3.2),
+        ),
+    ),
+    WeightedRule(
+        "legal",
+        (
+            (r"\blegal\b", 2.2),
+            (r"\blitigation\b", 3.0),
+            (r"\bcounsel\b", 2.5),
+            (r"\bclaim\b", 2.0),
+            (r"\bliability\b", 2.0),
+            (r"\bcourt\b", 2.2),
+        ),
+    ),
+    WeightedRule(
+        "compliance",
+        (
+            (r"\bgdpr\b|\biso\s?27001\b|\bsoc\s?2\b", 3.5),
+            (r"\baudit\b", 2.5),
+            (r"\bcompliance\b", 3.0),
+            (r"\bregulation\b", 2.0),
+            (r"\bpolicy\b", 1.5),
+            (r"\bcontrol\b", 1.7),
+            (r"\brisk assessment\b", 2.6),
+        ),
+    ),
+    WeightedRule(
+        "meeting_notes",
+        (
+            (r"\bmeeting minutes\b|\bminutes\b", 3.4),
+            (r"\bmeeting notes\b", 3.4),
+            (r"\battendees\b", 2.0),
+            (r"\bagenda\b", 2.0),
+            (r"\baction items?\b", 2.6),
+            (r"\bdecisions?\b", 2.0),
+        ),
+    ),
+    WeightedRule(
+        "technical_documentation",
+        (
+            (r"\bapi\b", 2.2),
+            (r"\bendpoint\b", 2.5),
+            (r"\binstallation\b", 2.6),
+            (r"\bconfiguration\b", 2.0),
+            (r"\btechnical\b", 2.0),
+            (r"\bmanual\b", 2.4),
+            (r"\bspecification\b|\bspec\b", 2.5),
+            (r"\bdatasheet\b", 3.0),
+        ),
+    ),
+    WeightedRule(
+        "hr",
+        (
+            (r"\bemployee\b", 2.4),
+            (r"\bonboarding\b", 2.6),
+            (r"\bpayroll\b", 3.0),
+            (r"\bleave policy\b", 2.8),
+            (r"\bcv\b|\bresume\b", 3.0),
+            (r"\bbenefits\b", 1.6),
+        ),
+    ),
+    WeightedRule(
+        "sales_proposal",
+        (
+            (r"\bproposal\b", 3.2),
+            (r"\bquote\b|\bquotation\b", 3.0),
+            (r"\brfp\b", 3.0),
+            (r"\boffer\b", 2.2),
+            (r"\bpricing\b", 1.8),
+            (r"\bclient\b", 1.3),
+        ),
+    ),
+    WeightedRule(
+        "project_document",
+        (
+            (r"\bproject plan\b", 3.2),
+            (r"\broadmap\b", 2.6),
+            (r"\brequirements\b", 2.2),
+            (r"\bsprint\b", 2.0),
+            (r"\bmilestone\b", 2.0),
+            (r"\bokr\b", 1.8),
+        ),
+    ),
+    WeightedRule(
+        "support_operations",
+        (
+            (r"\brunbook\b", 3.2),
+            (r"\bincident\b", 2.8),
+            (r"\bticket\b", 2.4),
+            (r"\bsla\b", 2.5),
+            (r"\bsupport\b", 2.0),
+            (r"\bpostmortem\b", 2.8),
+        ),
+    ),
 )
 
 DOMAIN_RULES: tuple[WeightedRule, ...] = (
-    WeightedRule("legal", ((r"\blegal\b|\bagreement\b|\bcontract\b|\bnda\b|\blitigation\b", 3.0),)),
-    WeightedRule("finance", ((r"\binvoice\b|\bpayment\b|\breceipt\b|\bbudget\b|\bvat\b|\baccounting\b", 3.0),)),
-    WeightedRule("hr", ((r"\bemployee\b|\bpayroll\b|\bonboarding\b|\bleave\b|\bresume\b|\bcv\b", 3.0),)),
-    WeightedRule("engineering", ((r"\bapi\b|\btechnical\b|\bspec\b|\binstallation\b|\bdeployment\b|\bendpoint\b", 3.0),)),
-    WeightedRule("operations", (
-        (r"\brunbook\b|\bincident\b|\bprocess\b|\bprocedure\b|\boperations\b|\bsop\b", 3.0),
-    )),
-    WeightedRule("sales", ((r"\bproposal\b|\bclient\b|\bquote\b|\brfp\b|\bsales\b|\boffer\b", 3.0),)),
-    WeightedRule("procurement", ((r"\bsupplier\b|\bvendor\b|\bpurchase order\b|\bprocurement\b|\bpo[-\s]?\d+\b", 3.0),)),
-    WeightedRule("compliance", ((r"\bcompliance\b|\bgdpr\b|\biso\s?27001\b|\baudit\b|\bpolicy\b|\bcontrol\b", 3.0),)),
-    WeightedRule("customer_support", ((r"\bsupport\b|\bticket\b|\bcustomer\b|\bsla\b", 3.0),)),
-    WeightedRule("management", ((r"\bboard\b|\bstrategy\b|\bokr\b|\bkpi\b|\bmanagement\b", 3.0),)),
+    WeightedRule(
+        "legal",
+        ((r"\blegal\b|\bagreement\b|\bcontract\b|\bnda\b|\blitigation\b", 3.0),),
+    ),
+    WeightedRule(
+        "finance",
+        (
+            (
+                r"\binvoice\b|\bpayment\b|\breceipt\b|\bbudget\b|\bvat\b|\baccounting\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "hr",
+        (
+            (
+                r"\bemployee\b|\bpayroll\b|\bonboarding\b|\bleave\b|\bresume\b|\bcv\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "engineering",
+        (
+            (
+                r"\bapi\b|\btechnical\b|\bspec\b|\binstallation\b|\bdeployment\b|\bendpoint\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "operations",
+        (
+            (
+                r"\brunbook\b|\bincident\b|\bprocess\b|\bprocedure\b|\boperations\b|\bsop\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "sales",
+        ((r"\bproposal\b|\bclient\b|\bquote\b|\brfp\b|\bsales\b|\boffer\b", 3.0),),
+    ),
+    WeightedRule(
+        "procurement",
+        (
+            (
+                r"\bsupplier\b|\bvendor\b|\bpurchase order\b|\bprocurement\b|\bpo[-\s]?\d+\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "compliance",
+        (
+            (
+                r"\bcompliance\b|\bgdpr\b|\biso\s?27001\b|\baudit\b|\bpolicy\b|\bcontrol\b",
+                3.0,
+            ),
+        ),
+    ),
+    WeightedRule(
+        "customer_support", ((r"\bsupport\b|\bticket\b|\bcustomer\b|\bsla\b", 3.0),)
+    ),
+    WeightedRule(
+        "management", ((r"\bboard\b|\bstrategy\b|\bokr\b|\bkpi\b|\bmanagement\b", 3.0),)
+    ),
 )
 
 
 class DocumentClassifier:
     def __init__(self, llm_client: LLMClientProtocol | None = None) -> None:
-        self.llm_client = llm_client if llm_client is not None else LLMClientFactory.create()
+        self.llm_client = (
+            llm_client if llm_client is not None else LLMClientFactory.create()
+        )
 
-    async def classify(self, *, document: Document, parsed: ParsedDocument) -> ClassificationResult:
+    async def classify(
+        self, *, document: Document, parsed: ParsedDocument
+    ) -> ClassificationResult:
         if document.manual_category_override:
             return ClassificationResult(
                 document_type=document.document_type or "unclassified",
                 document_type_confidence=document.document_type_confidence or 1.0,
-                document_type_reason=document.document_type_reason or "Manual override.",
+                document_type_reason=document.document_type_reason
+                or "Manual override.",
                 document_type_source="manual",
                 business_domain=document.business_domain or "unknown",
                 business_domain_confidence=document.business_domain_confidence or 1.0,
-                business_domain_reason=document.business_domain_reason or "Manual override.",
+                business_domain_reason=document.business_domain_reason
+                or "Manual override.",
                 business_domain_source="manual",
             )
 
@@ -125,24 +271,33 @@ class DocumentClassifier:
 
         # Fast path: trust precise rules. This removes most unnecessary LLM calls.
         if (
-                rule_result.document_type_confidence >= 0.78
-                and rule_result.business_domain_confidence >= 0.72
-                and rule_result.document_type != "unclassified"
+            rule_result.document_type_confidence >= 0.78
+            and rule_result.business_domain_confidence >= 0.72
+            and rule_result.document_type != "unclassified"
         ):
             return rule_result
 
-        llm_result = await self._classify_with_llm(document=document, parsed=parsed, fallback=rule_result)
+        llm_result = await self._classify_with_llm(
+            document=document, parsed=parsed, fallback=rule_result
+        )
         if llm_result is None:
             return rule_result
 
         # Do not allow a low-confidence LLM answer to replace stronger deterministic evidence.
-        if llm_result.document_type_confidence + 0.10 < rule_result.document_type_confidence:
+        if (
+            llm_result.document_type_confidence + 0.10
+            < rule_result.document_type_confidence
+        ):
             return rule_result
 
         return llm_result
 
     async def _classify_with_llm(
-            self, *, document: Document, parsed: ParsedDocument, fallback: ClassificationResult
+        self,
+        *,
+        document: Document,
+        parsed: ParsedDocument,
+        fallback: ClassificationResult,
     ) -> ClassificationResult | None:
         if isinstance(self.llm_client, StubGroundedLLMClient):
             return None
@@ -180,22 +335,35 @@ class DocumentClassifier:
 
         return ClassificationResult(
             document_type=doc_type,
-            document_type_confidence=_confidence(data.get("document_type_confidence"), fallback.document_type_confidence),
-            document_type_reason=str(data.get("document_type_reason") or "LLM classification."),
+            document_type_confidence=_confidence(
+                data.get("document_type_confidence"), fallback.document_type_confidence
+            ),
+            document_type_reason=str(
+                data.get("document_type_reason") or "LLM classification."
+            ),
             document_type_source="llm",
             business_domain=domain,
-            business_domain_confidence=_confidence(data.get("business_domain_confidence"), fallback.business_domain_confidence),
-            business_domain_reason=str(data.get("business_domain_reason") or "LLM classification."),
+            business_domain_confidence=_confidence(
+                data.get("business_domain_confidence"),
+                fallback.business_domain_confidence,
+            ),
+            business_domain_reason=str(
+                data.get("business_domain_reason") or "LLM classification."
+            ),
             business_domain_source="llm",
         )
 
 
-def rule_classify(*, document: Document, parsed: ParsedDocument) -> ClassificationResult:
+def rule_classify(
+    *, document: Document, parsed: ParsedDocument
+) -> ClassificationResult:
     haystack = _haystack(document=document, parsed=parsed)
     body_haystack = _body_haystack(parsed=parsed)
     metadata_haystack = _metadata_haystack(document=document)
     doc_type, type_score, type_terms, type_margin = _best_match(haystack, TYPE_RULES)
-    domain, domain_score, domain_terms, domain_margin = _best_match(haystack, DOMAIN_RULES)
+    domain, domain_score, domain_terms, domain_margin = _best_match(
+        haystack, DOMAIN_RULES
+    )
 
     if doc_type is None or type_score < 2.3:
         doc_type = "unclassified"
@@ -204,11 +372,11 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
         type_source = "fallback"
     else:
         type_confidence = _score_to_confidence(type_score, type_margin)
-        if _metadata_only_match(type_terms, body_haystack=body_haystack, metadata_haystack=metadata_haystack):
+        if _metadata_only_match(
+            type_terms, body_haystack=body_haystack, metadata_haystack=metadata_haystack
+        ):
             type_confidence = min(type_confidence, 0.45)
-            type_reason = (
-                "Low-confidence filename/path-only classification; no supporting body text signal matched."
-            )
+            type_reason = "Low-confidence filename/path-only classification; no supporting body text signal matched."
         else:
             type_reason = f"Matched weighted evidence: {', '.join(type_terms[:5])}."
         type_source = "rule"
@@ -220,11 +388,13 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
         domain_source = "fallback"
     else:
         domain_confidence = _score_to_confidence(domain_score, domain_margin)
-        if _metadata_only_match(domain_terms, body_haystack=body_haystack, metadata_haystack=metadata_haystack):
+        if _metadata_only_match(
+            domain_terms,
+            body_haystack=body_haystack,
+            metadata_haystack=metadata_haystack,
+        ):
             domain_confidence = min(domain_confidence, 0.45)
-            domain_reason = (
-                "Low-confidence filename/path-only domain guess; no supporting body text signal matched."
-            )
+            domain_reason = "Low-confidence filename/path-only domain guess; no supporting body text signal matched."
         else:
             domain_reason = f"Matched weighted evidence: {', '.join(domain_terms[:5])}."
         domain_source = "rule"
@@ -242,13 +412,17 @@ def rule_classify(*, document: Document, parsed: ParsedDocument) -> Classificati
 
 
 def _haystack(*, document: Document, parsed: ParsedDocument) -> str:
-    return _normalize(f"{_metadata_haystack(document=document)} {_body_haystack(parsed=parsed)}")
+    return _normalize(
+        f"{_metadata_haystack(document=document)} {_body_haystack(parsed=parsed)}"
+    )
 
 
 def _metadata_haystack(*, document: Document) -> str:
     ext = Path(document.file_name or "").suffix.lower()
     path_boost = " ".join(Path(document.file_path or "").parts[-4:])
-    return _normalize(f"{document.file_name} {path_boost} {ext} {document.mime_type or ''}")
+    return _normalize(
+        f"{document.file_name} {path_boost} {ext} {document.mime_type or ''}"
+    )
 
 
 def _body_haystack(*, parsed: ParsedDocument) -> str:
@@ -257,11 +431,17 @@ def _body_haystack(*, parsed: ParsedDocument) -> str:
     return _normalize(f"{headings} {text_sample}")
 
 
-def _metadata_only_match(patterns: list[str], *, body_haystack: str, metadata_haystack: str) -> bool:
+def _metadata_only_match(
+    patterns: list[str], *, body_haystack: str, metadata_haystack: str
+) -> bool:
     if not patterns:
         return False
-    has_metadata_match = any(re.search(pattern, metadata_haystack, flags=re.I) for pattern in patterns)
-    has_body_match = any(re.search(pattern, body_haystack, flags=re.I) for pattern in patterns)
+    has_metadata_match = any(
+        re.search(pattern, metadata_haystack, flags=re.I) for pattern in patterns
+    )
+    has_body_match = any(
+        re.search(pattern, body_haystack, flags=re.I) for pattern in patterns
+    )
     return has_metadata_match and not has_body_match
 
 
@@ -273,7 +453,9 @@ def _classification_sample(text: str, limit: int = 9000) -> str:
     return f"{head}\n{tail}"
 
 
-def _best_match(haystack: str, rules: tuple[WeightedRule, ...]) -> tuple[str | None, float, list[str], float]:
+def _best_match(
+    haystack: str, rules: tuple[WeightedRule, ...]
+) -> tuple[str | None, float, list[str], float]:
     scored: list[tuple[str, float, list[str]]] = []
     for rule in rules:
         score = 0.0
@@ -310,7 +492,11 @@ def _headings(text: str) -> list[str]:
         stripped = line.strip()
         if stripped.startswith("#"):
             headings.append(stripped.lstrip("#").strip())
-        elif 3 <= len(stripped) <= 90 and stripped[:1].isupper() and not stripped.endswith("."):
+        elif (
+            3 <= len(stripped) <= 90
+            and stripped[:1].isupper()
+            and not stripped.endswith(".")
+        ):
             headings.append(stripped)
     return headings
 

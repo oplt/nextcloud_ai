@@ -39,6 +39,9 @@ dev = [
   "pytest-cov>=6.0,<7",
   "respx>=0.22,<1"
 ]
+rerank = [
+    "sentence-transformers>=3.0,<6",
+]
 
 [tool.hatch.build.targets.wheel]
 packages = ["backend"]

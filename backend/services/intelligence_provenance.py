@@ -30,7 +30,9 @@ def provenance_block(
     return {"provenance": block}
 
 
-def merge_provenance(payload: dict[str, Any] | None, block: dict[str, Any]) -> dict[str, Any]:
+def merge_provenance(
+    payload: dict[str, Any] | None, block: dict[str, Any]
+) -> dict[str, Any]:
     base = dict(payload or {})
     base.update(block)
     return base
@@ -45,7 +47,9 @@ def task_metadata_with_provenance(
     notes: str | None = None,
 ) -> dict[str, Any]:
     meta = dict(base or {})
-    meta.update(provenance_block(methods=methods, evidence_tier=evidence_tier, notes=notes))
+    meta.update(
+        provenance_block(methods=methods, evidence_tier=evidence_tier, notes=notes)
+    )
     if presentation is not None:
         meta["presentation"] = presentation
     return meta

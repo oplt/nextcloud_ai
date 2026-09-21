@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import io
+import logging
 import re
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from email import policy
 from email.parser import BytesParser
@@ -14,6 +17,23 @@ from zipfile import BadZipFile, ZipFile
 
 import docx
 import pdfplumber
+
+logger = logging.getLogger(__name__)
+
+# Bounded shared pool for CPU/IO-bound sync parsers. Cancelling the await
+# does not kill the worker thread — keep max_workers small.
+_PARSE_EXECUTOR: ThreadPoolExecutor | None = None
+_PARSE_MAX_BYTES = 80 * 1024 * 1024
+_PARSE_WORKERS = 2
+
+
+def _parse_executor() -> ThreadPoolExecutor:
+    global _PARSE_EXECUTOR
+    if _PARSE_EXECUTOR is None:
+        _PARSE_EXECUTOR = ThreadPoolExecutor(
+            max_workers=_PARSE_WORKERS, thread_name_prefix="doc-parse"
+        )
+    return _PARSE_EXECUTOR
 
 
 @dataclass(slots=True)
@@ -51,9 +71,7 @@ DOC_MIME_TYPES = {"application/msword"}
 ODT_MIME_TYPES = {"application/vnd.oasis.opendocument.text"}
 ODP_MIME_TYPES = {"application/vnd.oasis.opendocument.presentation"}
 ODS_MIME_TYPES = {"application/vnd.oasis.opendocument.spreadsheet"}
-XLSX_MIME_TYPES = {
-    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-}
+XLSX_MIME_TYPES = {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"}
 XLS_MIME_TYPES = {"application/vnd.ms-excel"}
 TEXT_MIME_TYPES = {
     "text/plain",
@@ -103,6 +121,28 @@ ODT_TABLE_CELL_TAG = f"{{{ODT_TABLE_NS}}}table-cell"
 async def parse_document_bytes(
     file_name: str, mime_type: str | None, payload: bytes
 ) -> ParsedDocument:
+    """Parse document bytes off the event loop in a bounded thread pool.
+
+    Synchronous parsers (pdfplumber/docx/…) must not block the asyncio loop.
+    Awaiting cancellation does not terminate an in-flight parser thread.
+    """
+    if len(payload) > _PARSE_MAX_BYTES:
+        raise UnsupportedDocumentTypeError(
+            f"Document payload exceeds parse limit ({_PARSE_MAX_BYTES} bytes)"
+        )
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        _parse_executor(),
+        _parse_document_bytes_sync,
+        file_name,
+        mime_type,
+        payload,
+    )
+
+
+def _parse_document_bytes_sync(
+    file_name: str, mime_type: str | None, payload: bytes
+) -> ParsedDocument:
     suffix = Path(file_name).suffix.lower()
     normalized_mime = (mime_type or "").lower()
 
@@ -110,26 +150,37 @@ async def parse_document_bytes(
         return parse_pdf_bytes(payload)
     if suffix == ".docx" or normalized_mime in DOCX_MIME_TYPES:
         return parse_docx_bytes(payload)
-    if suffix in {".odt", ".odp", ".ods"} or normalized_mime in ODT_MIME_TYPES | ODP_MIME_TYPES | ODS_MIME_TYPES:
+    if (
+        suffix in {".odt", ".odp", ".ods"}
+        or normalized_mime in ODT_MIME_TYPES | ODP_MIME_TYPES | ODS_MIME_TYPES
+    ):
         return parse_odf_bytes(payload, parser_name=suffix.lstrip(".") or "odf")
     if suffix == ".xlsx" or normalized_mime in XLSX_MIME_TYPES:
         return parse_xlsx_bytes(payload)
     if suffix in {".doc", ".xls"} or normalized_mime in DOC_MIME_TYPES | XLS_MIME_TYPES:
-        return parse_legacy_office_bytes(payload, parser_name=suffix.lstrip(".") or "legacy-office")
+        return parse_legacy_office_bytes(
+            payload, parser_name=suffix.lstrip(".") or "legacy-office"
+        )
     if suffix == ".eml" or normalized_mime in EMAIL_MIME_TYPES:
         return parse_email_bytes(payload)
-    if suffix in {
-        ".jpg",
-        ".jpeg",
-        ".png",
-        ".gif",
-        ".webp",
-        ".bmp",
-        ".tif",
-        ".tiff",
-        ".svg",
-    } or normalized_mime in IMAGE_MIME_TYPES:
-        return parse_image_bytes(file_name=file_name, mime_type=mime_type, payload=payload)
+    if (
+        suffix
+        in {
+            ".jpg",
+            ".jpeg",
+            ".png",
+            ".gif",
+            ".webp",
+            ".bmp",
+            ".tif",
+            ".tiff",
+            ".svg",
+        }
+        or normalized_mime in IMAGE_MIME_TYPES
+    ):
+        return parse_image_bytes(
+            file_name=file_name, mime_type=mime_type, payload=payload
+        )
     if suffix == ".csv" or normalized_mime in CSV_MIME_TYPES:
         return parse_csv_bytes(payload)
     if suffix in {".txt", ".md", ".markdown"} or normalized_mime in TEXT_MIME_TYPES:
@@ -142,7 +193,10 @@ async def parse_document_bytes(
 
 def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
     pages: list[ParsedPage] = []
+    empty_page_numbers: list[int] = []
+    physical_page_count = 0
     with pdfplumber.open(io.BytesIO(payload)) as pdf:
+        physical_page_count = len(pdf.pages)
         for index, page in enumerate(pdf.pages, start=1):
             page_parts: list[str] = []
             text = (page.extract_text() or "").strip()
@@ -150,39 +204,63 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
                 page_parts.append(text)
             for table in page.extract_tables() or []:
                 table_text = _format_table(table)
-                if table_text:
-                    page_parts.append(table_text)
-            if page_parts:
-                pages.append(ParsedPage(page_number=index, text="\n\n".join(page_parts)))
-    combined = "\n\n".join(page.text for page in pages)
+                if not table_text:
+                    continue
+                # Skip tables whose cells are already present in page text.
+                if text and _table_cells_covered_by_text(table, text):
+                    continue
+                page_parts.append(table_text)
+            page_text = "\n\n".join(page_parts).strip()
+            if not page_text:
+                empty_page_numbers.append(index)
+            # Always keep a slot for every physical page (incl. blank/scanned).
+            pages.append(ParsedPage(page_number=index, text=page_text))
+
+    combined = "\n\n".join(page.text for page in pages if page.text).strip()
+    nonempty = sum(1 for page in pages if page.text.strip())
+    needs_ocr = physical_page_count > 0 and nonempty == 0
+    incomplete = bool(empty_page_numbers) and nonempty > 0
     return ParsedDocument(
         text=combined,
         pages=pages,
-        metadata={"page_count": len(pages),
-                  "parser": "pdfplumber",
-                  "extracted_fields": extract_generic_financial_fields(text),},
+        metadata={
+            "page_count": physical_page_count,
+            "nonempty_page_count": nonempty,
+            "empty_page_numbers": empty_page_numbers,
+            "needs_ocr": needs_ocr,
+            "incomplete_extraction": incomplete,
+            "parser": "pdfplumber",
+            "extracted_fields": extract_generic_financial_fields(combined),
+        },
     )
 
 
 def parse_docx_bytes(payload: bytes) -> ParsedDocument:
     document = docx.Document(io.BytesIO(payload))
     blocks: list[str] = []
-    for paragraph in document.paragraphs:
-        paragraph_text = paragraph.text.strip()
+    table_count = 0
+    heading_count = 0
+    for item in _iter_docx_block_items(document):
+        if isinstance(item, docx.table.Table):
+            table_count += 1
+            table_text = _format_table(
+                [[cell.text.strip() for cell in row.cells] for row in item.rows]
+            )
+            if table_text:
+                blocks.append(table_text)
+            continue
+        paragraph_text = item.text.strip()
         if not paragraph_text:
             continue
-        style_name = (paragraph.style.name if paragraph.style is not None else "").lower()
+        style_name = (
+            item.style.name if item.style is not None else ""
+        ).lower()
         if style_name.startswith("heading"):
             level = _heading_level_from_style(style_name)
+            heading_count += 1
             blocks.append(f"{'#' * level} {paragraph_text}")
         else:
             blocks.append(paragraph_text)
-    for table in document.tables:
-        table_text = _format_table(
-            [[cell.text.strip() for cell in row.cells] for row in table.rows]
-        )
-        if table_text:
-            blocks.append(table_text)
     text = "\n\n".join(blocks)
     pages = [ParsedPage(page_number=None, text=text)] if text else []
     return ParsedDocument(
@@ -190,14 +268,24 @@ def parse_docx_bytes(payload: bytes) -> ParsedDocument:
         pages=pages,
         metadata={
             "block_count": len(blocks),
-            "table_count": len(document.tables),
+            "table_count": table_count,
+            "heading_count": heading_count,
             "parser": "python-docx",
+            "body_order": "document-order",
             "extracted_fields": extract_generic_financial_fields(text),
         },
     )
 
 
 def parse_odt_bytes(payload: bytes) -> ParsedDocument:
+    """Deprecated: use ``parse_odf_bytes(..., parser_name='odt')``."""
+    import warnings
+
+    warnings.warn(
+        "parse_odt_bytes is deprecated; use parse_odf_bytes(..., parser_name='odt')",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return parse_odf_bytes(payload, parser_name="odt")
 
 
@@ -252,7 +340,8 @@ def parse_xlsx_bytes(payload: bytes) -> ParsedDocument:
         with ZipFile(io.BytesIO(payload)) as archive:
             shared_strings = _read_xlsx_shared_strings(archive)
             sheet_names = sorted(
-                name for name in archive.namelist()
+                name
+                for name in archive.namelist()
                 if name.startswith("xl/worksheets/") and name.endswith(".xml")
             )
             rows: list[list[str]] = []
@@ -309,13 +398,20 @@ def parse_csv_bytes(payload: bytes) -> ParsedDocument:
     text = _decode_text(payload)
     rows = list(csv.reader(io.StringIO(text)))
     if not rows:
-        return ParsedDocument(text="", pages=[], metadata={"parser": "csv", "row_count": 0})
+        return ParsedDocument(
+            text="", pages=[], metadata={"parser": "csv", "row_count": 0}
+        )
     formatted = _format_table(rows[:5000])
     pages = [ParsedPage(page_number=None, text=formatted)] if formatted.strip() else []
     return ParsedDocument(
         text=formatted,
         pages=pages,
-        metadata={"parser": "csv", "row_count": len(rows), "truncated": len(rows) > 5000, "extracted_fields": extract_generic_financial_fields(text),},
+        metadata={
+            "parser": "csv",
+            "row_count": len(rows),
+            "truncated": len(rows) > 5000,
+            "extracted_fields": extract_generic_financial_fields(text),
+        },
     )
 
 
@@ -332,9 +428,7 @@ def parse_email_bytes(payload: bytes) -> ParsedDocument:
     sent_at = _normalize_email_datetime(message.get("Date"))
     message_id = _clean_header(message.get("Message-ID"))
     references = [
-        ref
-        for ref in re.split(r"\s+", _clean_header(message.get("References")))
-        if ref
+        ref for ref in re.split(r"\s+", _clean_header(message.get("References"))) if ref
     ]
     in_reply_to = _clean_header(message.get("In-Reply-To"))
     thread_key = references[0] if references else (in_reply_to or message_id)
@@ -455,7 +549,13 @@ def _read_xlsx_shared_strings(archive: ZipFile) -> list[str]:
     values: list[str] = []
     for item in root.iter():
         if item.tag.endswith("}si") or item.tag == "si":
-            values.append("".join(text.text or "" for text in item.iter() if text.tag.endswith("}t") or text.tag == "t"))
+            values.append(
+                "".join(
+                    text.text or ""
+                    for text in item.iter()
+                    if text.tag.endswith("}t") or text.tag == "t"
+                )
+            )
     return values
 
 
@@ -478,11 +578,17 @@ def _read_xlsx_sheet_rows(
                     raw_value = child.text or ""
                     break
                 if child.tag.endswith("}is") or child.tag == "is":
-                    raw_value = "".join(text.text or "" for text in child.iter() if text.tag.endswith("}t") or text.tag == "t")
+                    raw_value = "".join(
+                        text.text or ""
+                        for text in child.iter()
+                        if text.tag.endswith("}t") or text.tag == "t"
+                    )
                     break
             if cell_type == "s" and raw_value.isdigit():
                 index = int(raw_value)
-                value = shared_strings[index] if index < len(shared_strings) else raw_value
+                value = (
+                    shared_strings[index] if index < len(shared_strings) else raw_value
+                )
             else:
                 value = raw_value
             values.append(value.strip())
@@ -492,7 +598,11 @@ def _read_xlsx_sheet_rows(
 
 
 def _extract_printable_binary_text(payload: bytes) -> str:
-    decoded = payload.decode("utf-16le", errors="ignore") + "\n" + payload.decode("latin-1", errors="ignore")
+    decoded = (
+        payload.decode("utf-16le", errors="ignore")
+        + "\n"
+        + payload.decode("latin-1", errors="ignore")
+    )
     tokens = re.findall(r"[^\x00-\x1f\x7f-\x9f]{4,}", decoded)
     cleaned = [" ".join(token.split()) for token in tokens]
     return "\n".join(dict.fromkeys(token for token in cleaned if token))
@@ -503,6 +613,37 @@ def _heading_level_from_style(style_name: str) -> int:
     if not match:
         return 2
     return max(1, min(6, int(match.group(1))))
+
+
+def _iter_docx_block_items(document: docx.document.Document):
+    """Yield paragraphs and tables in document body order."""
+    from docx.oxml.ns import qn
+    from docx.table import Table as DocxTable
+    from docx.text.paragraph import Paragraph as DocxParagraph
+
+    body = document.element.body
+    for child in body.iterchildren():
+        if child.tag == qn("w:p"):
+            yield DocxParagraph(child, document)
+        elif child.tag == qn("w:tbl"):
+            yield DocxTable(child, document)
+
+
+def _table_cells_covered_by_text(table, page_text: str) -> bool:
+    """True when table cell values are already present in extracted page text."""
+    normalized_page = re.sub(r"\s+", " ", page_text).lower()
+    cells: list[str] = []
+    for row in table or []:
+        for cell in row:
+            value = str(cell or "").strip()
+            if len(value) >= 2:
+                cells.append(value)
+    if not cells:
+        return True
+    hits = sum(
+        1 for cell in cells if re.sub(r"\s+", " ", cell).lower() in normalized_page
+    )
+    return hits >= max(1, int(0.8 * len(cells)))
 
 
 def _format_table(rows) -> str:
@@ -662,7 +803,11 @@ def _normalize_email_datetime(value: str | None) -> str | None:
 def extract_generic_financial_fields(text: str) -> dict[str, object]:
     invoice_numbers = list(dict.fromkeys(_INVOICE_NO_RE.findall(text or "")))[:10]
     dates = list(dict.fromkeys(_DATE_RE.findall(text or "")))[:20]
-    amounts = list(dict.fromkeys(match.group(1).strip() for match in _AMOUNT_RE.finditer(text or "")))[:20]
+    amounts = list(
+        dict.fromkeys(
+            match.group(1).strip() for match in _AMOUNT_RE.finditer(text or "")
+        )
+    )[:20]
 
     doc_type = None
     lowered = (text or "").lower()

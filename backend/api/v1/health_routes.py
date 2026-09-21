@@ -19,28 +19,39 @@ async def live() -> dict[str, str]:
 @router.get("/ready")
 async def ready(session: DbSessionDep) -> JSONResponse:
     health_service = HealthCheckService()
-    database_status, redis_status, broker_status, ai_runtime_status = await asyncio.gather(
+    (
+        database_status,
+        redis_status,
+        broker_status,
+        ai_runtime_status,
+    ) = await asyncio.gather(
         health_service.check_database(session),
         health_service.check_redis(),
         health_service.check_broker(),
         health_service.check_ai_runtime(),
     )
+    rerank_status = health_service.check_rerank_runtime()
 
     response_status = status.HTTP_200_OK
+    rerank_blocks_ready = (
+        rerank_status.enabled
+        and not rerank_status.ready
+        and not rerank_status.using_fallback
+    )
     if not (
         database_status.ok
         and redis_status.ok
         and broker_status.ok
         and ai_runtime_status.ready
+        and not rerank_blocks_ready
     ):
         response_status = status.HTTP_503_SERVICE_UNAVAILABLE
 
     payload = {
-        "status": "ready"
-        if response_status == status.HTTP_200_OK
-        else "not_ready",
+        "status": "ready" if response_status == status.HTTP_200_OK else "not_ready",
         "database": database_status.detail,
         "ai_runtime": ai_runtime_status.to_dict(),
+        "rerank": rerank_status.to_dict(),
         "embedding": health_service.check_embedding_provider(),
         "redis": redis_status.detail,
         "broker": broker_status.detail,

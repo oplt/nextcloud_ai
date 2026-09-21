@@ -29,9 +29,7 @@ class AuthService:
         self.audit = AuditService(session)
         self.role_bootstrap = RoleBootstrapService(session)
 
-    async def login_with_password(
-        self, email: str, password: str
-    ) -> IssuedAuthSession:
+    async def login_with_password(self, email: str, password: str) -> IssuedAuthSession:
         user = await self.user_repo.get_by_email(email)
         if (
             not user
@@ -85,9 +83,7 @@ class AuthService:
         await self.session.refresh(user)
         return user
 
-    async def sync_nextcloud_principal(
-        self, principal: Principal
-    ) -> IssuedAuthSession:
+    async def sync_nextcloud_principal(self, principal: Principal) -> IssuedAuthSession:
         roles = await self.role_bootstrap.ensure_system_roles()
         user = await self.user_repo.get_by_external_subject("nextcloud", principal.sub)
         if user is None:

@@ -46,6 +46,13 @@ def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
 
 
 def _run_in_worker_loop(coro):
+    """Run a coroutine on the process-owned worker loop.
+
+    Never re-await an already-started coroutine after an arbitrary RuntimeError:
+    that object is exhausted. Only recreate the loop for closed-loop failures,
+    and only when a fresh coroutine factory is not available — callers must not
+    rely on retry of the same coro instance.
+    """
     global _task_loop, _task_loop_pid
 
     try:
@@ -54,26 +61,32 @@ def _run_in_worker_loop(coro):
         loop = _get_or_create_event_loop()
         try:
             return loop.run_until_complete(coro)
-        except RuntimeError:
-            logger.warning("Celery task event loop failed; recreating", exc_info=True)
+        except RuntimeError as exc:
+            message = str(exc).lower()
+            loop_dead = (
+                loop.is_closed()
+                or "event loop is closed" in message
+                or "no current event loop" in message
+            )
+            if not loop_dead:
+                # Preserve business RuntimeErrors (and any other non-loop failures).
+                raise
+            logger.warning(
+                "Celery task event loop closed mid-task; recreating for next tasks",
+                exc_info=True,
+            )
             if not loop.is_closed():
                 loop.close()
             _task_loop = None
             _task_loop_pid = None
-            loop = _get_or_create_event_loop()
-            return loop.run_until_complete(coro)
+            # Do not rerun the exhausted coroutine.
+            raise
 
-    raise RuntimeError("Celery sync task entered an already-running event loop; await directly instead.")
+    raise RuntimeError(
+        "Celery sync task entered an already-running event loop; await directly instead."
+    )
 
 
-async def _run_logged_background_task(coro, *, label: str) -> None:
-    """Run background task with proper error logging"""
-    try:
-        await coro
-    except asyncio.CancelledError:
-        logger.info(f"Background task {label} was cancelled")
-    except Exception:
-        logger.exception("Background task %s failed", label)
 
 
 @celery_app.task(bind=True, max_retries=3, soft_time_limit=3600, time_limit=3660)
@@ -95,7 +108,7 @@ def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
         # Log error with context
         logger.error(
             f"Connector sync job {job_id} failed (attempt {retry_attempt + 1}/{self.max_retries}): {exc}",
-            exc_info=True
+            exc_info=True,
         )
 
         # Update job state asynchronously
@@ -119,7 +132,7 @@ def run_connector_sync_job(self, job_id: str) -> dict[str, int]:
 
 
 async def _run_connector_sync_job(
-        *, job_id: str, task_id: str | None, retry_count: int = 0
+    *, job_id: str, task_id: str | None, retry_count: int = 0
 ) -> dict[str, int]:
     """Async implementation of connector sync job"""
     async with AsyncSessionLocal() as session:
@@ -152,7 +165,7 @@ async def _run_connector_sync_job(
                         connector, full_reindex=full_reindex, job=job
                     ),
                     timeout=sync_timeout,
-)
+                )
             else:
                 sync_timeout = getattr(settings, "SYNC_TIMEOUT_SECONDS", 900)
                 result = await asyncio.wait_for(
@@ -160,7 +173,7 @@ async def _run_connector_sync_job(
                         connector, full_reindex=full_reindex, job=job
                     ),
                     timeout=sync_timeout,
-)
+                )
         except asyncio.TimeoutError:
             logger.error(f"Sync job {job_id} timed out after {sync_timeout}s")
             raise
@@ -171,12 +184,12 @@ async def _run_connector_sync_job(
 
 
 async def _update_failed_job_state(
-        *,
-        job_id: str,
-        task_id: str | None,
-        error_message: str,
-        retry_count: int,
-        dead_lettered: bool,
+    *,
+    job_id: str,
+    task_id: str | None,
+    error_message: str,
+    retry_count: int,
+    dead_lettered: bool,
 ) -> None:
     """Update job state on failure - optimized with connection pool reuse"""
     async with AsyncSessionLocal() as session:
@@ -201,7 +214,11 @@ async def _update_failed_job_state(
             record_job_transition(job_type=job.job_type, status="dead_lettered")
             logger.error(
                 "Connector sync job dead-lettered",
-                extra={"job_id": job_id, "task_id": task_id, "retry_count": retry_count},
+                extra={
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "retry_count": retry_count,
+                },
             )
         else:
             JobLifecycleService.mark_retrying(
@@ -213,7 +230,11 @@ async def _update_failed_job_state(
             record_job_transition(job_type=job.job_type, status="retrying")
             logger.warning(
                 "Connector sync job scheduled for retry",
-                extra={"job_id": job_id, "task_id": task_id, "retry_count": retry_count},
+                extra={
+                    "job_id": job_id,
+                    "task_id": task_id,
+                    "retry_count": retry_count,
+                },
             )
         await session.commit()
 
@@ -237,7 +258,13 @@ async def _run_document_reindex_task(*, document_id: str) -> str:
         service = DocumentIngestionService(session)
         document = await service.index_document(document_id)
         await session.commit()
-        return str(document.id)
+    try:
+        from .outbox_dispatcher import dispatch_outbox_batch
+
+        await dispatch_outbox_batch()
+    except Exception:
+        logger.exception("Outbox dispatch after reindex failed document_id=%s", document_id)
+    return str(document.id)
 
 
 @celery_app.task(
@@ -257,7 +284,9 @@ async def _enqueue_stale_connector_syncs() -> dict[str, int]:
     """Async implementation of stale connector sync"""
     async with AsyncSessionLocal() as session:
         # Optimize with connection reuse
-        summary = await NextcloudAutomationService(session).enqueue_stale_connector_syncs()
+        summary = await NextcloudAutomationService(
+            session
+        ).enqueue_stale_connector_syncs()
         await session.commit()
         return summary.to_dict()
 
@@ -288,7 +317,11 @@ def _enqueue_eager_task(coro, *, label: str):
 
 
 def _celery_worker_is_available() -> bool:
-    """Check if Celery worker is available - optimized with caching"""
+    """Cached worker ping for development auto-local mode only.
+
+    Never called from production request paths when CELERY_LOCAL_MODE=never
+    or APP_ENV is staging/production.
+    """
     now = time.monotonic()
     checked_at = float(_worker_ping_cache["checked_at"])
 
@@ -297,8 +330,7 @@ def _celery_worker_is_available() -> bool:
 
     available = False
     try:
-        # Use shorter timeout for faster failure detection
-        responses = celery_app.control.inspect(timeout=2.0).ping()
+        responses = celery_app.control.inspect(timeout=0.5).ping()
         available = bool(responses and len(responses) > 0)
     except Exception:
         logger.debug("Celery worker availability check failed")
@@ -309,9 +341,15 @@ def _celery_worker_is_available() -> bool:
 
 
 def should_execute_tasks_locally() -> bool:
-    """Determine if tasks should run locally instead of via Celery"""
+    """Decide in-process task execution without blocking prod on broker ping."""
     if celery_app.conf.task_always_eager:
         return True
+    mode = settings.CELERY_LOCAL_MODE
+    if mode == "always":
+        return True
+    if mode == "never":
+        return False
+    # auto: only in development, with a cached ping (not on every request forever).
     if settings.APP_ENV != "development":
         return False
     return not _celery_worker_is_available()
@@ -334,7 +372,9 @@ def enqueue_document_reindex(document_id: str):
     """Enqueue document reindex task"""
     if should_execute_tasks_locally():
         if not celery_app.conf.task_always_eager:
-            logger.info(f"Executing document reindex {document_id} locally (no Celery worker)")
+            logger.info(
+                f"Executing document reindex {document_id} locally (no Celery worker)"
+            )
         return _enqueue_eager_task(
             _run_document_reindex_task(document_id=document_id),
             label=f"document_reindex:{document_id}",
@@ -369,7 +409,7 @@ async def _run_document_intelligence_extraction_task(*, document_id: str) -> str
             await session.commit()
             logger.info(
                 "Successfully completed intelligence extraction for document_id=%s",
-                document_id
+                document_id,
             )
         except Exception:
             logger.exception(
@@ -381,7 +421,16 @@ async def _run_document_intelligence_extraction_task(*, document_id: str) -> str
 
 
 def enqueue_document_intelligence(document_id: str):
-    """Enqueue document intelligence extraction task"""
+    """Deprecated direct enqueue: prefer transactional outbox.
+
+    Kept for compatibility. Prefer ``enqueue_document_intelligence_immediate``
+    from the outbox dispatcher after commit.
+    """
+    return enqueue_document_intelligence_immediate(document_id)
+
+
+def enqueue_document_intelligence_immediate(document_id: str):
+    """Enqueue intelligence extraction after the source transaction committed."""
     if should_execute_tasks_locally():
         if not celery_app.conf.task_always_eager:
             logger.info(f"Executing intelligence extraction {document_id} locally")
@@ -390,31 +439,51 @@ def enqueue_document_intelligence(document_id: str):
             label=f"document_intelligence:{document_id}",
         )
 
-    # Apply async with short delay for transaction commit
     async_result = run_document_intelligence_extraction_task.apply_async(
         args=[document_id],
-        countdown=1,
-        priority=9  # Higher priority for intelligence tasks
+        priority=9,
     )
     return EnqueuedTaskHandle(id=str(async_result.id))
 
 
-@celery_app.task
+@celery_app.task(name="backend.workers.indexing_tasks.dispatch_work_outbox")
+def dispatch_work_outbox() -> dict[str, int]:
+    from .outbox_dispatcher import dispatch_outbox_batch
+
+    return _run_in_worker_loop(dispatch_outbox_batch())
+
+
+@celery_app.task(name="backend.workers.indexing_tasks.fail_expired_job_leases")
+def fail_expired_job_leases() -> dict[str, int]:
+    async def _run() -> dict[str, int]:
+        async with AsyncSessionLocal() as session:
+            from ..db.repo.sync_job import SyncJobRepository
+
+            count = await SyncJobRepository(session).fail_expired_leases(
+                message="Job lease expired without heartbeat"
+            )
+            return {"failed": count}
+
+    return _run_in_worker_loop(_run())
+
+
+@celery_app.task(name="backend.workers.indexing_tasks.cleanup_stale_connections")
 def cleanup_stale_connections():
-    """
-    No-op.
+    """Deprecated no-op retained for queued/external drain.
 
     Connection recycling is handled by SQLAlchemy pool_recycle/pool_pre_ping.
-    Do not terminate PostgreSQL idle backends globally; that can kill unrelated
-    app/API connections and slow the system down.
+    Do not terminate PostgreSQL idle backends globally. Keep registered through
+    one release after confirming no beat/external callers enqueue this name;
+    then remove the task registration.
     """
-    logger.debug("Skipping global PostgreSQL idle connection cleanup")
-    return {"skipped": True}
+    logger.debug("Skipping global PostgreSQL idle connection cleanup (deprecated task)")
+    return {"skipped": True, "deprecated": True}
 
 
 @dataclass
 class EnqueuedTaskHandle:
     """Handle for enqueued tasks"""
+
     id: str
 
     def get(self, timeout=None):

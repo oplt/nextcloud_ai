@@ -24,8 +24,9 @@ local-install-backend:
 		$(PYTHON) -m venv $(VENV); \
 	fi
 	$(VENV)/bin/pip install --upgrade pip
-	$(VENV)/bin/pip install -e "./backend[dev]"
-
+	$(VENV)/bin/pip install -e "./backend[dev,rerank]"
+	@echo "Optional: pre-provision reranker weights with:"
+	@echo "  $(VENV)/bin/python -m backend.scripts.provision_rerank_model"
 local-install-frontend:
 	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "Installing frontend dependencies..."; \

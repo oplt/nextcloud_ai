@@ -89,6 +89,14 @@ _DOMAIN_PROFILES: dict[str, DomainPromptProfile] = {
 
 
 def available_domain_profiles() -> tuple[str, ...]:
+    """Deprecated: iterate ``_DOMAIN_PROFILES`` / use ``get_domain_profile``."""
+    import warnings
+
+    warnings.warn(
+        "available_domain_profiles is deprecated; use get_domain_profile / known keys",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return tuple(_DOMAIN_PROFILES.keys())
 
 
@@ -107,7 +115,9 @@ def _write_rules(buffer: io.StringIO, rules: Iterable[str]) -> None:
 
 def _write_history(buffer: io.StringIO, history: list[dict[str, str]]) -> None:
     recent = history[-6:]
-    buffer.write("\nCONVERSATION HISTORY (for conversational continuity only; sources remain the only evidence):\n")
+    buffer.write(
+        "\nCONVERSATION HISTORY (for conversational continuity only; sources remain the only evidence):\n"
+    )
     for msg in recent:
         role = msg.get("role")
         if role not in {"user", "assistant"}:
@@ -121,13 +131,13 @@ def _write_history(buffer: io.StringIO, history: list[dict[str, str]]) -> None:
 
 
 def build_grounded_prompt(
-        question: str,
-        sources: list[ChatSource],
-        *,
-        history: list[dict[str, str]] | None = None,
-        memory_block: str | None = None,
-        domain_profile: str | None = None,
-        extra_rules: list[str] | tuple[str, ...] | None = None,
+    question: str,
+    sources: list[ChatSource],
+    *,
+    history: list[dict[str, str]] | None = None,
+    memory_block: str | None = None,
+    domain_profile: str | None = None,
+    extra_rules: list[str] | tuple[str, ...] | None = None,
 ) -> str:
     profile = get_domain_profile(domain_profile)
     buffer = io.StringIO()

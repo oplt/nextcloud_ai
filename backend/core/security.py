@@ -16,7 +16,7 @@ from .config import settings
 pwd_context = CryptContext(
     schemes=["bcrypt"],
     deprecated="auto",
-    bcrypt__rounds=12  # Explicitly set rounds for stability
+    bcrypt__rounds=12,  # Explicitly set rounds for stability
 )
 
 
@@ -34,6 +34,7 @@ class AuthContext(BaseModel):
 
 
 def auth_user_identifiers(auth: AuthContext) -> list[str]:
+    """Legacy identifier list (UUID/subject/username/email). Prefer auth_acl_principals."""
     identifiers: list[str] = []
     seen: set[str] = set()
     for value in (auth.user_id, auth.external_subject, auth.username, auth.email):
@@ -45,6 +46,60 @@ def auth_user_identifiers(auth: AuthContext) -> list[str]:
         seen.add(normalized)
         identifiers.append(normalized)
     return identifiers
+
+
+def auth_acl_principals(auth: AuthContext) -> list[str]:
+    """Principals used for document ACL matching (namespaced; no cross-provider collisions)."""
+    from ..connectors.nextcloud.identity import (
+        namespace_local_email,
+        namespace_local_user,
+        namespace_nc_group,
+        namespace_nc_user,
+    )
+
+    principals: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: str | None) -> None:
+        if not value:
+            return
+        normalized = str(value).strip()
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        principals.append(normalized)
+
+    _add(auth.user_id)
+
+    if auth.auth_provider == "nextcloud":
+        base = auth.nextcloud_base_url
+        subject = auth.external_subject or auth.username
+        if subject:
+            _add(namespace_nc_user(base, subject))
+        if auth.username and auth.username != subject:
+            _add(namespace_nc_user(base, auth.username))
+        for group in auth.groups or []:
+            _add(namespace_nc_group(base, group))
+        return principals
+
+    if auth.username:
+        _add(namespace_local_user(auth.username))
+    if auth.email:
+        _add(namespace_local_email(auth.email))
+    return principals
+
+
+def auth_acl_groups(auth: AuthContext) -> list[str]:
+    """Group principals for ACL overlap (namespaced for Nextcloud)."""
+    from ..connectors.nextcloud.identity import namespace_nc_group
+
+    if auth.auth_provider == "nextcloud":
+        return [
+            namespace_nc_group(auth.nextcloud_base_url, group)
+            for group in (auth.groups or [])
+            if group and str(group).strip()
+        ]
+    return [str(group).strip() for group in (auth.groups or []) if str(group).strip()]
 
 
 class ConnectorSecretCipher:
@@ -125,26 +180,23 @@ def get_password_hash(password: str) -> str:
     The SHA-256 pre-hash ensures we don't hit bcrypt's 72-byte limit.
     """
     # Pre-hash with SHA-256 to handle any password length
-    pre_hash = hashlib.sha256(password.encode('utf-8')).hexdigest()
+    pre_hash = hashlib.sha256(password.encode("utf-8")).hexdigest()
 
     # Use bcrypt directly for better control
     salt = bcrypt.gensalt(rounds=12)
-    hashed = bcrypt.hashpw(pre_hash.encode('utf-8'), salt)
-    return hashed.decode('utf-8')
+    hashed = bcrypt.hashpw(pre_hash.encode("utf-8"), salt)
+    return hashed.decode("utf-8")
 
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     """
     Verify a password against its hash.
     """
-    pre_hash = hashlib.sha256(plain_password.encode('utf-8')).hexdigest()
+    pre_hash = hashlib.sha256(plain_password.encode("utf-8")).hexdigest()
 
     try:
         # Try bcrypt verification first
-        return bcrypt.checkpw(
-            pre_hash.encode('utf-8'),
-            hashed_password.encode('utf-8')
-        )
+        return bcrypt.checkpw(pre_hash.encode("utf-8"), hashed_password.encode("utf-8"))
     except ValueError:
         # Fall back to passlib if bcrypt direct fails
         return pwd_context.verify(pre_hash, hashed_password)
@@ -154,7 +206,7 @@ def is_password_strong(password: str) -> bool:
     if len(password) < 10:
         return False
     return (
-            any(char.isupper() for char in password)
-            and any(char.islower() for char in password)
-            and any(char.isdigit() for char in password)
+        any(char.isupper() for char in password)
+        and any(char.islower() for char in password)
+        and any(char.isdigit() for char in password)
     )

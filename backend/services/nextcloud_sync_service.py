@@ -33,11 +33,11 @@ class NextcloudConnectorSyncService:
         self.session_factory = AsyncSessionLocal
 
     async def sync_connector(
-            self,
-            connector: Connector,
-            *,
-            full_reindex: bool = False,
-            job: SyncJob | None = None,
+        self,
+        connector: Connector,
+        *,
+        full_reindex: bool = False,
+        job: SyncJob | None = None,
     ) -> dict[str, int]:
         now = datetime.now(timezone.utc)
         config = self.connector_service.build_nextcloud_config(connector)
@@ -66,41 +66,56 @@ class NextcloudConnectorSyncService:
                 seen_external_ids.append(external_id)
 
             concurrency = max(1, settings.NEXTCLOUD_SYNC_INGEST_CONCURRENCY)
-            semaphore = asyncio.Semaphore(concurrency)
+            progress_every = max(1, settings.NEXTCLOUD_SYNC_PROGRESS_EVERY)
+            queue: asyncio.Queue[object | None] = asyncio.Queue()
+            for item in items:
+                queue.put_nowait(item)
+            for _ in range(concurrency):
+                queue.put_nowait(None)
+
             progress_lock = asyncio.Lock()
+            results: list[dict] = []
 
-            async def process(item) -> dict:
-                async with semaphore:
-                    return await self._process_item(
-                        connector_id=connector.id,
-                        item=item,
-                        sync_service=sync_service,
-                        full_reindex=full_reindex,
-                    )
+            async def worker() -> None:
+                nonlocal discovered
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        queue.task_done()
+                        return
+                    try:
+                        # Each item uses its own DB session inside _process_item.
+                        outcome = await self._process_item(
+                            connector_id=connector.id,
+                            item=item,
+                            sync_service=sync_service,
+                            full_reindex=full_reindex,
+                        )
+                        async with progress_lock:
+                            results.append(outcome)
+                            discovered += 1
+                            if job is not None and (
+                                discovered % progress_every == 0
+                                or discovered == len(items)
+                            ):
+                                JobLifecycleService.advance(job, discovered)
+                                await self.session.commit()
+                    finally:
+                        queue.task_done()
 
-            async def run_with_progress(item) -> dict:
-                outcome = await process(item)
-                async with progress_lock:
-                    nonlocal discovered
-                    discovered += 1
-                    if job is not None:
-                        JobLifecycleService.advance(job, discovered)
-                        await self.session.commit()
-                return outcome
-
-            results = await asyncio.gather(
-                *(run_with_progress(item) for item in items),
-                return_exceptions=False,
-            )
+            workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
+            await queue.join()
+            await asyncio.gather(*workers)
 
             for outcome in results:
                 if outcome["status"] == "indexed":
                     indexed += 1
-                elif outcome["status"] == "skipped":
+                elif outcome["status"] in {"skipped", "lexical_only", "non_vector"}:
                     pass
                 else:
                     failed += 1
-                    failure_details.append(outcome["failure"])
+                    if outcome.get("failure"):
+                        failure_details.append(outcome["failure"])
 
             deleted = await self.document_repo.mark_deleted_missing_from_external_ids(
                 connector_id=connector.id,
@@ -121,6 +136,13 @@ class NextcloudConnectorSyncService:
                     },
                 )
             await self.session.commit()
+            # Post-commit outbox drain (broker failure leaves rows for retry).
+            try:
+                from ..workers.outbox_dispatcher import dispatch_outbox_batch
+
+                await dispatch_outbox_batch()
+            except Exception:
+                logger.exception("Outbox dispatch after Nextcloud sync failed")
             return {
                 "discovered": discovered,
                 "indexed": indexed,
@@ -128,20 +150,32 @@ class NextcloudConnectorSyncService:
                 "deleted": deleted,
             }
         except Exception as exc:
-            connector.status = "error"
-            connector.last_error = str(exc)
-            if job is not None:
-                JobLifecycleService.mark_failed(
-                    job,
-                    str(exc),
-                    result={
-                        "discovered": discovered,
-                        "indexed": indexed,
-                        "failed": failed,
-                        "failures": failure_details[:25],
-                    },
-                )
-            await self.session.commit()
+            try:
+                await self.session.rollback()
+            except Exception:
+                logger.exception("Rollback failed after Nextcloud sync error")
+            async with self.session_factory() as fail_session:
+                connector_repo = ConnectorRepository(fail_session)
+                failed_connector = await connector_repo.get(connector.id)
+                if failed_connector is not None:
+                    failed_connector.status = "error"
+                    failed_connector.last_error = str(exc)
+                if job is not None:
+                    from ..db.repo.sync_job import SyncJobRepository
+
+                    failed_job = await SyncJobRepository(fail_session).get(job.id)
+                    if failed_job is not None:
+                        JobLifecycleService.mark_failed(
+                            failed_job,
+                            str(exc),
+                            result={
+                                "discovered": discovered,
+                                "indexed": indexed,
+                                "failed": failed,
+                                "failures": failure_details[:25],
+                            },
+                        )
+                await fail_session.commit()
             raise
         finally:
             await client.aclose()
@@ -185,19 +219,44 @@ class NextcloudConnectorSyncService:
                     await ingestion.ingest_document_bytes(document, payload)
                     document.sync_status = "synced"
                     document.sync_error = None
+                    parse_status = document.parse_status
+                    document_id = document.id
                     await task_session.commit()
+                    if parse_status == "indexed":
+                        return {"status": "indexed"}
+                    if parse_status == "lexical_ready":
+                        return {"status": "lexical_only"}
+                    if parse_status in {
+                        "needs_ocr",
+                        "unsupported_type",
+                        "unsupported",
+                        "partially_parsed",
+                    }:
+                        return {
+                            "status": "non_vector",
+                            "parse_status": parse_status,
+                        }
                     return {"status": "indexed"}
                 except Exception as exc:
                     error_message = str(exc)
-                    document.sync_status = "error"
-                    document.sync_error = error_message
-                    document.parse_status = "failed"
-                    document.parse_error = error_message
-                    await task_session.commit()
+                    document_id = document.id
+                    try:
+                        await task_session.rollback()
+                    except Exception:
+                        logger.exception("Rollback failed after ingest error")
+                    async with self.session_factory() as fail_session:
+                        fail_repo = DocumentRepository(fail_session)
+                        failed_doc = await fail_repo.get(document_id)
+                        if failed_doc is not None:
+                            failed_doc.sync_status = "error"
+                            failed_doc.sync_error = error_message
+                            failed_doc.parse_status = "failed"
+                            failed_doc.parse_error = error_message
+                            await fail_session.commit()
                     return {
                         "status": "failed",
                         "failure": {
-                            "document_id": str(document.id),
+                            "document_id": str(document_id),
                             "external_id": external_id,
                             "file_path": item.node.path,
                             "stage": "ingest",
@@ -221,11 +280,11 @@ class NextcloudConnectorSyncService:
             }
 
     async def _upsert_document(
-            self,
-            *,
-            connector: Connector,
-            document_repo: DocumentRepository,
-            item,
+        self,
+        *,
+        connector: Connector,
+        document_repo: DocumentRepository,
+        item,
     ) -> tuple[Document, str | None]:
         external_id = item.node.file_id or item.node.path
         document = await document_repo.get_by_connector_and_external_id(
@@ -246,7 +305,8 @@ class NextcloudConnectorSyncService:
         document.file_path = item.node.path
         document.file_name = item.node.path.split("/")[-1]
         document.mime_type = item.node.content_type
-        document.checksum = item.node.etag
+        # ETag is a sync version token, not a content checksum. Content hash is
+        # set during ingest from payload bytes.
         document.size_bytes = item.node.size_bytes
         document.version_tag = item.node.etag
         document.source_url = f"{connector.base_url.rstrip('/')}/f/{external_id}"
@@ -260,12 +320,17 @@ class NextcloudConnectorSyncService:
         document.allowed_group_ids = item.acl.allowed_group_ids
         document.public_link_enabled = item.acl.public_link_enabled
         document.acl_json = item.acl.model_dump(mode="json")
-        document.metadata_json = {"href": item.node.href}
+        previous_meta = dict(document.metadata_json or {})
+        document.metadata_json = {
+            **previous_meta,
+            "href": item.node.href,
+            "etag": item.node.etag,
+        }
         return document, previous_version_tag
 
     @staticmethod
     def _document_needs_reindex(
-            document: Document, previous_version_tag: str | None, new_etag: str | None
+        document: Document, previous_version_tag: str | None, new_etag: str | None
     ) -> bool:
         if document.indexed_at is None:
             return True

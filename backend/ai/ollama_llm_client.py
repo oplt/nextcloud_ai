@@ -1,42 +1,63 @@
 from __future__ import annotations
 
 import asyncio
-from collections import OrderedDict
 import hashlib
-import httpx
 import json
+import random
+from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any
+
+import httpx
 
 from ..core.config import settings
 
+# Per-asyncio-task usage — never share a mutable instance field across requests.
+_generation_usage: ContextVar[dict[str, Any] | None] = ContextVar(
+    "generation_usage", default=None
+)
 
-class _TTLCache:
-    def __init__(self, *, ttl_seconds: int, max_entries: int) -> None:
-        self.ttl_seconds = max(0, ttl_seconds)
-        self.max_entries = max(0, max_entries)
-        self._store: OrderedDict[str, tuple[float, str]] = OrderedDict()
 
-    def get(self, key: str) -> str | None:
-        if self.ttl_seconds <= 0 or self.max_entries <= 0:
-            return None
-        entry = self._store.get(key)
-        if entry is None:
-            return None
-        expires_at, value = entry
-        if expires_at <= asyncio.get_running_loop().time():
-            self._store.pop(key, None)
-            return None
-        self._store.move_to_end(key)
-        return value
+class LLMError(Exception):
+    """Base typed LLM failure."""
 
-    def set(self, key: str, value: str) -> None:
-        if self.ttl_seconds <= 0 or self.max_entries <= 0:
-            return
-        now = asyncio.get_running_loop().time()
-        self._store[key] = (now + self.ttl_seconds, value)
-        self._store.move_to_end(key)
-        while len(self._store) > self.max_entries:
-            self._store.popitem(last=False)
+    error_type = "llm_error"
+
+
+class LLMTimeoutError(LLMError):
+    error_type = "llm_timeout"
+
+
+class LLMHTTPError(LLMError):
+    error_type = "llm_http"
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class LLMValidationError(LLMError):
+    error_type = "llm_validation"
+
+
+class LLMTransientError(LLMError):
+    error_type = "llm_transient"
+
+
+@dataclass(slots=True)
+class GenerationResult:
+    text: str
+    usage: dict[str, Any]
+
+
+def consume_generation_usage() -> dict[str, Any] | None:
+    usage = _generation_usage.get()
+    _generation_usage.set(None)
+    return usage
+
+
+def peek_generation_usage() -> dict[str, Any] | None:
+    return _generation_usage.get()
 
 
 class OllamaLLMClient:
@@ -47,25 +68,36 @@ class OllamaLLMClient:
         base_url: str,
         max_connections: int = 4,
         timeout_seconds: float | None = None,
+        shared_cache: Any | None = None,
     ) -> None:
         self.model = model
         self.base_url = base_url.rstrip("/")
         self.max_retries = settings.LLM_MAX_RETRIES
         self.retry_backoff_seconds = settings.LLM_RETRY_BACKOFF_SECONDS
-        self.last_usage: dict[str, Any] | None = None
-        self._cache = _TTLCache(
-            ttl_seconds=settings.LLM_CACHE_TTL_SECONDS,
-            max_entries=settings.LLM_CACHE_MAX_ENTRIES,
-        )
+        self._timeout = timeout_seconds or settings.LLM_REQUEST_TIMEOUT_SECONDS
+        if shared_cache is not None:
+            self._cache = shared_cache
+        else:
+            from ..core.async_cache import AsyncTTLCache
+
+            self._cache = AsyncTTLCache(
+                ttl_seconds=settings.LLM_CACHE_TTL_SECONDS,
+                max_entries=settings.LLM_CACHE_MAX_ENTRIES,
+            )
         limits = httpx.Limits(
             max_connections=max_connections,
             max_keepalive_connections=max_connections,
             keepalive_expiry=30,
         )
-        self._client = httpx.AsyncClient(
-            timeout=timeout_seconds or settings.LLM_REQUEST_TIMEOUT_SECONDS,
-            limits=limits,
-        )
+        self._client = httpx.AsyncClient(timeout=self._timeout, limits=limits)
+
+    @property
+    def last_usage(self) -> dict[str, Any] | None:
+        return peek_generation_usage()
+
+    @last_usage.setter
+    def last_usage(self, value: dict[str, Any] | None) -> None:
+        _generation_usage.set(value)
 
     @staticmethod
     def _cache_key(model: str, prompt: str) -> str:
@@ -81,7 +113,12 @@ class OllamaLLMClient:
         return max(1, len(text.split()))
 
     def _build_usage(
-        self, *, prompt: str, response_text: str, response_payload: dict[str, Any], cached: bool
+        self,
+        *,
+        prompt: str,
+        response_text: str,
+        response_payload: dict[str, Any],
+        cached: bool,
     ) -> dict[str, Any]:
         prompt_tokens_raw = response_payload.get("prompt_eval_count")
         output_tokens_raw = response_payload.get("eval_count")
@@ -97,58 +134,115 @@ class OllamaLLMClient:
         )
         input_cost = (prompt_tokens / 1000.0) * settings.LLM_COST_INPUT_PER_1K
         output_cost = (output_tokens / 1000.0) * settings.LLM_COST_OUTPUT_PER_1K
-        total_cost = round(input_cost + output_cost, 8)
         return {
             "provider": "ollama",
             "model": self.model,
             "input_tokens": prompt_tokens,
             "output_tokens": output_tokens,
             "total_tokens": prompt_tokens + output_tokens,
-            "estimated_cost": total_cost,
+            "estimated_cost": round(input_cost + output_cost, 8),
             "cached": cached,
         }
 
-    async def generate(self, prompt: str) -> str:
-        cache_key = self._cache_key(self.model, prompt)
-        cached = self._cache.get(cache_key)
-        if cached is not None:
-            self.last_usage = self._build_usage(
-                prompt=prompt,
-                response_text=cached,
-                response_payload={},
-                cached=True,
-            )
-            return cached
+    @staticmethod
+    def _is_transient(exc: BaseException) -> bool:
+        if isinstance(
+            exc, (LLMTimeoutError, LLMTransientError, httpx.TimeoutException)
+        ):
+            return True
+        if isinstance(exc, httpx.TransportError):
+            return True
+        if isinstance(exc, httpx.HTTPStatusError):
+            return exc.response.status_code in {408, 429, 500, 502, 503, 504}
+        if isinstance(exc, LLMHTTPError):
+            return exc.status_code in {408, 429, 500, 502, 503, 504}
+        return False
 
+    async def _generate_uncached(self, prompt: str) -> GenerationResult:
+        deadline = asyncio.get_running_loop().time() + max(1.0, self._timeout * 2)
         attempts = max(0, self.max_retries) + 1
         last_error: Exception | None = None
         for attempt_index in range(attempts):
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                raise LLMTimeoutError(
+                    "Ollama generation deadline exceeded"
+                ) from last_error
             try:
                 response = await self._client.post(
                     f"{self.base_url}/api/generate",
                     json={"model": self.model, "prompt": prompt, "stream": False},
                 )
-                response.raise_for_status()
+                try:
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    raise LLMHTTPError(
+                        f"Ollama HTTP {exc.response.status_code}",
+                        status_code=exc.response.status_code,
+                    ) from exc
                 payload = response.json()
+                if not isinstance(payload, dict):
+                    raise LLMValidationError("Ollama response was not a JSON object")
                 response_text = str(payload.get("response") or "").strip()
                 if not response_text:
-                    raise ValueError("LLM response was empty")
-                self.last_usage = self._build_usage(
+                    raise LLMValidationError("LLM response was empty")
+                usage = self._build_usage(
                     prompt=prompt,
                     response_text=response_text,
-                    response_payload=payload if isinstance(payload, dict) else {},
+                    response_payload=payload,
                     cached=False,
                 )
-                self._cache.set(cache_key, response_text)
-                return response_text
-            except Exception as exc:  # noqa: BLE001
+                return GenerationResult(text=response_text, usage=usage)
+            except LLMValidationError:
+                raise
+            except LLMHTTPError as exc:
                 last_error = exc
+                if not self._is_transient(exc) or attempt_index >= attempts - 1:
+                    raise
+            except httpx.TimeoutException as exc:
+                last_error = LLMTimeoutError(str(exc))
                 if attempt_index >= attempts - 1:
-                    break
-                backoff = self.retry_backoff_seconds * (2**attempt_index)
-                if backoff > 0:
-                    await asyncio.sleep(backoff)
-        raise RuntimeError("Ollama generation failed") from last_error
+                    raise last_error from exc
+            except httpx.TransportError as exc:
+                last_error = LLMTransientError(str(exc))
+                if attempt_index >= attempts - 1:
+                    raise last_error from exc
+            except Exception as exc:
+                last_error = LLMTransientError(str(exc))
+                if not self._is_transient(exc) or attempt_index >= attempts - 1:
+                    raise last_error from exc
+            backoff = self.retry_backoff_seconds * (2**attempt_index)
+            backoff *= 0.5 + random.random()
+            await asyncio.sleep(min(backoff, max(0.0, remaining)))
+        raise LLMTransientError("Ollama generation failed") from last_error
+
+    async def generate_result(self, prompt: str) -> GenerationResult:
+        cache_key = self._cache_key(self.model, prompt)
+        cached = self._cache.get(cache_key)
+        if isinstance(cached, dict) and isinstance(cached.get("text"), str):
+            usage = dict(cached.get("usage") or {})
+            usage["cached"] = True
+            result = GenerationResult(text=str(cached["text"]), usage=usage)
+            _generation_usage.set(usage)
+            return result
+
+        async def _fill() -> dict[str, Any]:
+            result = await self._generate_uncached(prompt)
+            return {"text": result.text, "usage": dict(result.usage)}
+
+        payload = await self._cache.get_or_set(cache_key, _fill)
+        usage = dict(payload.get("usage") or {})
+        # First filler keeps cached=False; waiters after store still see False until
+        # a later get() path. Mark waiters that didn't do the network call as cached
+        # only when usage already has cached True from a prior get hit.
+        text = str(payload["text"])
+        result = GenerationResult(text=text, usage=usage)
+        _generation_usage.set(usage)
+        return result
+
+    async def generate(self, prompt: str) -> str:
+        result = await self.generate_result(prompt)
+        return result.text
 
     async def aclose(self) -> None:
         await self._client.aclose()

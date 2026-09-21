@@ -277,7 +277,9 @@ class NextcloudAutomationService:
         try:
             return await self.debounce_store.acquire(key, ttl_seconds)
         except Exception:
-            logger.exception("Redis debounce failed for key=%s; proceeding without it", key)
+            logger.exception(
+                "Redis debounce failed for key=%s; proceeding without it", key
+            )
             return True
 
     @staticmethod
@@ -301,23 +303,25 @@ class NextcloudAutomationService:
         normalized_path: str | None,
     ) -> str:
         event_time = event.timestamp or datetime.now(timezone.utc)
-        bucket = self._stable_bucket(settings.NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS, event_time)
-        return (
-            f"webhook:{connector_id}:{event.event.lower()}:{normalized_path or '-'}:{bucket}"
+        bucket = self._stable_bucket(
+            settings.NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS, event_time
         )
+        return f"webhook:{connector_id}:{event.event.lower()}:{normalized_path or '-'}:{bucket}"
 
     def _webhook_debounce_key(
         self, connector_id: UUID, event: NextcloudWebhookEvent
     ) -> str:
         normalized_path = self._normalize_path(event.path) or "-"
         event_time = event.timestamp or datetime.now(timezone.utc)
-        bucket = self._stable_bucket(settings.NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS, event_time)
-        return (
-            f"webhook-debounce:{connector_id}:{event.event.lower()}:{normalized_path}:{bucket}"
+        bucket = self._stable_bucket(
+            settings.NEXTCLOUD_WEBHOOK_DEBOUNCE_SECONDS, event_time
         )
+        return f"webhook-debounce:{connector_id}:{event.event.lower()}:{normalized_path}:{bucket}"
 
     def _fallback_debounce_key(self, connector_id: UUID, now: datetime) -> str:
-        bucket = self._stable_bucket(settings.NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS, now)
+        bucket = self._stable_bucket(
+            settings.NEXTCLOUD_FALLBACK_STALE_AFTER_SECONDS, now
+        )
         return f"fallback:{connector_id}:{bucket}"
 
     @staticmethod

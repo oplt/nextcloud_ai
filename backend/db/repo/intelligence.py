@@ -205,6 +205,30 @@ class WorkflowTaskRepository(BaseRepository[WorkflowTask]):
         )
         return {str(status): int(count) for status, count in result.all()}
 
+    async def count_open_by_queue_visible_to_auth(
+        self, *, auth: AuthContext
+    ) -> dict[str, int]:
+        visibility = DocumentRepository.visibility_clause(auth)
+        result = await self.session.execute(
+            select(WorkflowTask.queue_name, func.count())
+            .join(Document, Document.id == WorkflowTask.document_id)
+            .where(WorkflowTask.status.in_(OPEN_WORKFLOW_STATUSES), visibility)
+            .group_by(WorkflowTask.queue_name)
+        )
+        return {str(queue_name): int(count) for queue_name, count in result.all()}
+
+    async def count_by_status_visible_to_auth(
+        self, *, auth: AuthContext
+    ) -> dict[str, int]:
+        visibility = DocumentRepository.visibility_clause(auth)
+        result = await self.session.execute(
+            select(WorkflowTask.status, func.count())
+            .join(Document, Document.id == WorkflowTask.document_id)
+            .where(visibility)
+            .group_by(WorkflowTask.status)
+        )
+        return {str(status): int(count) for status, count in result.all()}
+
 
 class KnowledgeGraphRepository:
     def __init__(self, session: AsyncSession) -> None:
@@ -237,7 +261,9 @@ class KnowledgeGraphRepository:
         resolved[("document", str(document_id))] = document_node
 
         for draft in nodes:
-            resolved[(draft.node_type, draft.external_key)] = await self._get_or_create_node(
+            resolved[
+                (draft.node_type, draft.external_key)
+            ] = await self._get_or_create_node(
                 node_type=draft.node_type,
                 external_key=draft.external_key,
                 label=draft.label,
@@ -299,9 +325,7 @@ class KnowledgeGraphRepository:
 
         seed_ids = list(document_ids)
         seed_conn_result = await self.session.execute(
-            select(Document.connector_id)
-            .where(Document.id.in_(seed_ids))
-            .distinct()
+            select(Document.connector_id).where(Document.id.in_(seed_ids)).distinct()
         )
         seed_connector_ids = [
             row[0] for row in seed_conn_result.all() if row[0] is not None
@@ -310,8 +334,9 @@ class KnowledgeGraphRepository:
             return []
 
         entity_result = await self.session.execute(
-            select(KnowledgeEdge.target_node_id)
-            .where(KnowledgeEdge.document_id.in_(seed_ids))
+            select(KnowledgeEdge.target_node_id).where(
+                KnowledgeEdge.document_id.in_(seed_ids)
+            )
         )
         entity_node_ids = [row[0] for row in entity_result.all() if row[0] is not None]
         if not entity_node_ids:

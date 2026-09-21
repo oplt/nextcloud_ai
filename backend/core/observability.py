@@ -47,7 +47,20 @@ RAG_EMBEDDING_SECONDS = Histogram(
     "nextcloud_ai_rag_embedding_seconds",
     "Time to produce the query embedding for retrieval.",
     ["provider", "outcome"],
-    buckets=(0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0, float("inf")),
+    buckets=(
+        0.005,
+        0.01,
+        0.025,
+        0.05,
+        0.1,
+        0.25,
+        0.5,
+        1.0,
+        2.5,
+        5.0,
+        10.0,
+        float("inf"),
+    ),
 )
 RAG_RETRIEVAL_SOURCES_RETURNED = Histogram(
     "nextcloud_ai_rag_retrieval_sources_returned",
@@ -121,7 +134,9 @@ def install_metrics_route(app: FastAPI) -> None:
 
     @app.get(settings.METRICS_PATH, include_in_schema=False)
     async def metrics() -> Response:
-        return PlainTextResponse(generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST)
+        return PlainTextResponse(
+            generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST
+        )
 
 
 def get_request_id() -> str | None:
@@ -167,7 +182,9 @@ def record_rag_retrieval_delivery(
         RAG_GRAPH_EXPAND_EVENTS_TOTAL.labels(phase=phase, applied=applied).inc()
 
 
-def record_rag_rerank_event(*, order_changed: bool, content_truncated_count: int) -> None:
+def record_rag_rerank_event(
+    *, order_changed: bool, content_truncated_count: int
+) -> None:
     if not settings.METRICS_ENABLED:
         return
     RAG_RERANK_EVENTS_TOTAL.labels(
@@ -249,7 +266,9 @@ async def observe_http_request(
     request: Request,
     call_next: Callable,
 ) -> Response:
-    request_id = request.headers.get(settings.REQUEST_ID_HEADER_NAME) or str(uuid.uuid4())
+    request_id = request.headers.get(settings.REQUEST_ID_HEADER_NAME) or str(
+        uuid.uuid4()
+    )
     trace_id = _extract_trace_id(request, request_id)
     request.state.request_id = request_id
     request.state.trace_id = trace_id

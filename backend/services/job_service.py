@@ -159,11 +159,8 @@ class JobService:
             return job
         if job.requested_by_id == actor.id:
             return job
-        if (
-            job.connector is None
-            or not connector_is_manageable_by_identity(
-                job.connector, auth=actor_auth, user=actor
-            )
+        if job.connector is None or not connector_is_manageable_by_identity(
+            job.connector, auth=actor_auth, user=actor
         ):
             raise AuthorizationError("Job is not assigned to you")
         return job

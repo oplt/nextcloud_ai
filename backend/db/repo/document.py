@@ -4,11 +4,12 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, Text, and_, cast, delete, func, or_, select, update
+from sqlalchemy import Select, and_, case, delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import contains_eager, selectinload
+from sqlalchemy.orm import contains_eager, defer, selectinload
 
-from ...core.security import AuthContext, auth_user_identifiers
+from ...core.security import AuthContext, auth_acl_groups, auth_acl_principals
+from ...rag.lexical import LEXICAL_REGCONFIG, looks_like_identifier
 from ..models import Document, DocumentChunk
 from .base import BaseRepository
 
@@ -18,18 +19,18 @@ class DocumentRepository(BaseRepository[Document]):
         super().__init__(session, Document)
 
     async def get_by_connector_and_external_id(
-            self, connector_id: UUID, external_id: str
+        self, connector_id: UUID, external_id: str
     ) -> Document | None:
         result = await self.session.execute(
             select(Document).where(
                 Document.connector_id == connector_id,
                 Document.external_id == external_id,
-                )
+            )
         )
         return result.scalar_one_or_none()
 
     async def get_by_connector_and_file_path(
-            self, connector_id: UUID | str, file_path: str
+        self, connector_id: UUID | str, file_path: str
     ) -> Document | None:
         result = await self.session.execute(
             select(Document).where(
@@ -42,23 +43,27 @@ class DocumentRepository(BaseRepository[Document]):
     async def get_with_chunks(self, document_id: UUID | str) -> Document | None:
         result = await self.session.execute(
             select(Document)
-            .options(selectinload(Document.chunks))
+            .options(
+                selectinload(Document.chunks).defer(DocumentChunk.embedding),
+            )
             .where(Document.id == document_id)
         )
         return result.scalar_one_or_none()
 
     async def get_with_chunks_visible_to_auth(
-            self, document_id: UUID | str, auth: AuthContext
+        self, document_id: UUID | str, auth: AuthContext
     ) -> Document | None:
         result = await self.session.execute(
             select(Document)
-            .options(selectinload(Document.chunks))
+            .options(
+                selectinload(Document.chunks).defer(DocumentChunk.embedding),
+            )
             .where(Document.id == document_id, self.visibility_clause(auth))
         )
         return result.scalar_one_or_none()
 
     async def get_visible_to_auth(
-            self, document_id: UUID | str, auth: AuthContext
+        self, document_id: UUID | str, auth: AuthContext
     ) -> Document | None:
         stmt = select(Document).where(
             Document.id == document_id, self.visibility_clause(auth)
@@ -67,28 +72,28 @@ class DocumentRepository(BaseRepository[Document]):
         return result.scalar_one_or_none()
 
     async def search(
-            self,
-            *,
-            auth: AuthContext | None = None,
-            query: str | None = None,
-            connector_id: UUID | None = None,
-            connector_ids: Sequence[UUID | str] | None = None,
-            mime_type: str | None = None,
-            mime_types: Sequence[str] | None = None,
-            path_prefixes: Sequence[str] | None = None,
-            modified_after: datetime | None = None,
-            modified_before: datetime | None = None,
-            parse_status: str | None = None,
-            document_type: str | None = None,
-            business_domain: str | None = None,
-            source_type: str | None = None,
-            needs_review: bool | None = None,
-            low_confidence: bool | None = None,
-            include_deleted: bool = False,
-            include_intelligence: bool = False,
-            include_chunks: bool = False,
-            offset: int = 0,
-            limit: int = 50,
+        self,
+        *,
+        auth: AuthContext | None = None,
+        query: str | None = None,
+        connector_id: UUID | None = None,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_type: str | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        parse_status: str | None = None,
+        document_type: str | None = None,
+        business_domain: str | None = None,
+        source_type: str | None = None,
+        needs_review: bool | None = None,
+        low_confidence: bool | None = None,
+        include_deleted: bool = False,
+        include_intelligence: bool = False,
+        include_chunks: bool = False,
+        offset: int = 0,
+        limit: int = 50,
     ) -> list[Document]:
         stmt: Select[tuple[Document]] = select(Document)
         if include_chunks:
@@ -167,62 +172,90 @@ class DocumentRepository(BaseRepository[Document]):
         result = await self.session.execute(stmt)
         return int(result.scalar_one())
 
-    async def count_chunks_by_document_ids(
-        self, document_ids: Sequence[UUID | str]
+    async def count_visible_by_field(
+        self,
+        *,
+        auth: AuthContext,
+        field: str,
     ) -> dict[str, int]:
-        if not document_ids:
-            return {}
-        result = await self.session.execute(
-            select(DocumentChunk.document_id, func.count(DocumentChunk.id))
-            .where(DocumentChunk.document_id.in_(list(document_ids)))
-            .group_by(DocumentChunk.document_id)
+        """Authorized SQL aggregates. ``field`` is document_type or business_domain."""
+        column = {
+            "document_type": Document.document_type,
+            "business_domain": Document.business_domain,
+        }.get(field)
+        if column is None:
+            raise ValueError(f"unsupported aggregate field: {field}")
+        stmt = (
+            select(column, func.count())
+            .where(DocumentRepository.visibility_clause(auth))
+            .group_by(column)
         )
-        return {str(document_id): int(count) for document_id, count in result.all()}
+        result = await self.session.execute(stmt)
+        counts: dict[str, int] = {}
+        for value, count in result.all():
+            key = str(value or "unknown").strip() or "unknown"
+            if key in {"", "unclassified", "unknown"} and field == "document_type":
+                if key in {"", "unclassified"}:
+                    continue
+            if field == "business_domain" and key == "unknown":
+                continue
+            counts[key] = int(count)
+        return counts
+
+    async def list_spotlight_documents(
+        self,
+        *,
+        auth: AuthContext,
+        limit: int = 12,
+    ) -> list[Document]:
+        """Paginated spotlight rows with intelligence collections. Not a global total."""
+        return await self.search(
+            auth=auth,
+            limit=limit,
+            include_intelligence=True,
+        )
 
     async def search_documents(
-            self,
-            *,
-            auth: AuthContext,
-            terms: Sequence[str],
-            connector_ids: Sequence[UUID | str] | None = None,
-            path_prefixes: Sequence[str] | None = None,
-            modified_after: datetime | None = None,
-            modified_before: datetime | None = None,
-            document_types: Sequence[str] | None = None,
-            business_domains: Sequence[str] | None = None,
-            source_types: Sequence[str] | None = None,
-            limit: int = 20,
-    ) -> list[Document]:
+        self,
+        *,
+        auth: AuthContext,
+        terms: Sequence[str],
+        connector_ids: Sequence[UUID | str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        mime_types: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+        limit: int = 20,
+    ) -> list[tuple[Document, float]]:
+        """Distinct documents ordered by best ``ts_rank_cd``. Limit is per document."""
         normalized_terms = [term.strip() for term in terms if term.strip()]
         if not normalized_terms:
             return []
 
-        clauses = []
-        for term in normalized_terms:
-            pattern = f"%{term}%"
-            clauses.extend(
-                [
-                    Document.file_name.ilike(pattern),
-                    Document.file_path.ilike(pattern),
-                    Document.document_type.ilike(pattern),
-                    Document.business_domain.ilike(pattern),
-                    cast(Document.metadata_json, Text).ilike(pattern),
-                    cast(Document.extracted_fields_json, Text).ilike(pattern),
-                    DocumentChunk.content.ilike(pattern),
-                ]
-            )
-
+        chunk_rank = DocumentChunkRepository._best_chunk_rank_subquery(normalized_terms)
+        score = func.greatest(
+            func.coalesce(chunk_rank.c.lexical_rank, 0.0),
+            DocumentChunkRepository._filename_identifier_boost(normalized_terms),
+        ).label("lexical_rank")
         stmt = (
-            select(Document)
-            .outerjoin(Document.chunks)
-            .options(selectinload(Document.chunks))
-            .where(DocumentRepository.visibility_clause(auth), or_(*clauses))
-            .order_by(Document.modified_at.desc().nullslast(), Document.updated_at.desc())
+            select(Document, score)
+            .outerjoin(chunk_rank, chunk_rank.c.document_id == Document.id)
+            .where(
+                DocumentRepository.visibility_clause(auth),
+                DocumentChunkRepository._document_lexical_match(
+                    normalized_terms, chunk_rank
+                ),
+            )
+            .order_by(score.desc(), Document.modified_at.desc().nullslast())
             .limit(limit)
         )
         stmt = self._apply_document_filters(
             stmt,
             connector_ids=connector_ids,
+            mime_types=mime_types,
             path_prefixes=path_prefixes,
             modified_after=modified_after,
             modified_before=modified_before,
@@ -231,10 +264,53 @@ class DocumentRepository(BaseRepository[Document]):
             source_types=source_types,
         )
         result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
+        return [(row[0], float(row[1] or 0.0)) for row in result.all()]
+
+    async def count_search_documents(
+        self,
+        *,
+        auth: AuthContext,
+        terms: Sequence[str],
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+    ) -> int:
+        normalized_terms = [term.strip() for term in terms if term.strip()]
+        if not normalized_terms:
+            return 0
+        chunk_rank = DocumentChunkRepository._best_chunk_rank_subquery(normalized_terms)
+        stmt = (
+            select(func.count(Document.id))
+            .select_from(Document)
+            .outerjoin(chunk_rank, chunk_rank.c.document_id == Document.id)
+            .where(
+                DocumentRepository.visibility_clause(auth),
+                DocumentChunkRepository._document_lexical_match(
+                    normalized_terms, chunk_rank
+                ),
+            )
+        )
+        stmt = self._apply_document_filters(
+            stmt,
+            connector_ids=connector_ids,
+            mime_types=mime_types,
+            path_prefixes=path_prefixes,
+            modified_after=modified_after,
+            modified_before=modified_before,
+            document_types=document_types,
+            business_domains=business_domains,
+            source_types=source_types,
+        )
+        result = await self.session.execute(stmt)
+        return int(result.scalar_one())
 
     async def mark_deleted_missing_from_external_ids(
-            self, *, connector_id: UUID, external_ids: Sequence[str]
+        self, *, connector_id: UUID, external_ids: Sequence[str]
     ) -> int:
         stmt = (
             update(Document)
@@ -242,11 +318,58 @@ class DocumentRepository(BaseRepository[Document]):
                 Document.connector_id == connector_id,
                 Document.external_id.not_in(list(external_ids)),
                 Document.is_deleted.is_(False),
-                )
+            )
             .values(is_deleted=True, sync_status="deleted")
         )
         result = await self.session.execute(stmt)
         return int(result.rowcount or 0)
+
+    async def mark_deleted_missing_imap_uids(
+        self,
+        *,
+        connector_id: UUID,
+        present_uids: Sequence[str],
+        mailbox: str | None = None,
+        uidvalidity: int | None = None,
+    ) -> int:
+        """Soft-delete email docs whose stored IMAP UID is absent from a complete inventory.
+
+        Documents without ``metadata_json.imap_uid`` are retained (legacy/unknown).
+        """
+        present = {str(uid) for uid in present_uids if str(uid).strip()}
+        stmt = select(Document).where(
+            Document.connector_id == connector_id,
+            Document.is_deleted.is_(False),
+        )
+        result = await self.session.execute(stmt)
+        deleted = 0
+        for document in result.scalars().all():
+            meta = document.metadata_json or {}
+            source_kind = str(meta.get("source_kind") or "")
+            if source_kind not in {"email_message", "email_attachment"}:
+                continue
+            imap_uid = str(meta.get("imap_uid") or "").strip()
+            if not imap_uid:
+                continue
+            if mailbox is not None:
+                stored_mailbox = str(meta.get("imap_mailbox") or "")
+                if stored_mailbox and stored_mailbox != mailbox:
+                    continue
+            if uidvalidity is not None:
+                stored_validity = meta.get("imap_uidvalidity")
+                if stored_validity is not None and int(stored_validity) != int(
+                    uidvalidity
+                ):
+                    # Different UIDVALIDITY epoch — do not delete across renumbering.
+                    continue
+            if imap_uid in present:
+                continue
+            document.is_deleted = True
+            document.sync_status = "deleted"
+            deleted += 1
+        if deleted:
+            await self.session.flush()
+        return deleted
 
     async def count_chunks(self, document_id: UUID | str) -> int:
         result = await self.session.execute(
@@ -279,7 +402,7 @@ class DocumentRepository(BaseRepository[Document]):
                 Document.checksum == checksum,
                 Document.source_type == source_type,
                 Document.id != exclude_document_id,
-                Document.parse_status == "indexed",
+                Document.parse_status.in_(("indexed", "lexical_ready")),
                 Document.is_deleted.is_(False),
             )
         )
@@ -287,15 +410,24 @@ class DocumentRepository(BaseRepository[Document]):
 
     @staticmethod
     def visibility_clause(auth: AuthContext):
+        """Authorized, non-deleted documents only.
+
+        Public/possession-based Nextcloud links are never treated as universal
+        read for authenticated app users.
+        """
         if auth.is_superuser:
             return Document.is_deleted.is_(False)
-        visibility = [Document.public_link_enabled.is_(True)]
-        user_identifiers = auth_user_identifiers(auth)
-        if user_identifiers:
-            visibility.append(Document.owner_external_id.in_(user_identifiers))
-            visibility.append(Document.allowed_user_ids.overlap(user_identifiers))
-        if auth.groups:
-            visibility.append(Document.allowed_group_ids.overlap(auth.groups))
+        visibility: list[object] = []
+        principals = auth_acl_principals(auth)
+        if principals:
+            visibility.append(Document.owner_external_id.in_(principals))
+            visibility.append(Document.allowed_user_ids.overlap(principals))
+        groups = auth_acl_groups(auth)
+        if groups:
+            visibility.append(Document.allowed_group_ids.overlap(groups))
+        if not visibility:
+            # Fail closed: no principals → no document visibility.
+            return and_(Document.is_deleted.is_(False), Document.id.is_(None))
         return and_(Document.is_deleted.is_(False), or_(*visibility))
 
     @staticmethod
@@ -303,6 +435,7 @@ class DocumentRepository(BaseRepository[Document]):
         stmt: Select,
         *,
         connector_ids: Sequence[UUID | str] | None = None,
+        mime_types: Sequence[str] | None = None,
         path_prefixes: Sequence[str] | None = None,
         modified_after: datetime | None = None,
         modified_before: datetime | None = None,
@@ -312,6 +445,8 @@ class DocumentRepository(BaseRepository[Document]):
     ) -> Select:
         if connector_ids:
             stmt = stmt.where(Document.connector_id.in_(list(connector_ids)))
+        if mime_types:
+            stmt = stmt.where(Document.mime_type.in_(list(mime_types)))
         if path_prefixes:
             stmt = stmt.where(
                 or_(
@@ -388,7 +523,9 @@ class DocumentRepository(BaseRepository[Document]):
         if needs_review:
             filters.append(
                 or_(
-                    Document.parse_status.in_(["failed", "needs_ocr", "unsupported_type"]),
+                    Document.parse_status.in_(
+                        ["failed", "needs_ocr", "unsupported_type"]
+                    ),
                     Document.document_type == "unclassified",
                     Document.business_domain == "unknown",
                     Document.document_type_confidence < 0.6,
@@ -424,7 +561,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         super().__init__(session, DocumentChunk)
 
     async def delete_for_document(
-            self, document_id: UUID | str, *, flush: bool = False
+        self, document_id: UUID | str, *, flush: bool = False
     ) -> int:
         result = await self.session.execute(
             delete(DocumentChunk).where(DocumentChunk.document_id == document_id)
@@ -434,42 +571,167 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         return int(result.rowcount or 0)
 
     async def replace_for_document(
-            self, document_id: UUID | str, chunks: Sequence[DocumentChunk]
+        self,
+        document_id: UUID | str,
+        chunks: Sequence[DocumentChunk],
+        *,
+        touch_parse_status: bool = False,
     ) -> None:
-        await self.session.execute(
-            update(Document)
-            .where(Document.id == document_id)
-            .values(parse_status="parsing")
-        )
+        """Replace chunk rows for a document.
+
+        Status transitions belong to the ingestion pipeline. The historical
+        ``parse_status='parsing'`` overwrite is opt-in and off by default.
+        """
+        if touch_parse_status:
+            await self.session.execute(
+                update(Document)
+                .where(Document.id == document_id)
+                .values(parse_status="parsing")
+            )
         await self.delete_for_document(document_id)
         self.session.add_all(list(chunks))
         await self.session.flush()
 
-    async def list_by_document(self, document_id: UUID | str) -> list[DocumentChunk]:
-        result = await self.session.execute(
+    async def list_by_document(
+        self,
+        document_id: UUID | str,
+        *,
+        include_embeddings: bool = True,
+        offset: int = 0,
+        limit: int | None = None,
+    ) -> list[DocumentChunk]:
+        """Unauthenticated full-document chunk list.
+
+        Prefer :meth:`list_authorized_by_document` for any user-facing path.
+        Defer vectors when unused to avoid pulling large embedding payloads.
+        """
+        stmt = (
             select(DocumentChunk)
             .where(DocumentChunk.document_id == document_id)
             .order_by(DocumentChunk.chunk_index.asc())
         )
+        if not include_embeddings:
+            stmt = stmt.options(defer(DocumentChunk.embedding))
+        if offset:
+            stmt = stmt.offset(offset)
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        result = await self.session.execute(stmt)
         return list(result.scalars().all())
 
+    async def list_authorized_range(
+        self,
+        *,
+        document_id: UUID | str,
+        auth: AuthContext,
+        start_index: int = 0,
+        end_index: int | None = None,
+        document_ids_scope: Sequence[UUID] | None = None,
+        include_embeddings: bool = False,
+        limit: int = 128,
+    ) -> list[DocumentChunk]:
+        """Authorized chunk index range for one document (neighbor expansion)."""
+        if document_ids_scope is not None:
+            allowed = {str(item) for item in document_ids_scope}
+            if str(document_id) not in allowed:
+                return []
+        stmt = (
+            select(DocumentChunk)
+            .join(DocumentChunk.document)
+            .options(contains_eager(DocumentChunk.document))
+            .where(
+                DocumentChunk.document_id == document_id,
+                DocumentChunk.chunk_index >= max(0, start_index),
+                DocumentRepository.visibility_clause(auth),
+            )
+            .order_by(DocumentChunk.chunk_index.asc())
+            .limit(max(1, limit))
+        )
+        if end_index is not None:
+            stmt = stmt.where(DocumentChunk.chunk_index <= end_index)
+        if not include_embeddings:
+            stmt = stmt.options(defer(DocumentChunk.embedding))
+        result = await self.session.execute(stmt)
+        return list(result.scalars().unique().all())
+
+    async def list_authorized_by_document(
+        self,
+        *,
+        document_id: UUID | str,
+        auth: AuthContext,
+        document_ids_scope: Sequence[UUID] | None = None,
+        limit: int = 128,
+    ) -> list[DocumentChunk]:
+        """Bounded chunk list for one document under current ACL + optional hard scope."""
+        if document_ids_scope is not None:
+            allowed = {str(item) for item in document_ids_scope}
+            if str(document_id) not in allowed:
+                return []
+
+        stmt = (
+            select(DocumentChunk)
+            .join(DocumentChunk.document)
+            .options(contains_eager(DocumentChunk.document))
+            .where(
+                DocumentChunk.document_id == document_id,
+                DocumentRepository.visibility_clause(auth),
+            )
+            .order_by(DocumentChunk.chunk_index.asc())
+            .limit(max(1, limit))
+        )
+        result = await self.session.execute(stmt)
+        return list(result.scalars().all())
+
+    async def filter_authorized_document_ids(
+        self,
+        *,
+        document_ids: Sequence[UUID | str],
+        auth: AuthContext,
+        document_ids_scope: Sequence[UUID] | None = None,
+    ) -> set[str]:
+        """Return the subset of document IDs currently visible to auth (and in scope)."""
+        ids = [str(item) for item in document_ids if item is not None]
+        if not ids:
+            return set()
+        if document_ids_scope is not None:
+            scope = {str(item) for item in document_ids_scope}
+            ids = [item for item in ids if item in scope]
+            if not ids:
+                return set()
+        stmt = select(Document.id).where(
+            Document.id.in_(ids),
+            DocumentRepository.visibility_clause(auth),
+        )
+        result = await self.session.execute(stmt)
+        return {str(row[0]) for row in result.all()}
+
     async def semantic_search(
-            self,
-            *,
-            embedding: list[float],
-            auth: AuthContext,
-            limit: int = 8,
-            document_ids: Sequence[UUID] | None = None,
-            connector_ids: Sequence[UUID | str] | None = None,
-            mime_types: Sequence[str] | None = None,
-            path_prefixes: Sequence[str] | None = None,
-            modified_after: datetime | None = None,
-            modified_before: datetime | None = None,
-            document_types: Sequence[str] | None = None,
-            business_domains: Sequence[str] | None = None,
-            source_types: Sequence[str] | None = None,
-            parse_status: str | None = "indexed",
+        self,
+        *,
+        embedding: list[float],
+        auth: AuthContext,
+        limit: int = 8,
+        document_ids: Sequence[UUID] | None = None,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+        parse_status: str | None = "indexed",
     ) -> list[tuple[DocumentChunk, float]]:
+        from ...core.config import settings as runtime_settings
+
+        # Selective scopes: exact ordered distance over the candidate set.
+        # Broad corpus: tune IVFFlat probes (not a universal lists=100 default).
+        exact_cap = int(runtime_settings.PGVECTOR_EXACT_SEARCH_MAX_CANDIDATES)
+        selective = bool(document_ids) and len(document_ids) <= max(1, exact_cap // 30)
+        if not selective:
+            probes = int(runtime_settings.PGVECTOR_IVFFLAT_PROBES)
+            await self.session.execute(text(f"SET LOCAL ivfflat.probes = {probes}"))
+
         distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
         stmt = (
             select(DocumentChunk, distance)
@@ -500,48 +762,45 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         return [(row[0], float(row[1])) for row in result.all()]
 
     async def keyword_search(
-            self,
-            *,
-            terms: Sequence[str],
-            auth: AuthContext,
-            limit: int = 16,
-            document_ids: Sequence[UUID] | None = None,
-            connector_ids: Sequence[UUID | str] | None = None,
-            mime_types: Sequence[str] | None = None,
-            path_prefixes: Sequence[str] | None = None,
-            modified_after: datetime | None = None,
-            modified_before: datetime | None = None,
-            document_types: Sequence[str] | None = None,
-            business_domains: Sequence[str] | None = None,
-            source_types: Sequence[str] | None = None,
-            parse_status: str | None = "indexed",
-    ) -> list[DocumentChunk]:
+        self,
+        *,
+        terms: Sequence[str],
+        auth: AuthContext,
+        limit: int = 16,
+        document_ids: Sequence[UUID] | None = None,
+        connector_ids: Sequence[UUID | str] | None = None,
+        mime_types: Sequence[str] | None = None,
+        path_prefixes: Sequence[str] | None = None,
+        modified_after: datetime | None = None,
+        modified_before: datetime | None = None,
+        document_types: Sequence[str] | None = None,
+        business_domains: Sequence[str] | None = None,
+        source_types: Sequence[str] | None = None,
+        parse_status: str | None = "indexed",
+    ) -> list[tuple[DocumentChunk, float]]:
+        """Chunks ranked by ``ts_rank_cd`` before LIMIT.
+
+        The float is cover-density rank plus an identifier boost, not BM25.
+        """
         normalized_terms = [term.strip() for term in terms if term.strip()]
         if not normalized_terms:
             return []
 
-        like_clauses = []
-        for term in normalized_terms:
-            pattern = f"%{term}%"
-            like_clauses.extend(
-                [
-                    DocumentChunk.content.ilike(pattern),
-                    DocumentChunk.section_title.ilike(pattern),
-                    Document.file_name.ilike(pattern),
-                    Document.file_path.ilike(pattern),
-                    Document.document_type.ilike(pattern),
-                    Document.business_domain.ilike(pattern),
-                    cast(Document.metadata_json, Text).ilike(pattern),
-                    cast(Document.extracted_fields_json, Text).ilike(pattern),
-                ]
-            )
-
+        vector = self._chunk_tsvector()
+        tsquery = func.plainto_tsquery(LEXICAL_REGCONFIG, " ".join(normalized_terms))
+        identifier_hit = self._identifier_hit(normalized_terms)
+        rank = (
+            func.ts_rank_cd(vector, tsquery) + case((identifier_hit, 1.0), else_=0.0)
+        ).label("lexical_rank")
         stmt = (
-            select(DocumentChunk)
+            select(DocumentChunk, rank)
             .join(DocumentChunk.document)
             .options(contains_eager(DocumentChunk.document))
-            .where(DocumentRepository.visibility_clause(auth), or_(*like_clauses))
-            .order_by(DocumentChunk.chunk_index.asc())
+            .where(
+                DocumentRepository.visibility_clause(auth),
+                or_(vector.bool_op("@@")(tsquery), identifier_hit),
+            )
+            .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
             .limit(limit)
         )
         if document_ids:
@@ -559,7 +818,82 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             parse_status=parse_status,
         )
         result = await self.session.execute(stmt)
-        return list(result.scalars().unique().all())
+        return [(row[0], float(row[1] or 0.0)) for row in result.all()]
+
+    @staticmethod
+    def _chunk_tsvector():
+        text = func.concat_ws(
+            " ",
+            func.coalesce(DocumentChunk.content, ""),
+            func.coalesce(DocumentChunk.section_title, ""),
+            func.coalesce(DocumentChunk.heading_path, ""),
+            func.coalesce(Document.file_name, ""),
+            func.coalesce(Document.file_path, ""),
+            func.coalesce(Document.document_type, ""),
+            func.coalesce(Document.business_domain, ""),
+        )
+        return func.to_tsvector(LEXICAL_REGCONFIG, text)
+
+    @staticmethod
+    def _identifier_hit(terms: Sequence[str]):
+        clauses = []
+        for term in terms:
+            if not looks_like_identifier(term):
+                continue
+            pattern = f"%{term}%"
+            clauses.extend(
+                [
+                    DocumentChunk.content.ilike(pattern),
+                    Document.file_name.ilike(pattern),
+                    Document.file_path.ilike(pattern),
+                ]
+            )
+        if not clauses:
+            return Document.id.is_(None)
+        return or_(*clauses)
+
+    @staticmethod
+    def _filename_identifier_boost(terms: Sequence[str]):
+        clauses = []
+        for term in terms:
+            pattern = f"%{term}%"
+            clauses.append(Document.file_name.ilike(pattern))
+            if looks_like_identifier(term):
+                clauses.append(Document.file_path.ilike(pattern))
+        if not clauses:
+            return case((Document.id.is_(None), 1.0), else_=0.0)
+        return case((or_(*clauses), 1.0), else_=0.0)
+
+    @classmethod
+    def _best_chunk_rank_subquery(cls, terms: Sequence[str]):
+        vector = cls._chunk_tsvector()
+        tsquery = func.plainto_tsquery(LEXICAL_REGCONFIG, " ".join(terms))
+        rank = func.ts_rank_cd(vector, tsquery)
+        return (
+            select(
+                DocumentChunk.document_id.label("document_id"),
+                func.max(rank).label("lexical_rank"),
+            )
+            .join(DocumentChunk.document)
+            .where(vector.bool_op("@@")(tsquery))
+            .group_by(DocumentChunk.document_id)
+            .subquery()
+        )
+
+    @classmethod
+    def _document_lexical_match(cls, terms: Sequence[str], chunk_rank):
+        field_hits = []
+        for term in terms:
+            pattern = f"%{term}%"
+            field_hits.extend(
+                [
+                    Document.file_name.ilike(pattern),
+                    Document.file_path.ilike(pattern),
+                    Document.document_type.ilike(pattern),
+                    Document.business_domain.ilike(pattern),
+                ]
+            )
+        return or_(chunk_rank.c.document_id.is_not(None), *field_hits)
 
     @staticmethod
     def _apply_chunk_document_filters(
@@ -600,5 +934,11 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         if source_types:
             stmt = stmt.where(Document.source_type.in_(list(source_types)))
         if parse_status:
-            stmt = stmt.where(Document.parse_status == parse_status)
+            if parse_status == "indexed":
+                # Default searchable set: vector-ready or lexical-only.
+                stmt = stmt.where(
+                    Document.parse_status.in_(("indexed", "lexical_ready"))
+                )
+            else:
+                stmt = stmt.where(Document.parse_status == parse_status)
         return stmt

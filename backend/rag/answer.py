@@ -26,4 +26,3 @@ def build_source_block(sources: list[ChatSource]) -> str:
             f"Excerpt: {excerpt}"
         )
     return "\n\n".join(lines)
-

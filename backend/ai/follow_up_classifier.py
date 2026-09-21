@@ -139,4 +139,6 @@ def classify_follow_up(question: str, *, has_history: bool) -> FollowUpClassific
 
     confidence = max(0.0, min(1.0, score))
     is_follow_up = confidence >= 0.46
-    return FollowUpClassification(is_follow_up=is_follow_up, confidence=confidence, reasons=reasons)
+    return FollowUpClassification(
+        is_follow_up=is_follow_up, confidence=confidence, reasons=reasons
+    )

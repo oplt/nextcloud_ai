@@ -1,0 +1,196 @@
+{
+  "documents": [
+    {
+      "key": "vacation_policy_2024",
+      "title": "Vacation Carry-Over Policy 2024",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/hr/vacation_policy_2024.txt",
+      "tags": ["policy", "hr", "english"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "vacation_policy_2024:c1",
+          "page_number": 1,
+          "section_title": "Carry-over",
+          "text": "Vacation carry-over policy for 2024: employees may carry over up to 5 unused vacation days into 2025. Days above 5 expire on 31 December 2024."
+        },
+        {
+          "key": "vacation_policy_2024:c2",
+          "page_number": 2,
+          "section_title": "Approval",
+          "text": "Carry-over requests must be submitted to HR before 15 December 2024."
+        }
+      ]
+    },
+    {
+      "key": "vacation_policy_nl",
+      "title": "Verlofregeling Nederland",
+      "language": "nl",
+      "mime_type": "text/plain",
+      "file_path": "/hr/verlofregeling_nl.txt",
+      "tags": ["policy", "hr", "dutch"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "vacation_policy_nl:c1",
+          "page_number": 1,
+          "section_title": "Wettelijke vakantiedagen",
+          "text": "Nederlandse verlofregeling: medewerkers hebben recht op 20 wettelijke vakantiedagen per kalenderjaar. Niet-opgenomen wettelijke dagen vervallen zes maanden na afloop van het vakantiejaar."
+        }
+      ]
+    },
+    {
+      "key": "revenue_recognition_asc606",
+      "title": "Revenue Recognition Before and After ASC 606",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/finance/asc606_comparison.txt",
+      "tags": ["finance", "multi_evidence"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "revenue_recognition_asc606:c1",
+          "page_number": 1,
+          "section_title": "Before ASC 606",
+          "text": "Before ASC 606, revenue recognition often followed industry-specific guidance and could recognize revenue when persuasive evidence of an arrangement existed."
+        },
+        {
+          "key": "revenue_recognition_asc606:c2",
+          "page_number": 2,
+          "section_title": "After ASC 606",
+          "text": "After ASC 606, revenue recognition uses a five-step model focused on transfer of control to the customer rather than risks-and-rewards transfer."
+        }
+      ]
+    },
+    {
+      "key": "iso_cert_2023_de",
+      "title": "ISO-Zertifizierung 2023",
+      "language": "de",
+      "mime_type": "text/plain",
+      "file_path": "/quality/iso_2023_de.txt",
+      "tags": ["quality", "german", "multilingual"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "iso_cert_2023_de:c1",
+          "page_number": 1,
+          "section_title": "Unterschrift",
+          "text": "Die ISO-Zertifizierung 2023 wurde von Dr. Anna Keller unterschrieben. Das Audit fand am 12. März 2023 statt."
+        }
+      ]
+    },
+    {
+      "key": "invoice_inv_2024_0042",
+      "title": "Invoice INV-2024-0042",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/finance/invoices/INV-2024-0042.txt",
+      "tags": ["invoice", "table", "exact_id"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "invoice_inv_2024_0042:c1",
+          "page_number": 1,
+          "section_title": "Totals",
+          "text": "Invoice ID: INV-2024-0042\n| Item | Qty | Amount EUR |\n| Widget A | 2 | 120.00 |\n| Widget B | 1 | 80.00 |\n| Total |  | 200.00 |\nPayment terms: Net 30."
+        }
+      ]
+    },
+    {
+      "key": "code_auth_timeout",
+      "title": "auth_middleware.py excerpt",
+      "language": "en",
+      "mime_type": "text/x-python",
+      "file_path": "/engineering/auth_middleware.py",
+      "tags": ["code"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "code_auth_timeout:c1",
+          "page_number": 1,
+          "section_title": "TOKEN_TTL",
+          "text": "```python\nTOKEN_TTL_SECONDS = 900\n\ndef token_is_expired(issued_at: float, now: float) -> bool:\n    # Expire strictly after TTL.\n    return (now - issued_at) > TOKEN_TTL_SECONDS\n```"
+        }
+      ]
+    },
+    {
+      "key": "handbook_multipage",
+      "title": "Employee Handbook",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/hr/employee_handbook.txt",
+      "tags": ["multipage"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "handbook_multipage:c1",
+          "page_number": 1,
+          "section_title": "Introduction",
+          "text": "Welcome to the employee handbook. This document covers workplace norms."
+        },
+        {
+          "key": "handbook_multipage:c2",
+          "page_number": 4,
+          "section_title": "Remote work",
+          "text": "Remote work: employees may work remotely up to three days per week with manager approval."
+        },
+        {
+          "key": "handbook_multipage:c3",
+          "page_number": 9,
+          "section_title": "Expenses",
+          "text": "Expense receipts above EUR 50 require a cost-center code."
+        }
+      ]
+    },
+    {
+      "key": "distractor_lunch_menu",
+      "title": "Cafeteria Lunch Menu",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/facilities/lunch_menu.txt",
+      "tags": ["distractor"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "distractor_lunch_menu:c1",
+          "page_number": 1,
+          "section_title": "Monday",
+          "text": "Lunch is served at noon. Today's special is tomato soup and grilled cheese. The invoice total is not listed here."
+        }
+      ]
+    },
+    {
+      "key": "distractor_sports",
+      "title": "Office Football Pool Rules",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/social/football_pool.txt",
+      "tags": ["distractor"],
+      "visible_to": ["alice", "bob", "admin"],
+      "chunks": [
+        {
+          "key": "distractor_sports:c1",
+          "page_number": 1,
+          "text": "Office football pool: entry fee is EUR 5. Scores are posted every Monday."
+        }
+      ]
+    },
+    {
+      "key": "alice_private_note",
+      "title": "Alice private compensation note",
+      "language": "en",
+      "mime_type": "text/plain",
+      "file_path": "/private/alice/comp_note.txt",
+      "tags": ["acl", "private"],
+      "visible_to": ["alice", "admin"],
+      "chunks": [
+        {
+          "key": "alice_private_note:c1",
+          "page_number": 1,
+          "text": "Confidential: Alice annual bonus target is EUR 12000 for FY2024."
+        }
+      ]
+    }
+  ]
+}

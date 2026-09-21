@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..core.security import AuthContext
 from ..db.models import Document
 from ..db.repo.document import DocumentRepository
+from ..rag.lexical import classify_catalog_intent, semantic_json_text
 from ..schemas.chat_schema import RetrievalFilters
 
 _DISCOVERY_RE = re.compile(
@@ -74,31 +75,62 @@ class DocumentSearchService:
         terms = self.extract_terms(query)
         if not terms:
             return []
-        documents = await self.repo.search_documents(
+        ranked = await self.repo.search_documents(
             auth=auth,
             terms=terms,
             connector_ids=filters.connector_ids if filters else None,
+            mime_types=filters.mime_types if filters else None,
             path_prefixes=filters.path_prefixes if filters else None,
             modified_after=filters.modified_after if filters else None,
             modified_before=filters.modified_before if filters else None,
             document_types=filters.document_types if filters else None,
             business_domains=filters.business_domains if filters else None,
             source_types=filters.source_types if filters else None,
-            limit=max(limit * 4, 20),
+            limit=limit,
         )
-        ranked = sorted(
-            [self._score_document(document, terms) for document in documents],
-            key=lambda item: item.score,
-            reverse=True,
+        results = [
+            self._score_document(document, terms, lexical_rank=rank)
+            for document, rank in ranked
+        ]
+        results.sort(key=lambda item: item.score, reverse=True)
+        return [item for item in results if item.score > 0]
+
+    async def count(
+        self,
+        *,
+        query: str,
+        auth: AuthContext,
+        filters: RetrievalFilters | None = None,
+    ) -> int:
+        terms = self.extract_terms(query)
+        if not terms:
+            return 0
+        return await self.repo.count_search_documents(
+            auth=auth,
+            terms=terms,
+            connector_ids=filters.connector_ids if filters else None,
+            mime_types=filters.mime_types if filters else None,
+            path_prefixes=filters.path_prefixes if filters else None,
+            modified_after=filters.modified_after if filters else None,
+            modified_before=filters.modified_before if filters else None,
+            document_types=filters.document_types if filters else None,
+            business_domains=filters.business_domains if filters else None,
+            source_types=filters.source_types if filters else None,
         )
-        return [item for item in ranked if item.score > 0][:limit]
 
     @staticmethod
     def is_document_discovery_query(query: str) -> bool:
+        """Navigation only. Factual and exhaustive catalog queries return false."""
+        if classify_catalog_intent(query) != "navigation":
+            return False
         lowered = query.lower()
         return bool(_DISCOVERY_RE.search(lowered)) and any(
             token not in _STOPWORDS for token in _TOKEN_RE.findall(lowered)
         )
+
+    @staticmethod
+    def is_exhaustive_catalog_query(query: str) -> bool:
+        return classify_catalog_intent(query) == "exhaustive"
 
     @staticmethod
     def extract_terms(query: str) -> list[str]:
@@ -158,16 +190,19 @@ class DocumentSearchService:
         return False
 
     def _score_document(
-        self, document: Document, terms: list[str]
+        self,
+        document: Document,
+        terms: list[str],
+        *,
+        lexical_rank: float = 0.0,
     ) -> DocumentSearchResult:
         fields = {
             "file_name": document.file_name,
             "file_path": document.file_path,
             "document_type": document.document_type,
             "business_domain": document.business_domain,
-            "metadata_json": _json_text(document.metadata_json),
-            "extracted_fields_json": _json_text(document.extracted_fields_json),
-            "content": " ".join(chunk.content for chunk in document.chunks[:6]),
+            "metadata_json": semantic_json_text(document.metadata_json),
+            "extracted_fields_json": semantic_json_text(document.extracted_fields_json),
         }
         weights = {
             "file_name": 1.0,
@@ -176,7 +211,6 @@ class DocumentSearchService:
             "business_domain": 0.8,
             "metadata_json": 0.7,
             "extracted_fields_json": 1.4,
-            "content": 0.6,
         }
         matched_fields: list[str] = []
         raw_score = 0.0
@@ -186,31 +220,22 @@ class DocumentSearchService:
             if hits:
                 matched_fields.append(field)
                 raw_score += weights[field] * hits / max(len(terms), 1)
+        if lexical_rank > 0:
+            matched_fields.append("content")
+            # ts_rank_cd, not a sample of the first chunks.
+            raw_score += lexical_rank
         lowered_name = (document.file_name or "").lower()
         lowered_path = (document.file_path or "").lower()
         for term in terms:
-            if "." in term and (term == lowered_name or lowered_path.endswith(f"/{term}")):
+            if "." in term and (
+                term == lowered_name or lowered_path.endswith(f"/{term}")
+            ):
                 raw_score += 2.0
                 if "file_name" not in matched_fields:
                     matched_fields.append("file_name")
                 break
         return DocumentSearchResult(
             document=document,
-            score=min(0.999, raw_score),
+            score=raw_score,
             matched_fields=matched_fields,
         )
-
-
-def _json_text(value: dict | None) -> str:
-    if not value:
-        return ""
-    parts: list[str] = []
-    for key, item in value.items():
-        parts.append(str(key))
-        if isinstance(item, dict):
-            parts.append(_json_text(item))
-        elif isinstance(item, list):
-            parts.extend(str(entry) for entry in item)
-        elif item is not None:
-            parts.append(str(item))
-    return " ".join(parts)

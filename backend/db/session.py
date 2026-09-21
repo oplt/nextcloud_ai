@@ -1,9 +1,7 @@
 from __future__ import annotations
 
-import asyncio
 import os
-from collections.abc import AsyncGenerator, Coroutine
-from typing import Any, TypeVar
+from collections.abc import AsyncGenerator
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -14,24 +12,7 @@ from sqlalchemy.ext.asyncio import (
 
 from ..core.config import settings
 
-T = TypeVar("T")
-
 _process_engines: dict[int, tuple[AsyncEngine, async_sessionmaker[AsyncSession]]] = {}
-
-
-def run_async_safe(coro: Coroutine[Any, Any, T]) -> T:
-    """
-    Run an async coroutine from sync code.
-
-    Do not call this from an already-running event loop. Blocking the same loop
-    deadlocks. Async callers must await directly.
-    """
-    try:
-        asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(coro)
-
-    raise RuntimeError("run_async_safe() was called from an async context; await the coroutine instead.")
 
 
 def _get_engine_key() -> int:

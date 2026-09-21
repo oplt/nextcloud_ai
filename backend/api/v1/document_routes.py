@@ -29,7 +29,10 @@ router = APIRouter(prefix="/documents", tags=["documents"])
 
 def build_content_disposition(filename: str, disposition: str = "inline") -> str:
     fallback = (
-        filename.encode("ascii", "ignore").decode("ascii").replace("\\", "_").replace('"', "")
+        filename.encode("ascii", "ignore")
+        .decode("ascii")
+        .replace("\\", "_")
+        .replace('"', "")
     ).strip() or "document"
     encoded = quote(filename, safe="")
     return f"{disposition}; filename=\"{fallback}\"; filename*=UTF-8''{encoded}"
@@ -37,22 +40,22 @@ def build_content_disposition(filename: str, disposition: str = "inline") -> str
 
 @router.get("", response_model=DocumentListRead)
 async def list_documents(
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("documents:read")),
-        query: str | None = Query(default=None),
-        connector_id: list[str] | None = Query(default=None),
-        mime_type: list[str] | None = Query(default=None),
-        path_prefix: list[str] | None = Query(default=None),
-        modified_after: datetime | None = Query(default=None),
-        modified_before: datetime | None = Query(default=None),
-        document_type: str | None = Query(default=None),
-        business_domain: str | None = Query(default=None),
-        parse_status: str | None = Query(default=None),
-        source_type: str | None = Query(default=None),
-        needs_review: bool | None = Query(default=None),
-        low_confidence: bool | None = Query(default=None),
-        page: int = Query(default=1, ge=1),
-        page_size: int = Query(default=50, ge=1, le=200),
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("documents:read")),
+    query: str | None = Query(default=None),
+    connector_id: list[str] | None = Query(default=None),
+    mime_type: list[str] | None = Query(default=None),
+    path_prefix: list[str] | None = Query(default=None),
+    modified_after: datetime | None = Query(default=None),
+    modified_before: datetime | None = Query(default=None),
+    document_type: str | None = Query(default=None),
+    business_domain: str | None = Query(default=None),
+    parse_status: str | None = Query(default=None),
+    source_type: str | None = Query(default=None),
+    needs_review: bool | None = Query(default=None),
+    low_confidence: bool | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=50, ge=1, le=200),
 ) -> DocumentListRead:
     return await DocumentService(session).list_documents(
         auth=identity.auth,
@@ -75,7 +78,7 @@ async def list_documents(
 
 @router.get("/taxonomy", response_model=DocumentTaxonomyRead)
 async def get_document_taxonomy(
-        identity: AuthenticatedUser = Depends(permission_required("documents:read")),
+    identity: AuthenticatedUser = Depends(permission_required("documents:read")),
 ) -> DocumentTaxonomyRead:
     return DocumentTaxonomyRead(
         document_types=DOCUMENT_TYPES,
@@ -86,25 +89,29 @@ async def get_document_taxonomy(
 
 @router.get("/{document_id}", response_model=DocumentDetail)
 async def get_document(
-        document_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("documents:read")),
+    document_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("documents:read")),
 ) -> DocumentDetail:
     repo = DocumentRepository(session)
     document = await repo.get_with_chunks_visible_to_auth(document_id, identity.auth)
     if document is None:
         raise NotFoundError("Document not found")
+    chunk_count = await repo.count_chunks(document_id)
     return _document_detail(
-        await ProductIntelligenceService(session).build_document_detail(document=document)
+        await ProductIntelligenceService(session).build_document_detail(
+            document=document
+        ),
+        chunk_count=chunk_count,
     )
 
 
 @router.patch("/{document_id}/classification", response_model=DocumentDetail)
 async def patch_document_classification(
-        document_id: str,
-        payload: DocumentClassificationPatch,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("documents:reindex")),
+    document_id: str,
+    payload: DocumentClassificationPatch,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("documents:reindex")),
 ) -> DocumentDetail:
     if payload.document_type not in DOCUMENT_TYPES:
         raise BadRequestError("Unknown document type")
@@ -124,24 +131,31 @@ async def patch_document_classification(
     }
     document.document_type = payload.document_type
     document.document_type_confidence = 1.0
-    document.document_type_reason = payload.document_type_reason or f"Manual override. Previous: {previous}"
+    document.document_type_reason = (
+        payload.document_type_reason or f"Manual override. Previous: {previous}"
+    )
     document.document_type_source = "manual"
     document.business_domain = payload.business_domain
     document.business_domain_confidence = 1.0
-    document.business_domain_reason = payload.business_domain_reason or f"Manual override. Previous: {previous}"
+    document.business_domain_reason = (
+        payload.business_domain_reason or f"Manual override. Previous: {previous}"
+    )
     document.business_domain_source = "manual"
     document.manual_category_override = True
     document.classified_at = datetime.now(timezone.utc)
     await session.flush()
-    detail = await ProductIntelligenceService(session).build_document_detail(document=document)
-    return _document_detail(detail)
+    detail = await ProductIntelligenceService(session).build_document_detail(
+        document=document
+    )
+    chunk_count = await repo.count_chunks(document_id)
+    return _document_detail(detail, chunk_count=chunk_count)
 
 
 @router.get("/{document_id}/original")
 async def get_document_original(
-        document_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("documents:read")),
+    document_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("documents:read")),
 ) -> Response:
     document_repo = DocumentRepository(session)
     document = await document_repo.get_visible_to_auth(document_id, identity.auth)
@@ -187,9 +201,9 @@ async def get_document_original(
 
 @router.post("/{document_id}/reindex")
 async def reindex_document(
-        document_id: str,
-        session: DbSessionDep,
-        identity: AuthenticatedUser = Depends(permission_required("documents:reindex")),
+    document_id: str,
+    session: DbSessionDep,
+    identity: AuthenticatedUser = Depends(permission_required("documents:reindex")),
 ) -> dict[str, str]:
     repo = DocumentRepository(session)
     document = await repo.get_visible_to_auth(document_id, identity.auth)
@@ -220,10 +234,21 @@ def _needs_review(document) -> bool:
     )
 
 
-def _document_detail(document: DocumentDetail) -> DocumentDetail:
+def _document_detail(
+    document: DocumentDetail, *, chunk_count: int | None = None
+) -> DocumentDetail:
     payload = document.model_dump()
     metadata = dict(payload.get("metadata_json") or {})
-    payload["chunk_count"] = len(document.chunks)
+    if chunk_count is not None:
+        payload["chunk_count"] = int(chunk_count)
+    else:
+        quality = metadata.get("ingestion_quality")
+        meta_count = (
+            quality.get("chunk_count") if isinstance(quality, dict) else None
+        )
+        payload["chunk_count"] = (
+            int(meta_count) if meta_count is not None else len(document.chunks)
+        )
     payload["ingestion_quality"] = metadata.get("ingestion_quality")
     payload["signal_counts"] = _signal_counts(document)
     payload["needs_review"] = _needs_review(document)

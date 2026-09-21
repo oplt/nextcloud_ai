@@ -37,3 +37,29 @@ class RedisReplayStore:
         key = self._key(jti)
         created = await self._client.set(key, "1", ex=ttl_seconds, nx=True)
         return bool(created)
+
+
+class InMemoryReplayStore:
+    """Process-local replay guard for development/test when Redis is unavailable."""
+
+    def __init__(self, *, namespace: str = "nextcloud-bridge:jti") -> None:
+        self.namespace = namespace
+        self._seen: dict[str, float] = {}
+
+    def _key(self, jti: str) -> str:
+        digest = hashlib.sha256(jti.encode("utf-8")).hexdigest()
+        return f"{self.namespace}:{digest}"
+
+    async def mark_consumed(self, jti: str, ttl_seconds: int) -> bool:
+        import time
+
+        now = time.monotonic()
+        # Opportunistic expiry sweep.
+        expired = [key for key, until in self._seen.items() if until <= now]
+        for key in expired:
+            self._seen.pop(key, None)
+        key = self._key(jti)
+        if key in self._seen and self._seen[key] > now:
+            return False
+        self._seen[key] = now + max(1, ttl_seconds)
+        return True

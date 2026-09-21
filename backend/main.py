@@ -60,18 +60,72 @@ async def lifespan(app: FastAPI):
         )
 
     try:
+        from .ai.embedding_contract import verify_embedding_runtime_compat
+
+        embed_compat = await verify_embedding_runtime_compat()
+        app.state.embedding_compat = embed_compat.to_dict()
+        if embed_compat.ready:
+            logger.info(
+                "Embedding compat ok provider=%s dim=%s fingerprint=%s",
+                embed_compat.provider,
+                embed_compat.expected_dim,
+                embed_compat.fingerprint,
+            )
+        else:
+            logger.warning(
+                "Embedding compat check failed: %s", embed_compat.error
+            )
+            if settings.EMBEDDING_COMPAT_REQUIRED:
+                raise RuntimeError(
+                    f"Embedding runtime incompatible: {embed_compat.error}"
+                )
+    except Exception:
+        if settings.EMBEDDING_COMPAT_REQUIRED:
+            raise
+        logger.exception("Embedding compatibility probe failed")
+
+    try:
         async with AsyncSessionLocal() as session:
             reset = await SyncJobRepository(session).reset_stale_running_jobs(
-                message="Job interrupted by API restart"
+                message="Job lease expired (detected at API startup)"
             )
         if reset:
-            logger.warning("Reset %d zombie running sync jobs at startup", reset)
+            logger.warning(
+                "Failed %d abandoned sync jobs with expired leases at startup", reset
+            )
     except Exception:
-        logger.exception("Failed to reset zombie sync jobs at startup")
+        logger.exception("Failed to reclaim expired sync job leases at startup")
+
+    if settings.RAG_TRUE_RERANK_PRELOAD:
+        from .rag.rerank_runtime import RerankDependencyError, ensure_reranker_ready
+
+        try:
+            rerank_status = await ensure_reranker_ready()
+        except RerankDependencyError:
+            logger.exception("True reranker required at startup but unavailable")
+            raise
+        app.state.rerank_runtime = rerank_status
+        if rerank_status.enabled and rerank_status.using_fallback:
+            logger.warning(
+                "True reranker degraded; heuristic fallback active: %s",
+                rerank_status.error,
+            )
+        elif rerank_status.enabled and rerank_status.ready:
+            logger.info("True reranker preloaded model=%s", rerank_status.model)
+    else:
+        from .rag.rerank_runtime import get_rerank_status
+
+        app.state.rerank_runtime = get_rerank_status()
+
+    from .core.ai_resources import start_ai_resources, stop_ai_resources
+
+    ai_bundle = await start_ai_resources(role="api")
+    app.state.ai_resources = ai_bundle.cache_stats()
 
     try:
         yield
     finally:
+        await stop_ai_resources()
         await dispose_db()
 
 

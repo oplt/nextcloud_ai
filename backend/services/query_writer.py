@@ -33,7 +33,14 @@ class RetrievalQueryPlan:
 
 
 def is_likely_follow_up(question: str, *, has_history: bool) -> bool:
-    """Backward-compatible coarse follow-up flag."""
+    """Deprecated: use ``classify_follow_up(...).is_follow_up``."""
+    import warnings
+
+    warnings.warn(
+        "is_likely_follow_up is deprecated; use classify_follow_up(...).is_follow_up",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     return classify_follow_up(question, has_history=has_history).is_follow_up
 
 
@@ -45,14 +52,18 @@ def _compress_whitespace(text: str) -> str:
     return " ".join(text.split())
 
 
-def _clean_history_content(content: str, *, limit: int = _MAX_HISTORY_MESSAGE_CHARS) -> str:
+def _clean_history_content(
+    content: str, *, limit: int = _MAX_HISTORY_MESSAGE_CHARS
+) -> str:
     content = _compress_whitespace(_strip_citation_tail(content or ""))
     if len(content) > limit:
         return content[: limit - 3].rstrip() + "..."
     return content
 
 
-def _recent_user_context(history: list[dict[str, str]], *, max_items: int = 3) -> list[str]:
+def _recent_user_context(
+    history: list[dict[str, str]], *, max_items: int = 3
+) -> list[str]:
     """Return recent user turns only.
 
     Fallback retrieval queries should not use prior assistant answers as factual evidence,
@@ -86,16 +97,18 @@ def _format_history_for_rewrite(history: list[dict[str, str]]) -> str:
 
 
 def _build_contextual_follow_up_query(
-        *,
-        question: str,
-        history: list[dict[str, str]],
+    *,
+    question: str,
+    history: list[dict[str, str]],
 ) -> str:
     """Conservative fallback when the rewrite LLM fails or returns an unsafe rewrite."""
     prior_user_turns = _recent_user_context(history)
     if not prior_user_turns:
         return question
 
-    rewritten = f"{question} Context from prior user turns: {' '.join(prior_user_turns)}"
+    rewritten = (
+        f"{question} Context from prior user turns: {' '.join(prior_user_turns)}"
+    )
     return _compress_whitespace(rewritten)[:_MAX_REWRITE_CHARS]
 
 
@@ -119,7 +132,10 @@ def _looks_like_bad_rewrite(*, original_question: str, rewritten: str) -> bool:
         return True
     # For a context-dependent original question, an identical rewrite usually means the
     # model failed to resolve references.
-    if has_contextual_reference(original_question) and rewritten.casefold() == original_question.casefold():
+    if (
+        has_contextual_reference(original_question)
+        and rewritten.casefold() == original_question.casefold()
+    ):
         return True
     return False
 
@@ -129,25 +145,34 @@ def _has_strict_context_reference(question: str) -> bool:
 
 
 async def build_retrieval_query(
-        *,
-        question: str,
-        history: list[dict[str, str]],
-        llm_client: "LLMClientProtocol",
+    *,
+    question: str,
+    history: list[dict[str, str]],
+    llm_client: "LLMClientProtocol",
 ) -> tuple[str, bool]:
-    """Return ``(retrieval_query, is_follow_up)`` for pinning and logging."""
-    plan = await plan_retrieval_query(question=question, history=history, llm_client=llm_client)
+    """Deprecated: use ``plan_retrieval_query`` (returns ``RetrievalQueryPlan``)."""
+    import warnings
+
+    warnings.warn(
+        "build_retrieval_query is deprecated; use plan_retrieval_query",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    plan = await plan_retrieval_query(
+        question=question, history=history, llm_client=llm_client
+    )
     return plan.retrieval_query, plan.is_follow_up
 
 
 async def plan_retrieval_query(
-        *,
-        question: str,
-        history: list[dict[str, str]],
-        llm_client: "LLMClientProtocol",
+    *,
+    question: str,
+    history: list[dict[str, str]],
+    llm_client: "LLMClientProtocol",
 ) -> RetrievalQueryPlan:
     structured = classify_follow_up(question, has_history=bool(history))
     contextual_signal = bool(history) and (
-            _has_strict_context_reference(question) or is_challenge_turn(question)
+        _has_strict_context_reference(question) or is_challenge_turn(question)
     )
 
     if not contextual_signal:
@@ -188,7 +213,9 @@ async def plan_retrieval_query(
         "REWRITTEN SEARCH QUERY:"
     )
 
-    fallback_query = _build_contextual_follow_up_query(question=question, history=history)
+    fallback_query = _build_contextual_follow_up_query(
+        question=question, history=history
+    )
 
     try:
         rewritten = (await llm_client.generate(rewrite_prompt)).strip()

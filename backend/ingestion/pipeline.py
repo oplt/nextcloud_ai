@@ -8,6 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai.chunker import chunk_parsed_document
 from ..ai.embedding_client import EmbeddingClientFactory, EmbeddingClientProtocol
+from ..ai.embedding_contract import (
+    EmbeddingValidationError,
+    active_embedding_fingerprint,
+    iter_embedding_batches,
+    prepare_embedding_input,
+    validate_embedding_vector,
+)
 from ..core.config import settings
 from ..db.models import Document, DocumentChunk
 from ..db.repo.document import DocumentChunkRepository
@@ -19,13 +26,14 @@ from .intelligence import extract_intelligence
 
 EMBEDDING_BATCH_SIZE = 32
 MIN_TEXT_LENGTH_FOR_INDEXING = 40
+SEARCHABLE_PARSE_STATUSES = frozenset({"indexed", "lexical_ready"})
 
 
 class IngestionPipeline:
     def __init__(
-            self,
-            session: AsyncSession,
-            embedding_client: EmbeddingClientProtocol | None = None,
+        self,
+        session: AsyncSession,
+        embedding_client: EmbeddingClientProtocol | None = None,
     ) -> None:
         self.session = session
         self.embedding_client = embedding_client or EmbeddingClientFactory.create()
@@ -33,12 +41,19 @@ class IngestionPipeline:
         self.classifier = DocumentClassifier()
 
     async def ingest_document(
-            self, document: Document, parsed_document: ParsedDocument
+        self,
+        document: Document,
+        parsed_document: ParsedDocument,
+        *,
+        index_attempt=None,
     ) -> list[DocumentChunk]:
+        from .index_versions import assert_publish_allowed
+
         started_at = datetime.now(timezone.utc)
         text = parsed_document.text or ""
         text_length = len(text)
 
+        # Pipeline owns status transitions; repository must not overwrite them.
         document.parse_status = "parsing"
         document.file_extension = Path(document.file_name or "").suffix.lower() or None
         document.source_type = document.source_type or "nextcloud"
@@ -46,12 +61,16 @@ class IngestionPipeline:
         document.page_count = _page_count(parsed_document)
         document.word_count = len(re.findall(r"\S+", text))
         document.token_count = document.word_count
-        document.language = document.language or parsed_document.metadata.get("language") or "unknown"
+        document.language = (
+            document.language or parsed_document.metadata.get("language") or "unknown"
+        )
 
         needs_ocr = _needs_ocr(parsed_document, text_length)
         if text_length < MIN_TEXT_LENGTH_FOR_INDEXING:
             document.parse_status = "needs_ocr" if needs_ocr else "partially_parsed"
-            document.parse_error = "Extracted text is too short for reliable classification/indexing."
+            document.parse_error = (
+                "Extracted text is too short for reliable classification/indexing."
+            )
             document.metadata_json = _with_ingestion_quality(
                 document.metadata_json,
                 parsed_document=parsed_document,
@@ -69,12 +88,18 @@ class IngestionPipeline:
                 status=document.parse_status,
                 extra={"text_length": text_length, "needs_ocr": needs_ocr},
             )
-            await self.chunk_repo.replace_for_document(document.id, [])
+            if index_attempt is not None:
+                assert_publish_allowed(document, index_attempt)
+            await self.chunk_repo.replace_for_document(
+                document.id, [], touch_parse_status=False
+            )
             return []
 
         document.parse_status = "parsed"
 
-        classification = await self.classifier.classify(document=document, parsed=parsed_document)
+        classification = await self.classifier.classify(
+            document=document, parsed=parsed_document
+        )
         document.document_type = classification.document_type
         document.document_type_confidence = classification.document_type_confidence
         document.document_type_reason = classification.document_type_reason
@@ -91,27 +116,83 @@ class IngestionPipeline:
             "counts": intelligence.counts(),
         }
 
-        drafts = chunk_parsed_document(parsed_document, chunk_size=850, overlap=100)
-        contents = [draft.content for draft in drafts if draft.content and draft.content.strip()]
-        embedding_inputs = [_embedding_input(content) for content in contents]
-
-        embeddings: list[list[float] | None] = []
+        drafts = chunk_parsed_document(parsed_document, chunk_size=400, overlap=60)
+        fingerprint = active_embedding_fingerprint(
+            parser=str(parsed_document.metadata.get("parser") or "unknown"),
+        )
+        reused = 0
+        reusable: dict[str, list[float]] = {}
+        embeddings: list[list[float] | None] = [None] * len(drafts)
         embedding_status = "skipped"
         embedding_error: str | None = None
 
-        if contents:
+        nonempty_indices = [
+            index
+            for index, draft in enumerate(drafts)
+            if draft.content and draft.content.strip()
+        ]
+
+        if nonempty_indices:
+            prior = await self.chunk_repo.list_by_document(document.id)
+            for prior_chunk in prior:
+                prior_meta = dict(prior_chunk.metadata_json or {})
+                prior_fp = str(prior_meta.get("embedding_fingerprint") or "")
+                if (
+                    prior_chunk.content_hash
+                    and prior_chunk.embedding is not None
+                    and prior_fp == fingerprint.digest()
+                    and prior_chunk.embedding_status in {"embedded", "partial"}
+                ):
+                    try:
+                        reusable[prior_chunk.content_hash] = validate_embedding_vector(
+                            list(prior_chunk.embedding),
+                            expected_dim=settings.EMBEDDING_DIM,
+                        )
+                    except EmbeddingValidationError:
+                        continue
+
+            need_indices: list[int] = []
+            need_inputs: list[str] = []
+            for index in nonempty_indices:
+                draft = drafts[index]
+                cached = reusable.get(draft.content_hash)
+                if cached is not None:
+                    embeddings[index] = cached
+                    reused += 1
+                else:
+                    need_indices.append(index)
+                    need_inputs.append(_embedding_input(draft.content))
+
             try:
-                embeddings = await _embed_in_batches(
-                    self.embedding_client,
-                    embedding_inputs,
-                    batch_size=EMBEDDING_BATCH_SIZE,
-                )
-                embedding_status = "embedded"
+                if need_inputs:
+                    fresh = await _embed_in_batches(
+                        self.embedding_client,
+                        need_inputs,
+                        batch_size=EMBEDDING_BATCH_SIZE,
+                        expected_dim=settings.EMBEDDING_DIM,
+                        max_batch_chars=int(
+                            getattr(settings, "EMBEDDING_BATCH_MAX_CHARS", 96_000)
+                            or 96_000
+                        ),
+                    )
+                    for slot, vector in zip(need_indices, fresh, strict=True):
+                        embeddings[slot] = vector
+                embedded_count = sum(1 for item in embeddings if item is not None)
+                target = len(nonempty_indices)
+                if embedded_count == target:
+                    embedding_status = "embedded"
+                elif embedded_count == 0:
+                    embedding_status = "failed"
+                    embedding_error = "all embedding batches failed"
+                else:
+                    embedding_status = "partial"
+                    embedding_error = (
+                        f"embedded {embedded_count}/{target} chunks "
+                        f"(reused={reused}); failed slots kept as null"
+                    )
             except Exception as exc:
                 embedding_error = str(exc)
                 embedding_status = "failed"
-                # Keep searchable text chunks even if vector embedding fails.
-                embeddings = [None] * len(contents)
 
         chunks = [
             DocumentChunk(
@@ -127,8 +208,18 @@ class IngestionPipeline:
                 content_hash=draft.content_hash,
                 embedding=embeddings[index] if index < len(embeddings) else None,
                 chunk_type=_chunk_type(draft.metadata),
-                embedding_status=embedding_status if contents else "skipped",
-                embedding_model=settings.OLLAMA_EMBEDDING_MODEL if embedding_status == "embedded" else None,
+                embedding_status=(
+                    "embedded"
+                    if index < len(embeddings) and embeddings[index] is not None
+                    else (
+                        "skipped"
+                        if not (draft.content and draft.content.strip())
+                        else "failed"
+                    )
+                ),
+                embedding_model=settings.OLLAMA_EMBEDDING_MODEL
+                if index < len(embeddings) and embeddings[index] is not None
+                else None,
                 metadata_json=build_chunk_metadata(
                     document=document,
                     chunk_index=draft.chunk_index,
@@ -139,15 +230,34 @@ class IngestionPipeline:
                         "document_type": document.document_type,
                         "business_domain": document.business_domain,
                         "classification_confidence": document.document_type_confidence,
+                        "embedding_fingerprint": fingerprint.digest(),
+                        "embedding_reused": bool(
+                            draft.content_hash in reusable
+                            and index < len(embeddings)
+                            and embeddings[index] is not None
+                        ),
                     },
                 ),
             )
             for index, draft in enumerate(drafts)
         ]
 
-        await self.chunk_repo.replace_for_document(document.id, chunks)
+        if index_attempt is not None:
+            assert_publish_allowed(document, index_attempt)
 
-        document.parse_status = "indexed" if embedding_status != "failed" else "partially_parsed"
+        await self.chunk_repo.replace_for_document(
+            document.id, chunks, touch_parse_status=False
+        )
+
+        if embedding_status == "embedded":
+            document.parse_status = "indexed"
+        elif embedding_status == "partial":
+            document.parse_status = "indexed"
+        elif nonempty_indices:
+            # Lexical-only: queryable via keyword search during embedding outage.
+            document.parse_status = "lexical_ready"
+        else:
+            document.parse_status = "partially_parsed"
         document.parse_error = embedding_error
         document.indexed_at = datetime.now(timezone.utc)
         document.metadata_json = _with_ingestion_quality(
@@ -161,6 +271,11 @@ class IngestionPipeline:
             needs_ocr=needs_ocr,
             started_at=started_at,
         )
+        document.metadata_json = {
+            **dict(document.metadata_json or {}),
+            "embedding_fingerprint": fingerprint.digest(),
+            "embedding_reused_count": reused,
+        }
         document.ingestion_events_json = _append_event(
             document.ingestion_events_json,
             stage="finalize_ingestion",
@@ -168,6 +283,7 @@ class IngestionPipeline:
             extra={
                 "chunk_count": len(chunks),
                 "embedding_status": embedding_status,
+                "embedding_reused": reused,
                 "classification": document.document_type,
                 "business_domain": document.business_domain,
             },
@@ -176,21 +292,48 @@ class IngestionPipeline:
 
 
 async def _embed_in_batches(
-        embedding_client: EmbeddingClientProtocol,
-        contents: list[str],
-        *,
-        batch_size: int,
+    embedding_client: EmbeddingClientProtocol,
+    contents: list[str],
+    *,
+    batch_size: int,
+    expected_dim: int,
+    max_retries: int = 2,
+    max_batch_chars: int = 96_000,
 ) -> list[list[float] | None]:
-    embeddings: list[list[float] | None] = []
-    for start in range(0, len(contents), batch_size):
-        batch = contents[start : start + batch_size]
-        batch_embeddings = await embedding_client.embed_documents(batch)
-        if len(batch_embeddings) != len(batch):
-            raise RuntimeError(
-                f"Embedding count mismatch: expected {len(batch)}, got {len(batch_embeddings)}"
-            )
-        embeddings.extend(batch_embeddings)
+    """Embed in batches; preserve successful batches if a later batch fails."""
+    embeddings: list[list[float] | None] = [None] * len(contents)
+    failures: list[str] = []
+    for start, batch in iter_embedding_batches(
+        contents, max_items=batch_size, max_chars=max_batch_chars
+    ):
+        succeeded = False
+        last_error: Exception | None = None
+        for _attempt in range(max_retries + 1):
+            try:
+                batch_embeddings = await embedding_client.embed_documents(batch)
+                if len(batch_embeddings) != len(batch):
+                    raise EmbeddingValidationError(
+                        f"Embedding count mismatch: expected {len(batch)}, "
+                        f"got {len(batch_embeddings)}"
+                    )
+                for offset, vector in enumerate(batch_embeddings):
+                    embeddings[start + offset] = validate_embedding_vector(
+                        vector, expected_dim=expected_dim
+                    )
+                succeeded = True
+                break
+            except Exception as exc:
+                last_error = exc
+        if not succeeded and last_error is not None:
+            failures.append(f"batch@{start}:{last_error}")
+    if failures and all(item is None for item in embeddings):
+        raise RuntimeError("; ".join(failures[:3]))
     return embeddings
+
+
+def _embedding_input(content: str) -> str:
+    # Keep identifiers/emails for embedding; lexical search uses raw chunk text.
+    return prepare_embedding_input(content)
 
 
 def _permission_scope(document: Document) -> str:
@@ -237,11 +380,11 @@ def _embedding_input(content: str) -> str:
 
 
 def _append_event(
-        existing: list[dict] | None,
-        *,
-        stage: str,
-        status: str,
-        extra: dict[str, object] | None = None,
+    existing: list[dict] | None,
+    *,
+    stage: str,
+    status: str,
+    extra: dict[str, object] | None = None,
 ) -> list[dict]:
     event = {
         "stage": stage,
@@ -253,16 +396,16 @@ def _append_event(
 
 
 def _with_ingestion_quality(
-        metadata_json: dict | None,
-        *,
-        parsed_document: ParsedDocument,
-        text_length: int,
-        chunk_count: int,
-        embedding_status: str,
-        embedding_error: str | None,
-        indexed_at: datetime | None,
-        needs_ocr: bool,
-        started_at: datetime,
+    metadata_json: dict | None,
+    *,
+    parsed_document: ParsedDocument,
+    text_length: int,
+    chunk_count: int,
+    embedding_status: str,
+    embedding_error: str | None,
+    indexed_at: datetime | None,
+    needs_ocr: bool,
+    started_at: datetime,
 ) -> dict:
     page_count = _page_count(parsed_document)
     quality = {
@@ -270,14 +413,15 @@ def _with_ingestion_quality(
         "text_length": text_length,
         "page_count": page_count,
         "table_count": _int_metadata(parsed_document.metadata, "table_count")
-                       or sum(1 for page in parsed_document.pages if "|" in page.text),
+        or sum(1 for page in parsed_document.pages if "|" in page.text),
         "chunk_count": chunk_count,
         "embedding_status": embedding_status,
         "embedding_error": embedding_error,
         "indexed_at": indexed_at.isoformat() if indexed_at else None,
         "started_at": started_at.isoformat(),
         "duration_ms": int(
-            ((indexed_at or datetime.now(timezone.utc)) - started_at).total_seconds() * 1000
+            ((indexed_at or datetime.now(timezone.utc)) - started_at).total_seconds()
+            * 1000
         ),
         "needs_ocr": needs_ocr,
     }

@@ -11,6 +11,9 @@ from ..schemas.chat_schema import RetrievalFilters
 from .reranker import ContextReranker
 from .stores import KeywordSearchStore, PgVectorStore, RetrievalCandidate
 
+# Standard RRF constant. Higher k → flatter contribution from deep ranks.
+_RRF_K = 60
+
 
 @dataclass(slots=True)
 class HybridRetrievalDebug:
@@ -24,8 +27,11 @@ class HybridRetrievalDebug:
     candidate_window: int = 0
     reranked_candidates: int = 0
     returned_candidates: int = 0
+    true_rerank_applied: int = 0
+    true_rerank_fallback: str = "none"
+    fusion: str = "rrf"
 
-    def as_dict(self) -> dict[str, int]:
+    def as_dict(self) -> dict[str, int | str]:
         return {
             "vector_top_k": self.vector_top_k,
             "keyword_top_k": self.keyword_top_k,
@@ -37,6 +43,9 @@ class HybridRetrievalDebug:
             "candidate_window": self.candidate_window,
             "reranked_candidates": self.reranked_candidates,
             "returned_candidates": self.returned_candidates,
+            "true_rerank_applied": self.true_rerank_applied,
+            "true_rerank_fallback": self.true_rerank_fallback,
+            "fusion": self.fusion,
         }
 
 
@@ -45,17 +54,6 @@ class HybridRetriever:
         self.vector_store = PgVectorStore(repo)
         self.keyword_store = KeywordSearchStore(repo)
         self.reranker = ContextReranker()
-        self.true_reranker = None
-
-    def _get_true_reranker(self):
-        if self.true_reranker is None:
-            from .cross_encoder_reranker import CrossEncoderReranker
-
-            self.true_reranker = CrossEncoderReranker(
-                model_name=settings.RAG_TRUE_RERANK_MODEL,
-            )
-
-        return self.true_reranker
 
     async def retrieve(
         self,
@@ -89,27 +87,24 @@ class HybridRetriever:
             document_ids=document_ids,
             filters=filters,
         )
-        merged = _merge_candidates(semantic, keyword)
+        merged = merge_candidates_rrf(semantic, keyword)
         merged_count = len(merged)
         candidate_window = min(max(rerank_limit, 1), merged_count)
-        merged = sorted(
+        window = sorted(
             merged,
             key=lambda item: (
-                item.semantic_score * 0.7 + item.keyword_score * 0.3,
+                item.fused_score,
                 item.semantic_score,
                 item.keyword_score,
+                item.candidate_id,
             ),
             reverse=True,
         )[:candidate_window]
-        heuristic_reranked = self.reranker.rerank(
+
+        reranked, true_applied, true_fallback = await self._finalize_ranking(
             question=question,
             keyword_terms=keyword_terms,
-            candidates=merged,
-        )
-
-        reranked = await self._maybe_true_rerank(
-            question=question,
-            candidates=heuristic_reranked,
+            candidates=window,
         )
 
         returned = reranked[:final_limit]
@@ -124,39 +119,99 @@ class HybridRetriever:
             candidate_window=candidate_window,
             reranked_candidates=len(reranked),
             returned_candidates=len(returned),
+            true_rerank_applied=true_applied,
+            true_rerank_fallback=true_fallback,
+            fusion="rrf",
         )
 
-    async def _maybe_true_rerank(self, *, question: str, candidates:list[RetrievalCandidate],) -> list[RetrievalCandidate]:
-        if not settings.RAG_TRUE_RERANK_ENABLED:
-            return candidates
+    async def _finalize_ranking(
+        self,
+        *,
+        question: str,
+        keyword_terms: list[str],
+        candidates: list[RetrievalCandidate],
+    ) -> tuple[list[RetrievalCandidate], int, str]:
+        """One scoring contract for the chosen window.
 
+        True cross-encoder scores the whole window. Heuristic is a separate,
+        observable fallback — never mixed as if scores were comparable.
+        """
         if not candidates:
-            return candidates
+            return candidates, 0, "none"
 
-        window = max(1, settings.RAG_TRUE_RERANK_TOP_K)
-        head = candidates[:window]
-        tail = candidates[window:]
+        if settings.RAG_TRUE_RERANK_ENABLED:
+            from .rerank_runtime import get_shared_reranker, get_rerank_status
 
-        true_reranker = self._get_true_reranker()
+            true_reranker = get_shared_reranker()
+            status = get_rerank_status()
+            if true_reranker is not None:
+                window = min(len(candidates), max(1, settings.RAG_TRUE_RERANK_TOP_K))
+                # Drop unscored tail — those scores are not comparable.
+                to_score = candidates[:window]
+                reranked = await true_reranker.rerank(
+                    question=question,
+                    candidates=to_score,
+                )
+                return reranked, len(reranked), "none"
+            fallback = "heuristic" if status.using_fallback else "unavailable"
+            if fallback == "unavailable" and settings.RAG_TRUE_RERANK_FALLBACK != "heuristic":
+                return [], 0, fallback
+        else:
+            fallback = "disabled"
 
-        reranked_head = await true_reranker.rerank(
+        heuristic = self.reranker.rerank(
             question=question,
-            candidates=head,
+            keyword_terms=keyword_terms,
+            candidates=candidates,
         )
+        return heuristic, 0, fallback if settings.RAG_TRUE_RERANK_ENABLED else "disabled"
 
-        return [*reranked_head, *tail]
 
-
-def _merge_candidates(
-    semantic: list[RetrievalCandidate], keyword: list[RetrievalCandidate]
+def merge_candidates_rrf(
+    semantic: list[RetrievalCandidate],
+    keyword: list[RetrievalCandidate],
+    *,
+    k: int = _RRF_K,
 ) -> list[RetrievalCandidate]:
+    """Rank-based fusion. Preserves raw channel scores and 1-based ranks."""
     merged: dict[str, RetrievalCandidate] = {}
-    for candidate in [*semantic, *keyword]:
-        key = str(candidate.chunk.id)
+
+    for rank, candidate in enumerate(semantic, start=1):
+        key = candidate.candidate_id
+        entry = RetrievalCandidate(
+            chunk=candidate.chunk,
+            semantic_score=candidate.semantic_score,
+            keyword_score=0.0,
+            semantic_rank=rank,
+        )
+        merged[key] = entry
+
+    for rank, candidate in enumerate(keyword, start=1):
+        key = candidate.candidate_id
         existing = merged.get(key)
         if existing is None:
-            merged[key] = candidate
+            merged[key] = RetrievalCandidate(
+                chunk=candidate.chunk,
+                semantic_score=0.0,
+                keyword_score=candidate.keyword_score,
+                keyword_rank=rank,
+            )
             continue
-        existing.semantic_score = max(existing.semantic_score, candidate.semantic_score)
         existing.keyword_score = max(existing.keyword_score, candidate.keyword_score)
+        existing.keyword_rank = rank
+        existing.semantic_score = max(existing.semantic_score, candidate.semantic_score)
+
+    for entry in merged.values():
+        fused = 0.0
+        if entry.semantic_rank is not None:
+            fused += 1.0 / (k + entry.semantic_rank)
+        if entry.keyword_rank is not None:
+            fused += 1.0 / (k + entry.keyword_rank)
+        entry.fused_score = fused
+        entry.rerank_score = None
+
     return list(merged.values())
+
+
+# Back-compat alias used by older call sites / tests.
+_merge_candidates = merge_candidates_rrf

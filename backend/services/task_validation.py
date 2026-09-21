@@ -75,7 +75,9 @@ class TaskCandidate:
     def as_dict(self) -> dict[str, Any]:
         return {
             "candidate_id": self.candidate_id,
-            "source_document_id": str(self.source_document_id) if self.source_document_id else None,
+            "source_document_id": str(self.source_document_id)
+            if self.source_document_id
+            else None,
             "candidate_type": self.candidate_type,
             "extracted_claim": self.extracted_claim,
             "normalized_title": self.normalized_title,
@@ -105,12 +107,20 @@ def score_candidate(candidate: TaskCandidate) -> float:
     candidate.confidence_reasons.clear()
     candidate.risk_flags.clear()
     evidence = candidate.evidence_items
-    direct_count = sum(1 for item in evidence if item.signal_type in DIRECT_SIGNAL_TYPES and item.excerpt)
-    keyword_only = evidence and all(item.signal_type in WEAK_SIGNAL_TYPES for item in evidence)
+    direct_count = sum(
+        1
+        for item in evidence
+        if item.signal_type in DIRECT_SIGNAL_TYPES and item.excerpt
+    )
+    keyword_only = evidence and all(
+        item.signal_type in WEAK_SIGNAL_TYPES for item in evidence
+    )
     missing_keyword = any(item.signal_type == "missing_keyword" for item in evidence)
     chunks = {str(item.chunk_id) for item in evidence if item.chunk_id}
 
-    retrieval_score = max((item.retrieval_score or 0.0 for item in evidence), default=0.0)
+    retrieval_score = max(
+        (item.retrieval_score or 0.0 for item in evidence), default=0.0
+    )
     rerank_score = max((item.rerank_score or 0.0 for item in evidence), default=0.0)
     evidence_score = max((item.score for item in evidence), default=0.0)
     method_score = METHOD_RELIABILITY.get(candidate.evidence_method, 0.35)
@@ -143,17 +153,27 @@ def score_candidate(candidate: TaskCandidate) -> float:
     if not direct_count and not candidate.unverified_suggestion:
         score = min(score, 0.52)
         candidate.risk_flags.append("no_direct_excerpt")
-    if any(not item.heading_path and not item.section_title for item in evidence if item.excerpt):
+    if any(
+        not item.heading_path and not item.section_title
+        for item in evidence
+        if item.excerpt
+    ):
         score -= 0.04
         candidate.risk_flags.append("weak_section_context")
 
     candidate.confidence_score = round(_clamp(score), 4)
-    candidate.confidence_reasons.append(f"method reliability {candidate.evidence_method}")
+    candidate.confidence_reasons.append(
+        f"method reliability {candidate.evidence_method}"
+    )
     return candidate.confidence_score
 
 
 def validate_candidate(candidate: TaskCandidate) -> ValidatedTask | None:
-    score = candidate.confidence_score if candidate.confidence_score is not None else score_candidate(candidate)
+    score = (
+        candidate.confidence_score
+        if candidate.confidence_score is not None
+        else score_candidate(candidate)
+    )
     has_excerpt = any(item.excerpt for item in candidate.evidence_items)
     weak_or_missing = (
         candidate.unverified_suggestion

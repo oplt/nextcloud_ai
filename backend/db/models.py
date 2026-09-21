@@ -197,11 +197,15 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     external_id: Mapped[str | None] = mapped_column(String(512), nullable=True)
     file_path: Mapped[str] = mapped_column(Text, nullable=False)
     file_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    file_extension: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
+    file_extension: Mapped[str | None] = mapped_column(
+        String(32), nullable=True, index=True
+    )
     mime_type: Mapped[str | None] = mapped_column(String(255), nullable=True)
     checksum: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     size_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    source_type: Mapped[str] = mapped_column(String(50), nullable=False, default="nextcloud", index=True)
+    source_type: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="nextcloud", index=True
+    )
     version_tag: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     modified_at: Mapped[datetime | None] = mapped_column(
@@ -223,6 +227,12 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     indexed_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    index_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    published_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     classified_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -235,7 +245,10 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(255), nullable=True, index=True
     )
     owner_id: Mapped[uuid.UUID | None] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+        UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
     )
     permission_scope: Mapped[str | None] = mapped_column(String(100), nullable=True)
     allowed_user_ids: Mapped[list[str]] = mapped_column(
@@ -251,17 +264,33 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     metadata_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     extracted_fields_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     intelligence_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
-    ingestion_events_json: Mapped[list[dict] | None] = mapped_column(JSONB, nullable=True)
+    ingestion_events_json: Mapped[list[dict] | None] = mapped_column(
+        JSONB, nullable=True
+    )
 
-    document_type: Mapped[str] = mapped_column(String(100), nullable=False, default="unclassified", index=True)
-    document_type_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    document_type: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="unclassified", index=True
+    )
+    document_type_confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
     document_type_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    document_type_source: Mapped[str] = mapped_column(String(20), nullable=False, default="fallback")
-    business_domain: Mapped[str] = mapped_column(String(100), nullable=False, default="unknown", index=True)
-    business_domain_confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    document_type_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="fallback"
+    )
+    business_domain: Mapped[str] = mapped_column(
+        String(100), nullable=False, default="unknown", index=True
+    )
+    business_domain_confidence: Mapped[float] = mapped_column(
+        Float, nullable=False, default=0.0
+    )
     business_domain_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    business_domain_source: Mapped[str] = mapped_column(String(20), nullable=False, default="fallback")
-    manual_category_override: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    business_domain_source: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="fallback"
+    )
+    manual_category_override: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False
+    )
 
     connector: Mapped["Connector | None"] = relationship(
         back_populates="documents", lazy="selectin"
@@ -270,21 +299,21 @@ class Document(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="document",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
         order_by="DocumentChunk.chunk_index",
     )
     insights: Mapped[list["DocumentInsight"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
         order_by="DocumentInsight.created_at.desc()",
     )
     workflow_tasks: Mapped[list["WorkflowTask"]] = relationship(
         back_populates="document",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
         order_by="WorkflowTask.created_at.desc()",
     )
 
@@ -324,7 +353,9 @@ class DocumentChunk(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         String(128), nullable=True, index=True
     )
     chunk_type: Mapped[str] = mapped_column(String(50), nullable=False, default="text")
-    embedding_status: Mapped[str] = mapped_column(String(50), nullable=False, default="pending", index=True)
+    embedding_status: Mapped[str] = mapped_column(
+        String(50), nullable=False, default="pending", index=True
+    )
     embedding_model: Mapped[str | None] = mapped_column(String(255), nullable=True)
     embedding: Mapped[list[float] | None] = mapped_column(
         Vector(settings.EMBEDDING_DIM), nullable=True
@@ -366,12 +397,47 @@ class SyncJob(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     payload_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
     result_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_heartbeat_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     connector: Mapped["Connector"] = relationship(
         back_populates="sync_jobs", lazy="selectin"
     )
     requested_by: Mapped["User | None"] = relationship(
         back_populates="requested_jobs", lazy="selectin"
+    )
+
+
+class WorkOutbox(UUIDPrimaryKeyMixin, TimestampMixin, Base):
+    """Transactional outbox for post-commit background dispatch."""
+
+    __tablename__ = "work_outbox"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_work_outbox_idempotency_key"),
+        Index("ix_work_outbox_status_available_at", "status", "available_at"),
+        Index("ix_work_outbox_topic", "topic"),
+    )
+
+    topic: Mapped[str] = mapped_column(String(100), nullable=False)
+    payload_json: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    idempotency_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="pending", server_default="pending"
+    )
+    attempts: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    processed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
     )
 
 
@@ -392,14 +458,21 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="session",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
         order_by="ChatMessage.created_at",
     )
 
     @property
     def subject(self) -> str:
-        if self.messages:
-            latest_content = self.messages[-1].content if self.messages[-1].content else ""
+        preview = getattr(self, "_subject_preview", None)
+        if isinstance(preview, str) and preview.strip():
+            return " ".join(preview.split())
+        try:
+            messages = self.messages
+        except Exception:
+            return self.title
+        if messages:
+            latest_content = messages[-1].content if messages[-1].content else ""
             normalized_content = " ".join(latest_content.split())
             if normalized_content:
                 return normalized_content
@@ -407,7 +480,11 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     @property
     def active_context_document_ids(self) -> list[str]:
-        for message in reversed(self.messages):
+        try:
+            messages = self.messages
+        except Exception:
+            return []
+        for message in reversed(messages):
             if message.role != "assistant" or not message.citations_json:
                 continue
 
@@ -432,7 +509,11 @@ class ChatSession(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
     @property
     def active_context_documents(self) -> list[dict[str, str]]:
-        for message in reversed(self.messages):
+        try:
+            messages = self.messages
+        except Exception:
+            return []
+        for message in reversed(messages):
             if message.role != "assistant" or not message.citations_json:
                 continue
 
@@ -529,7 +610,9 @@ class DocumentInsight(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     )
     payload_json: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
 
-    document: Mapped["Document"] = relationship(back_populates="insights", lazy="selectin")
+    document: Mapped["Document"] = relationship(
+        back_populates="insights", lazy="selectin"
+    )
     workflow_tasks: Mapped[list["WorkflowTask"]] = relationship(
         back_populates="insight",
         passive_deletes=True,
@@ -539,9 +622,7 @@ class DocumentInsight(UUIDPrimaryKeyMixin, TimestampMixin, Base):
 
 class WorkflowTask(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     __tablename__ = "workflow_tasks"
-    __table_args__ = (
-        Index("ix_workflow_tasks_queue_status", "queue_name", "status"),
-    )
+    __table_args__ = (Index("ix_workflow_tasks_queue_status", "queue_name", "status"),)
 
     document_id: Mapped[uuid.UUID | None] = mapped_column(
         UUID(as_uuid=True),
@@ -589,9 +670,7 @@ class KnowledgeNode(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         UniqueConstraint(
             "node_type", "external_key", name="uq_knowledge_nodes_type_external_key"
         ),
-        UniqueConstraint(
-            "document_id", name="uq_knowledge_nodes_document_id"
-        ),
+        UniqueConstraint("document_id", name="uq_knowledge_nodes_document_id"),
     )
 
     node_type: Mapped[str] = mapped_column(String(100), nullable=False, index=True)

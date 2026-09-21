@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
 from ..core.exceptions import AuthorizationError
-from ..core.security import AuthContext, auth_user_identifiers
+from ..core.security import AuthContext, auth_acl_groups, auth_acl_principals
 
 if TYPE_CHECKING:
     from ..db.models import Connector, SyncJob, User
@@ -46,7 +46,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
 def normalize_role_name(auth: AuthContext, user: "User | None" = None) -> str:
     if auth.is_superuser or (user is not None and user.is_superuser):
         return ROLE_ADMIN
-    role_name = (user.role.name if user is not None and user.role else auth.role_name) or ROLE_VIEWER
+    role_name = (
+        user.role.name if user is not None and user.role else auth.role_name
+    ) or ROLE_VIEWER
     return role_name.lower()
 
 
@@ -77,7 +79,10 @@ def connector_is_visible_to_identity(
     auth: AuthContext,
     user: "User",
 ) -> bool:
-    if has_permission("connectors:read", auth=auth, user=user) and normalize_role_name(auth, user) == ROLE_ADMIN:
+    if (
+        has_permission("connectors:read", auth=auth, user=user)
+        and normalize_role_name(auth, user) == ROLE_ADMIN
+    ):
         return True
     return connector.owner_user_id == user.id
 
@@ -131,17 +136,18 @@ def document_is_visible_to_auth(
     public_link_enabled: bool,
     is_deleted: bool,
 ) -> bool:
+    """Python-side ACL check mirroring DocumentRepository.visibility_clause."""
+    del public_link_enabled  # Possession-based links never grant app-user corpus read.
     if is_deleted:
         return False
     if auth.is_superuser:
         return True
-    if public_link_enabled:
+    principals = set(auth_acl_principals(auth))
+    if owner_external_id and owner_external_id in principals:
         return True
-    user_identifiers = set(auth_user_identifiers(auth))
-    if user_identifiers.intersection(allowed_user_ids):
+    if principals.intersection(allowed_user_ids or []):
         return True
-    if owner_external_id and owner_external_id in user_identifiers:
-        return True
-    if auth.groups and set(auth.groups).intersection(allowed_group_ids):
+    groups = set(auth_acl_groups(auth))
+    if groups and groups.intersection(allowed_group_ids or []):
         return True
     return False

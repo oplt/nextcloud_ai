@@ -1,28 +1,35 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from functools import partial
-
-from sentence_transformers import CrossEncoder
 
 from .stores import RetrievalCandidate
 
 
 class CrossEncoderReranker:
     def __init__(
-            self,
-            *,
-            model_name: str = "BAAI/bge-reranker-v2-m3",
-            max_length: int = 512,
+        self,
+        *,
+        model_name: str = "BAAI/bge-reranker-v2-m3",
+        max_length: int = 512,
     ) -> None:
+        try:
+            from sentence_transformers import CrossEncoder
+        except ImportError as exc:  # pragma: no cover - exercised via runtime
+            raise ImportError(
+                "sentence_transformers is required for true reranking. "
+                "Install with: pip/uv install '.[rerank]'"
+            ) from exc
+
         self.model_name = model_name
         self.model = CrossEncoder(model_name, max_length=max_length)
 
     async def rerank(
-            self,
-            *,
-            question: str,
-            candidates: list[RetrievalCandidate],
+        self,
+        *,
+        question: str,
+        candidates: list[RetrievalCandidate],
     ) -> list[RetrievalCandidate]:
         if not candidates:
             return []
@@ -44,12 +51,22 @@ class CrossEncoderReranker:
             )
         )
 
-        normalized_scores = self._normalize_scores([float(score) for score in scores])
+        # Sigmoid maps logits into (0, 1). Order-preserving; not calibrated
+        # abstention — thresholds need held-out negatives.
+        mapped = [_logit_to_probability(float(score)) for score in scores]
 
-        for candidate, score in zip(candidates, normalized_scores):
+        for candidate, score in zip(candidates, mapped):
             candidate.rerank_score = score
 
-        return sorted(candidates, key=lambda item: item.rerank_score, reverse=True)
+        return sorted(
+            candidates,
+            key=lambda item: (
+                item.rerank_score if item.rerank_score is not None else -1.0,
+                item.fused_score,
+                item.candidate_id,
+            ),
+            reverse=True,
+        )
 
     @staticmethod
     def _candidate_text(candidate: RetrievalCandidate) -> str:
@@ -62,22 +79,19 @@ class CrossEncoderReranker:
             chunk.section_title or "",
             chunk.heading_path or "",
             chunk.content or "",
-            ]
+        ]
 
         return "\n".join(part for part in parts if part).strip()
 
     @staticmethod
     def _normalize_scores(scores: list[float]) -> list[float]:
-        if not scores:
-            return []
+        """Map raw cross-encoder logits with sigmoid. No query-local min/max."""
+        return [_logit_to_probability(score) for score in scores]
 
-        low = min(scores)
-        high = max(scores)
 
-        if high == low:
-            return [0.5 for _ in scores]
-
-        return [
-            max(0.0, min(0.999, (score - low) / (high - low)))
-            for score in scores
-        ]
+def _logit_to_probability(logit: float) -> float:
+    # Stable sigmoid. Zero logit → 0.5; does not invent relative confidence.
+    if logit >= 0:
+        return 1.0 / (1.0 + math.exp(-logit))
+    exp_x = math.exp(logit)
+    return exp_x / (1.0 + exp_x)

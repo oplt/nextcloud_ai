@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import logging
 import re
 from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..connectors.email.imap_client import AsyncImapClient, ImapMessagePayload
+from ..connectors.email.imap_client import AsyncImapClient, ImapFetchResult, ImapMessagePayload
 from ..core.config import settings
 from ..db.models import Connector, Document, SyncJob
 from ..db.repo.document import DocumentRepository
@@ -17,6 +18,7 @@ from .indexing_service import DocumentIngestionService
 from .job_lifecycle import JobLifecycleService
 
 _SANITIZE_RE = re.compile(r"[^a-zA-Z0-9._-]+")
+logger = logging.getLogger(__name__)
 
 
 class EmailConnectorSyncService:
@@ -40,13 +42,14 @@ class EmailConnectorSyncService:
         failed = 0
         attachments_indexed = 0
         failure_details: list[dict[str, str]] = []
-        seen_external_ids: list[str] = []
+        deleted = 0
 
         if job is not None:
             JobLifecycleService.mark_running(job)
 
         try:
-            messages = await client.fetch_messages()
+            fetch_result: ImapFetchResult = await client.fetch_messages()
+            messages = fetch_result.messages
             if job is not None:
                 job.progress_total = len(messages)
                 job.progress_completed = 0
@@ -54,13 +57,16 @@ class EmailConnectorSyncService:
             for message in messages:
                 discovered += 1
                 try:
-                    email_document, email_parsed, email_previous_version = (
-                        await self._upsert_email_document(
-                            connector=connector,
-                            message=message,
-                        )
+                    (
+                        email_document,
+                        email_parsed,
+                        email_previous_version,
+                    ) = await self._upsert_email_document(
+                        connector=connector,
+                        message=message,
+                        mailbox=fetch_result.inventory.mailbox,
+                        uidvalidity=fetch_result.inventory.uidvalidity,
                     )
-                    seen_external_ids.append(email_document.external_id)
 
                     if await self._should_reindex_document(
                         email_document,
@@ -71,20 +77,23 @@ class EmailConnectorSyncService:
                         await self.ingestion.ingest_document_bytes(
                             email_document, message.raw_message
                         )
-                        indexed += 1
+                        if email_document.parse_status == "indexed":
+                            indexed += 1
 
                     for index, attachment in enumerate(email_parsed.attachments):
-                        attachment_document, attachment_previous_version = (
-                            await self._upsert_attachment_document(
-                                connector=connector,
-                                parent_document=email_document,
-                                message=message,
-                                attachment=attachment,
-                                attachment_index=index,
-                                email_metadata=email_parsed.metadata,
-                            )
+                        (
+                            attachment_document,
+                            attachment_previous_version,
+                        ) = await self._upsert_attachment_document(
+                            connector=connector,
+                            parent_document=email_document,
+                            message=message,
+                            attachment=attachment,
+                            attachment_index=index,
+                            email_metadata=email_parsed.metadata,
+                            mailbox=fetch_result.inventory.mailbox,
+                            uidvalidity=fetch_result.inventory.uidvalidity,
                         )
-                        seen_external_ids.append(attachment_document.external_id)
                         if await self._should_reindex_document(
                             attachment_document,
                             attachment_previous_version,
@@ -95,7 +104,8 @@ class EmailConnectorSyncService:
                                 attachment_document,
                                 attachment.payload,
                             )
-                            attachments_indexed += 1
+                            if attachment_document.parse_status == "indexed":
+                                attachments_indexed += 1
 
                     email_document.sync_status = "synced"
                     email_document.sync_error = None
@@ -112,10 +122,24 @@ class EmailConnectorSyncService:
                     JobLifecycleService.advance(job, discovered)
                 await self.session.flush()
 
-            deleted = await self.document_repo.mark_deleted_missing_from_external_ids(
-                connector_id=connector.id,
-                external_ids=seen_external_ids,
-            )
+            for uid in fetch_result.fetch_failed_uids:
+                failure_details.append(
+                    {
+                        "uid": uid,
+                        "stage": "imap_body_fetch",
+                        "error": "BODY.PEEK fetch failed or empty; retaining prior index",
+                    }
+                )
+
+            # Deletion only when the UID inventory is complete. Bounded body
+            # windows and failed fetches must never drive global deletes.
+            if fetch_result.inventory.complete:
+                deleted = await self.document_repo.mark_deleted_missing_imap_uids(
+                    connector_id=connector.id,
+                    present_uids=fetch_result.inventory.uids,
+                    mailbox=fetch_result.inventory.mailbox,
+                    uidvalidity=fetch_result.inventory.uidvalidity,
+                )
             connector.last_sync_at = now
             connector.last_error = None
             connector.status = "healthy"
@@ -128,33 +152,61 @@ class EmailConnectorSyncService:
                         "attachments_indexed": attachments_indexed,
                         "failed": failed,
                         "deleted": deleted,
+                        "inventory_complete": fetch_result.inventory.complete,
+                        "inventory_uid_count": len(fetch_result.inventory.uids),
+                        "fetch_truncated": fetch_result.fetch_truncated,
+                        "fetch_failed_uids": fetch_result.fetch_failed_uids[:25],
+                        "uidvalidity": fetch_result.inventory.uidvalidity,
                         "failures": failure_details[:25],
                     },
                 )
             await self.session.commit()
+            try:
+                from ..workers.outbox_dispatcher import dispatch_outbox_batch
+
+                await dispatch_outbox_batch()
+            except Exception:
+                logger.exception("Outbox dispatch after email sync failed")
             return {
                 "discovered": discovered,
                 "indexed": indexed,
                 "attachments_indexed": attachments_indexed,
                 "failed": failed,
                 "deleted": deleted,
+                "inventory_complete": int(fetch_result.inventory.complete),
+                "fetch_truncated": int(fetch_result.fetch_truncated),
             }
         except Exception as exc:
-            connector.status = "error"
-            connector.last_error = str(exc)
-            if job is not None:
-                JobLifecycleService.mark_failed(
-                    job,
-                    str(exc),
-                    result={
-                        "discovered": discovered,
-                        "indexed": indexed,
-                        "attachments_indexed": attachments_indexed,
-                        "failed": failed,
-                        "failures": failure_details[:25],
-                    },
+            try:
+                await self.session.rollback()
+            except Exception:
+                logger.exception("Rollback failed after email sync error")
+            from ..db.session import AsyncSessionLocal
+            from ..db.repo.connector import ConnectorRepository
+            from ..db.repo.sync_job import SyncJobRepository
+
+            async with AsyncSessionLocal() as fail_session:
+                failed_connector = await ConnectorRepository(fail_session).get(
+                    connector.id
                 )
-            await self.session.commit()
+                if failed_connector is not None:
+                    failed_connector.status = "error"
+                    failed_connector.last_error = str(exc)
+                if job is not None:
+                    failed_job = await SyncJobRepository(fail_session).get(job.id)
+                    if failed_job is not None:
+                        JobLifecycleService.mark_failed(
+                            failed_job,
+                            str(exc),
+                            result={
+                                "discovered": discovered,
+                                "indexed": indexed,
+                                "attachments_indexed": attachments_indexed,
+                                "failed": failed,
+                                "failures": failure_details[:25],
+                            },
+                        )
+                await fail_session.commit()
             raise
         finally:
             await client.aclose()
@@ -164,6 +216,8 @@ class EmailConnectorSyncService:
         *,
         connector: Connector,
         message: ImapMessagePayload,
+        mailbox: str | None = None,
+        uidvalidity: int | None = None,
     ) -> tuple[Document, object, str | None]:
         parsed = parse_email_bytes(message.raw_message)
         message_id = str(parsed.metadata.get("message_id") or "").strip()
@@ -177,7 +231,9 @@ class EmailConnectorSyncService:
             document = Document(
                 connector_id=connector.id,
                 external_id=external_id,
-                file_path=self._message_file_path(connector.root_path, parsed.metadata, message.uid),
+                file_path=self._message_file_path(
+                    connector.root_path, parsed.metadata, message.uid
+                ),
                 file_name=self._email_file_name(parsed.metadata, message.uid),
                 allowed_user_ids=self._allowed_user_ids(connector),
                 allowed_group_ids=[],
@@ -195,15 +251,15 @@ class EmailConnectorSyncService:
         document.checksum = checksum
         document.size_bytes = len(message.raw_message)
         document.version_tag = checksum
-        document.source_url = (
-            f"imap://{connector.base_url.rstrip('/')}/{connector.root_path}/{message.uid}"
-        )
+        document.source_url = f"imap://{connector.base_url.rstrip('/')}/{connector.root_path}/{message.uid}"
         document.modified_at = _metadata_datetime(parsed.metadata.get("date"))
         document.sync_status = "synced"
         document.sync_error = None
         document.last_seen_at = datetime.now(timezone.utc)
         document.is_deleted = False
-        document.owner_external_id = str(connector.owner_user_id) if connector.owner_user_id else None
+        document.owner_external_id = (
+            str(connector.owner_user_id) if connector.owner_user_id else None
+        )
         document.allowed_user_ids = self._allowed_user_ids(connector)
         document.allowed_group_ids = []
         document.public_link_enabled = False
@@ -213,10 +269,15 @@ class EmailConnectorSyncService:
             else None,
             "scope": "connector-owner",
         }
+        previous_meta = dict(document.metadata_json or {})
         document.metadata_json = {
+            **previous_meta,
             **_serializable_email_metadata(parsed.metadata),
             **self._inline_payload_metadata(message.raw_message),
             "source_kind": "email_message",
+            "imap_uid": message.uid,
+            "imap_mailbox": mailbox or connector.root_path or "INBOX",
+            "imap_uidvalidity": uidvalidity,
         }
         return document, parsed, previous_version_tag
 
@@ -229,6 +290,8 @@ class EmailConnectorSyncService:
         attachment: ParsedAttachment,
         attachment_index: int,
         email_metadata: dict[str, object],
+        mailbox: str | None = None,
+        uidvalidity: int | None = None,
     ) -> tuple[Document, str | None]:
         external_id = f"{parent_document.external_id}#attachment:{attachment_index}:{attachment.file_name}"
         checksum = hashlib.sha256(attachment.payload).hexdigest()
@@ -266,9 +329,7 @@ class EmailConnectorSyncService:
         document.checksum = checksum
         document.size_bytes = len(attachment.payload)
         document.version_tag = checksum
-        document.source_url = (
-            f"imap://{connector.base_url.rstrip('/')}/{connector.root_path}/{message.uid}/{attachment.file_name}"
-        )
+        document.source_url = f"imap://{connector.base_url.rstrip('/')}/{connector.root_path}/{message.uid}/{attachment.file_name}"
         document.modified_at = parent_document.modified_at
         document.sync_status = "synced"
         document.sync_error = None
@@ -279,18 +340,25 @@ class EmailConnectorSyncService:
         document.allowed_group_ids = []
         document.public_link_enabled = False
         document.acl_json = parent_document.acl_json
+        previous_meta = dict(document.metadata_json or {})
         document.metadata_json = {
+            **previous_meta,
             **_serializable_email_metadata(email_metadata),
             **self._inline_payload_metadata(attachment.payload),
             "source_kind": "email_attachment",
             "email_parent_external_id": parent_document.external_id,
             "email_parent_document_id": str(parent_document.id),
+            "imap_uid": message.uid,
+            "imap_mailbox": mailbox or connector.root_path or "INBOX",
+            "imap_uidvalidity": uidvalidity,
         }
         return document, previous_version_tag
 
     @staticmethod
     def _document_needs_reindex(
-        document: Document, previous_version_tag: str | None, new_version_tag: str | None
+        document: Document,
+        previous_version_tag: str | None,
+        new_version_tag: str | None,
     ) -> bool:
         if document.indexed_at is None:
             return True
@@ -315,16 +383,16 @@ class EmailConnectorSyncService:
     ) -> bool:
         if full_reindex:
             return True
-        if self._document_needs_reindex(document, previous_version_tag, new_version_tag):
+        if self._document_needs_reindex(
+            document, previous_version_tag, new_version_tag
+        ):
             return True
         if document.parse_status != "indexed":
             return False
         return await self.document_repo.has_unusable_chunks(document.id)
 
     @staticmethod
-    def _message_file_path(
-        mailbox: str, metadata: dict[str, object], uid: str
-    ) -> str:
+    def _message_file_path(mailbox: str, metadata: dict[str, object], uid: str) -> str:
         thread_key = _sanitize_path_component(str(metadata.get("thread_key") or uid))
         file_name = _sanitize_path_component(
             str(metadata.get("subject") or f"message-{uid}")
@@ -370,11 +438,7 @@ def _sanitize_path_component(value: str) -> str:
 
 
 def _serializable_email_metadata(metadata: dict[str, object]) -> dict[str, object]:
-    return {
-        key: value
-        for key, value in metadata.items()
-        if key != "attachments"
-    }
+    return {key: value for key, value in metadata.items() if key != "attachments"}
 
 
 def _metadata_datetime(value: object) -> datetime | None:

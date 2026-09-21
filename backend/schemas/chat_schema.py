@@ -110,6 +110,7 @@ class ChatAskResponse(BaseModel):
     retrieval_debug: dict[str, Any] | None = None
     memory_applied: dict[str, Any] | None = None
 
+
 @dataclass(slots=True)
 class ConversationState:
     session_id: str
@@ -146,7 +147,7 @@ class GroundedChunk:
             document_id=self.document_id,
             file_name=self.file_name,
             file_path=self.file_path,
-            snippet=self.metadata.get('snippet', self.content[:240]),
+            snippet=self.metadata.get("snippet", self.content[:240]),
             score=self.score,
             distance=self.distance,
             page_number=self.page_number,

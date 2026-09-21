@@ -1,31 +1,29 @@
 from __future__ import annotations
 
-import hashlib
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 from ..parsers.document_parser import ParsedDocument, ParsedPage
-from ..rag.chunker import HeadingTableAwareChunker
+from ..rag.chunker import (
+    DEFAULT_CHILD_CHUNK_SIZE,
+    DEFAULT_CHILD_OVERLAP,
+    ChunkDraft,
+    HeadingTableAwareChunker,
+    RagChunkDraft,
+    build_parent_chunks,
+)
 from ..rag.parser import RagParser
 
 _WORD_RE = re.compile(r"\S+")
 
-
-@dataclass(slots=True)
-class ChunkDraft:
-    chunk_index: int
-    content: str
-    token_count: int
-    char_start: int
-    char_end: int
-    page_number: int | None = None
-    section_title: str | None = None
-    heading_path: str | None = None
-    metadata: dict[str, object] = field(default_factory=dict)
-
-    @property
-    def content_hash(self) -> str:
-        return hashlib.sha256(self.content.encode("utf-8")).hexdigest()
+# Canonical evidence draft — shared with rag.chunker.
+__all__ = [
+    "ChunkDraft",
+    "RagChunkDraft",
+    "Span",
+    "build_parent_chunks",
+    "chunk_parsed_document",
+]
 
 
 @dataclass(slots=True)
@@ -35,28 +33,31 @@ class Span:
 
 
 def chunk_parsed_document(
-        parsed: ParsedDocument, *, chunk_size: int = 220, overlap: int = 40
+    parsed: ParsedDocument,
+    *,
+    chunk_size: int = 400,
+    overlap: int = 60,
+    include_parents: bool = False,
+    parent_size: int | None = None,
 ) -> list[ChunkDraft]:
+    """Chunk a parsed document into canonical ChunkDraft evidence units.
+
+    Default child size 250–500 tokens with 40–80 overlap is a starting grid;
+    callers may override. Values are word-token approximations.
+    """
+    size = max(40, chunk_size or DEFAULT_CHILD_CHUNK_SIZE)
+    ov = max(0, min(overlap if overlap is not None else DEFAULT_CHILD_OVERLAP, size - 1))
     rag_document = RagParser().normalize(parsed)
-    rag_drafts = HeadingTableAwareChunker(
-        chunk_size=max(chunk_size, 280),
-        overlap=overlap,
-    ).chunk(rag_document)
+    rag_drafts = HeadingTableAwareChunker(chunk_size=size, overlap=ov).chunk(
+        rag_document
+    )
     if rag_drafts:
-        return [
-            ChunkDraft(
-                chunk_index=draft.chunk_index,
-                content=draft.content,
-                token_count=draft.token_count,
-                char_start=draft.char_start,
-                char_end=draft.char_end,
-                page_number=draft.page_number,
-                section_title=draft.section_title,
-                heading_path=draft.heading_path,
-                metadata=draft.metadata,
+        children = list(rag_drafts)
+        if include_parents:
+            return build_parent_chunks(
+                children, parent_size=parent_size, child_size=size
             )
-            for draft in rag_drafts
-        ]
+        return children
 
     if overlap >= chunk_size:
         raise ValueError("overlap must be smaller than chunk_size")
@@ -67,12 +68,12 @@ def chunk_parsed_document(
 
     for page in pages:
         for draft in _chunk_text(
-                page.text,
-                chunk_size=chunk_size,
-                overlap=overlap,
-                global_offset=global_offset,
-                page_number=page.page_number,
-                chunk_index_start=len(drafts),
+            page.text,
+            chunk_size=chunk_size,
+            overlap=overlap,
+            global_offset=global_offset,
+            page_number=page.page_number,
+            chunk_index_start=len(drafts),
         ):
             drafts.append(draft)
         global_offset += len(page.text) + 2
@@ -95,22 +96,22 @@ def chunk_parsed_document(
 
 
 def _chunk_text(
-        text: str,
-        *,
-        chunk_size: int,
-        overlap: int,
-        global_offset: int,
-        page_number: int | None,
-        chunk_index_start: int,
+    text: str,
+    *,
+    chunk_size: int,
+    overlap: int,
+    global_offset: int,
+    page_number: int | None,
+    chunk_index_start: int,
 ) -> list[ChunkDraft]:
     spans = [Span(match.start(), match.end()) for match in _WORD_RE.finditer(text)]
     if not spans:
         return []
 
-    step = chunk_size - overlap
+    step = max(1, chunk_size - overlap)
     drafts: list[ChunkDraft] = []
     for index, word_start in enumerate(
-            range(0, len(spans), step), start=chunk_index_start
+        range(0, len(spans), step), start=chunk_index_start
     ):
         word_end = min(word_start + chunk_size, len(spans))
         char_start = spans[word_start].start
@@ -124,6 +125,13 @@ def _chunk_text(
                 char_start=global_offset + char_start,
                 char_end=global_offset + char_end,
                 page_number=page_number,
+                metadata={
+                    "source_char_start": global_offset + char_start,
+                    "source_char_end": global_offset + char_end,
+                    "chunker": "fallback-word-v2",
+                },
             )
         )
+        if word_end >= len(spans):
+            break
     return drafts

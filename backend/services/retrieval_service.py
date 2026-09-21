@@ -51,31 +51,6 @@ _MAX_CHUNKS_PER_DOCUMENT = 3
 _MAX_CONTEXTUAL_CHUNKS_PER_DOCUMENT = 4
 
 
-def _looks_like_filename_query(question: str) -> bool:
-    lowered = question.lower()
-    return any(
-        marker in lowered
-        for marker in (
-            "invoice",
-            "factuur",
-            "receipt",
-            "contract",
-            "agreement",
-            "document",
-            "file",
-            "pdf",
-            ".pdf",
-            ".doc",
-            ".docx",
-            ".xls",
-            ".xlsx",
-            ".odt",
-            ".ods",
-            ".odp",
-        )
-    )
-
-
 @dataclass(slots=True)
 class RetrievalResult:
     sources: list[ChatSource]
@@ -129,7 +104,9 @@ class RetrievalService:
         allow_contextual_tail = _looks_like_contextual_question(question)
         multi_evidence = bool(retrieval_debug["multi_evidence_question"])
 
-        expanded_preferred, meta_p = await self._expand_document_scope(preferred_document_ids)
+        expanded_preferred, meta_p = await self._expand_document_scope(
+            preferred_document_ids
+        )
         retrieval_debug["graph_expansion_preferred"] = meta_p
         expanded_document_ids = document_ids
         meta_b = {"applied": False, "related_documents_added": 0}
@@ -178,7 +155,8 @@ class RetrievalService:
             top_k=top_k,
             document_ids=expanded_document_ids,
             filters=filters,
-            allow_semantic_context_chunks=allow_contextual_tail and bool(expanded_document_ids),
+            allow_semantic_context_chunks=allow_contextual_tail
+            and bool(expanded_document_ids),
             max_chunks_per_document=max_chunks_broad,
             retrieval_debug=retrieval_debug,
             allow_additional_documents=multi_evidence,
@@ -204,8 +182,6 @@ class RetrievalService:
         if multi_evidence:
             base = max(base, min(4, top_k))
         return base
-
-
 
     async def _run_retrieval(
         self,
@@ -363,12 +339,19 @@ class RetrievalService:
         allow_additional_documents: bool = False,
         allow_scoped_fallback: bool = False,
     ) -> list[tuple[DocumentChunk, float]]:
+        """Pick final evidence from already-ranked candidates.
+
+        No below-threshold scoped fallback and no metadata bypass that
+        manufactures positive evidence. Exact identifiers may pass the
+        relative floor when the absolute floor is met.
+        """
+        del allow_scoped_fallback  # retained in signature for call-site compat
         if not ranked_chunks:
             return []
 
         has_lexical_hits = any(item.lexical_score > 0 for item in ranked_chunks)
         best_score = ranked_chunks[0].score
-        min_score = max(_ABSOLUTE_MIN_SCORE, best_score * 0.72)
+        min_relative = best_score * 0.72 if best_score > 0 else 0.0
 
         selected: list[tuple[DocumentChunk, float]] = []
         selected_chunk_ids: set[str] = set()
@@ -379,19 +362,15 @@ class RetrievalService:
             document = chunk.document
             if document is None or document.is_deleted:
                 continue
-            filename_query = _looks_like_filename_query(" ".join(keyword_terms))
-            document_text = " ".join(
-                [
-                    document.file_name or "",
-                    document.file_path or "",
-                    document.document_type or "",
-                    document.business_domain or "",
-                    ]
-            ).lower()
-            metadata_hit = any(term.lower() in document_text for term in keyword_terms)
-            if filename_query and metadata_hit:
-                pass
-            elif item.score < _ABSOLUTE_MIN_SCORE or item.score < min_score:
+
+            identifier_hit = _exact_identifier_or_filename_hit(item, keyword_terms)
+            if item.score < _ABSOLUTE_MIN_SCORE and not identifier_hit:
+                continue
+            if (
+                item.score < min_relative
+                and not identifier_hit
+                and item.score < 0.98
+            ):
                 continue
             if (
                 has_lexical_hits
@@ -399,6 +378,7 @@ class RetrievalService:
                 and item.lexical_score == 0
                 and item.score < 0.98
                 and not allow_semantic_context_chunks
+                and not identifier_hit
             ):
                 continue
 
@@ -412,7 +392,7 @@ class RetrievalService:
                 and selected
                 and not allow_additional_documents
                 and not self._is_additional_document_match(
-                item=item, best_score=best_score
+                    item=item, best_score=best_score
                 )
             ):
                 continue
@@ -453,27 +433,43 @@ class RetrievalService:
                 if len(selected) >= top_k:
                     break
 
-        if selected:
-            return selected
-
-        for item in ranked_chunks:
-            chunk = item.chunk
-            document = chunk.document
-            if document is None or document.is_deleted:
-                continue
-            if item.score < _ABSOLUTE_MIN_SCORE and not allow_scoped_fallback:
-                break
-            return [(chunk, item.score)]
-
-        return []
+        # Empty list = abstain. Do not invent a weak top hit.
+        return selected
 
     @staticmethod
-    def _is_additional_document_match(*, item: RetrievalCandidate, best_score: float) -> bool:
+    def _is_additional_document_match(
+        *, item: RetrievalCandidate, best_score: float
+    ) -> bool:
         if item.score >= max(0.94, best_score - 0.03):
             return True
         if item.lexical_score >= 0.5:
             return True
         return False
+
+
+def _exact_identifier_or_filename_hit(
+    item: RetrievalCandidate, keyword_terms: list[str]
+) -> bool:
+    from ..rag.lexical import looks_like_identifier
+
+    document = item.chunk.document
+    if document is None:
+        return False
+    name = (document.file_name or "").lower()
+    path = (document.file_path or "").lower()
+    content = (item.chunk.content or "").lower()
+    for term in keyword_terms:
+        lowered = term.lower().strip()
+        if not lowered:
+            continue
+        if "." in lowered and (lowered == name or path.endswith(f"/{lowered}")):
+            return True
+        if looks_like_identifier(lowered) and (
+            lowered in content or lowered in name or lowered in path
+        ):
+            return True
+    return False
+
 
 def _looks_like_contextual_question(question: str) -> bool:
     lowered = f" {question.lower()} "

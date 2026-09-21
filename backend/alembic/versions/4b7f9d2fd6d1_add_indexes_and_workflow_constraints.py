@@ -37,8 +37,12 @@ def upgrade() -> None:
         ["connector_id", "updated_at"],
         unique=False,
     )
-    op.create_index("ix_documents_modified_at", "documents", ["modified_at"], unique=False)
-    op.create_index("ix_documents_updated_at", "documents", ["updated_at"], unique=False)
+    op.create_index(
+        "ix_documents_modified_at", "documents", ["modified_at"], unique=False
+    )
+    op.create_index(
+        "ix_documents_updated_at", "documents", ["updated_at"], unique=False
+    )
     op.create_index(
         "ix_workflow_tasks_status_due_at",
         "workflow_tasks",
@@ -87,7 +91,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint("ck_workflow_tasks_priority_enum", "workflow_tasks", type_="check")
+    op.drop_constraint(
+        "ck_workflow_tasks_priority_enum", "workflow_tasks", type_="check"
+    )
     op.drop_constraint("ck_workflow_tasks_status_enum", "workflow_tasks", type_="check")
     op.drop_constraint("ck_sync_jobs_status_enum", "sync_jobs", type_="check")
     op.drop_constraint(

@@ -4,6 +4,10 @@ import hashlib
 from typing import Protocol
 
 from ..core.config import settings
+from .embedding_contract import (
+    active_embedding_fingerprint,
+    validate_embedding_vector,
+)
 from .ollama_embedding_client import OllamaEmbeddingClient
 
 
@@ -15,15 +19,19 @@ class EmbeddingClientProtocol(Protocol):
 class DeterministicEmbeddingClient:
     def __init__(self, dim: int | None = None) -> None:
         self.dim = dim or settings.EMBEDDING_DIM
+        self.fingerprint = active_embedding_fingerprint()
 
     def _text_to_vector(self, text: str) -> list[float]:
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
+        digest = hashlib.sha256(
+            f"{self.fingerprint.digest()}:{text}".encode("utf-8")
+        ).digest()
         seed_bytes = (digest * ((self.dim // len(digest)) + 1))[: self.dim]
         values = [((value / 255.0) * 2.0) - 1.0 for value in seed_bytes]
         norm = sum(value * value for value in values) ** 0.5
         if norm == 0:
-            return [0.0] * self.dim
-        return [value / norm for value in values]
+            raise RuntimeError("deterministic embedding produced zero vector")
+        vector = [value / norm for value in values]
+        return validate_embedding_vector(vector, expected_dim=self.dim)
 
     async def embed_query(self, text: str) -> list[float]:
         return self._text_to_vector(text)
@@ -38,13 +46,32 @@ class EmbeddingProviderNotConfiguredError(RuntimeError):
 
 class EmbeddingClientFactory:
     @staticmethod
-    def create(*, allow_deterministic: bool = False) -> EmbeddingClientProtocol:
+    def create(
+        *,
+        allow_deterministic: bool = False,
+        reuse_process: bool = True,
+    ) -> EmbeddingClientProtocol:
+        if reuse_process:
+            try:
+                from ..core.ai_resources import get_ai_resources
+
+                bundle = get_ai_resources()
+            except Exception:
+                bundle = None
+            else:
+                if bundle is not None and bundle.embedding_client is not None:
+                    return bundle.embedding_client
+
         if settings.effective_embedding_provider == "ollama":
             return OllamaEmbeddingClient(
                 model=settings.OLLAMA_EMBEDDING_MODEL,
                 base_url=str(settings.OLLAMA_BASE_URL),
+                expected_dim=settings.EMBEDDING_DIM,
             )
-        if settings.effective_embedding_provider == "deterministic" and allow_deterministic:
+        if (
+            settings.effective_embedding_provider == "deterministic"
+            and allow_deterministic
+        ):
             return DeterministicEmbeddingClient()
         raise EmbeddingProviderNotConfiguredError(
             "EMBEDDING_PROVIDER must be set to a real embedding provider. "
@@ -54,9 +81,11 @@ class EmbeddingClientFactory:
 
 def embedding_provider_health() -> dict[str, object]:
     provider = settings.effective_embedding_provider
+    fingerprint = active_embedding_fingerprint()
     return {
         "provider": provider,
         "model": settings.OLLAMA_EMBEDDING_MODEL if provider == "ollama" else None,
         "dimension": settings.EMBEDDING_DIM,
+        "fingerprint": fingerprint.digest(),
         "real_embeddings": provider == "ollama",
     }

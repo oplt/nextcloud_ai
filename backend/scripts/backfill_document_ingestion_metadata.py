@@ -26,14 +26,26 @@ async def main() -> None:
             classification = rule_classify(document=document, parsed=parsed)
             if not document.manual_category_override:
                 document.document_type = classification.document_type
-                document.document_type_confidence = min(classification.document_type_confidence, 0.6)
-                document.document_type_reason = f"Backfill: {classification.document_type_reason}"
+                document.document_type_confidence = min(
+                    classification.document_type_confidence, 0.6
+                )
+                document.document_type_reason = (
+                    f"Backfill: {classification.document_type_reason}"
+                )
                 document.document_type_source = classification.document_type_source
                 document.business_domain = classification.business_domain
-                document.business_domain_confidence = min(classification.business_domain_confidence, 0.6)
-                document.business_domain_reason = f"Backfill: {classification.business_domain_reason}"
+                document.business_domain_confidence = min(
+                    classification.business_domain_confidence, 0.6
+                )
+                document.business_domain_reason = (
+                    f"Backfill: {classification.business_domain_reason}"
+                )
                 document.business_domain_source = classification.business_domain_source
-            document.file_extension = document.file_extension or Path(document.file_name).suffix.lower() or None
+            document.file_extension = (
+                document.file_extension
+                or Path(document.file_name).suffix.lower()
+                or None
+            )
             document.source_type = document.source_type or "nextcloud"
             document.permission_scope = document.permission_scope or "connector"
         await session.commit()
@@ -42,4 +54,3 @@ async def main() -> None:
 
 if __name__ == "__main__":
     asyncio.run(main())
-
