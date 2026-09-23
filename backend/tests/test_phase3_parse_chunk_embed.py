@@ -100,7 +100,10 @@ def test_rag_parser_carries_headings_across_pages_and_skips_sentence_headings() 
         text="",
         pages=[
             ParsedPage(page_number=1, text="# Section One\nBody on page one."),
-            ParsedPage(page_number=2, text="Continuation on page two.\nThis is a short sentence."),
+            ParsedPage(
+                page_number=2,
+                text="Continuation on page two.\nThis is a short sentence.",
+            ),
         ],
         metadata={},
     )
@@ -177,7 +180,9 @@ def test_chunk_property_size_order_coverage_no_dupes() -> None:
         assert drafts
         assert [d.chunk_index for d in drafts] == list(range(len(drafts)))
         assert all(d.token_count <= size for d in drafts)
-        starts = [int(d.metadata.get("source_char_start", d.char_start)) for d in drafts]
+        starts = [
+            int(d.metadata.get("source_char_start", d.char_start)) for d in drafts
+        ]
         assert starts == sorted(starts)
         assert len({d.content for d in drafts}) == len(drafts)
         # Coverage: every section marker appears in at least one chunk.
@@ -205,7 +210,11 @@ def test_table_split_repeats_header_row() -> None:
     drafts = HeadingTableAwareChunker(chunk_size=30, overlap=5).chunk(
         RagParser().normalize(parsed)
     )
-    table_parts = [d for d in drafts if "| H1 | H2 |" in d.content or d.metadata.get("block_type") == "table"]
+    table_parts = [
+        d
+        for d in drafts
+        if "| H1 | H2 |" in d.content or d.metadata.get("block_type") == "table"
+    ]
     assert len(table_parts) >= 2
     # Later splits should repeat the header.
     assert any(d.metadata.get("repeated_table_header") for d in table_parts[1:])

@@ -63,7 +63,9 @@ class OfflineEvalRow:
                 str(x) for x in (raw.get("request_document_ids") or [])
             ],
             request_auth=(
-                str(raw["request_auth"]) if raw.get("request_auth") is not None else None
+                str(raw["request_auth"])
+                if raw.get("request_auth") is not None
+                else None
             ),
             language=str(raw["language"]) if raw.get("language") is not None else None,
             unanswerable=bool(raw.get("unanswerable") or raw.get("should_abstain")),
@@ -353,8 +355,4 @@ def mean_metrics(records: list[dict[str, Any]], keys: list[str]) -> dict[str, fl
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 totals[key] += float(value)
                 counts[key] += 1
-    return {
-        key: totals[key] / counts[key]
-        for key in keys
-        if counts[key] > 0
-    }
+    return {key: totals[key] / counts[key] for key in keys if counts[key] > 0}

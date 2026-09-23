@@ -5,7 +5,10 @@ from __future__ import annotations
 from types import SimpleNamespace
 from uuid import uuid4
 
-from backend.ai.rag_postprocess import rerank_and_truncate_sources, rerank_sources_lexically
+from backend.ai.rag_postprocess import (
+    rerank_and_truncate_sources,
+    rerank_sources_lexically,
+)
 from backend.rag.cross_encoder_reranker import CrossEncoderReranker
 from backend.rag.retriever import merge_candidates_rrf
 from backend.rag.stores import RetrievalCandidate
@@ -104,7 +107,9 @@ def test_select_grounded_abstains_on_hard_negative() -> None:
     assert selected == []
 
 
-def test_select_grounded_keeps_exact_identifier() -> None:
+def test_select_grounded_exact_identifier_may_clear_relative_not_absolute_floor() -> (
+    None
+):
     service = RetrievalService.__new__(RetrievalService)
     hit = RetrievalCandidate(
         chunk=_chunk(
@@ -115,7 +120,7 @@ def test_select_grounded_keeps_exact_identifier() -> None:
         semantic_score=0.2,
         keyword_score=0.1,
         fused_score=0.03,
-        rerank_score=0.2,
+        rerank_score=0.36,
     )
     selected = service._select_grounded_chunks(
         ranked_chunks=[hit],
@@ -124,6 +129,14 @@ def test_select_grounded_keeps_exact_identifier() -> None:
     )
     assert len(selected) == 1
     assert selected[0][0] is hit.chunk
+
+    hit.rerank_score = 0.2
+    assert (
+        service._select_grounded_chunks(
+            ranked_chunks=[hit], keyword_terms=["INV-1042"], top_k=3
+        )
+        == []
+    )
 
 
 def test_postprocess_preserves_final_rank_order() -> None:
@@ -160,9 +173,7 @@ def test_postprocess_preserves_final_rank_order() -> None:
         ),
     ]
     stats: dict[str, object] = {}
-    out = rerank_and_truncate_sources(
-        "question word", sources, stats_out=stats
-    )
+    out = rerank_and_truncate_sources("question word", sources, stats_out=stats)
     assert [str(item.chunk_id) for item in out] == [
         str(item.chunk_id) for item in sources
     ]

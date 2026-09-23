@@ -77,6 +77,7 @@ class DocumentIngestionService:
         self, document: Document, payload: bytes
     ) -> Document:
         payload_hash = hashlib.sha256(payload).hexdigest()
+        expected_version_tag = document.version_tag
         try:
             # Identity check BEFORE mutating published checksum / skipping work.
             if await self._is_current_index_for_payload(document, payload_hash):
@@ -91,7 +92,9 @@ class DocumentIngestionService:
                 await self.session.flush()
                 return document
 
-            self._apply_file_metadata(document=document, payload=payload, payload_hash=payload_hash)
+            self._apply_file_metadata(
+                document=document, payload=payload, payload_hash=payload_hash
+            )
 
             duplicate = await self.document_repo.find_indexed_duplicate(
                 checksum=payload_hash,
@@ -99,10 +102,16 @@ class DocumentIngestionService:
                 exclude_document_id=document.id,
             )
             if duplicate is not None:
-                attempt = await begin_index_attempt(self.session, document)
+                attempt = await begin_index_attempt(
+                    self.session,
+                    document,
+                    expected_version_tag=expected_version_tag,
+                )
                 try:
                     await self._clone_index_from_duplicate(
-                        source=duplicate, target=document, attempt_generation=attempt.generation
+                        source=duplicate,
+                        target=document,
+                        attempt_generation=attempt.generation,
                     )
                     mark_published(document, attempt)
                 except StaleIndexGenerationError:
@@ -148,11 +157,13 @@ class DocumentIngestionService:
             )
             return document
 
-        attempt = await begin_index_attempt(self.session, document)
+        attempt = await begin_index_attempt(
+            self.session,
+            document,
+            expected_version_tag=expected_version_tag,
+        )
         try:
-            await self.pipeline.ingest_document(
-                document, parsed, index_attempt=attempt
-            )
+            await self.pipeline.ingest_document(document, parsed, index_attempt=attempt)
             document.metadata_json = {
                 **dict(document.metadata_json or {}),
                 **_serializable_parser_metadata(parsed.metadata),
@@ -227,7 +238,8 @@ class DocumentIngestionService:
         from ..ingestion.index_versions import IndexAttempt, assert_publish_allowed
 
         assert_publish_allowed(
-            target, IndexAttempt(document_id=str(target.id), generation=attempt_generation)
+            target,
+            IndexAttempt(document_id=str(target.id), generation=attempt_generation),
         )
         source_chunks = await self.chunk_repo.list_by_document(source.id)
         clones: list[DocumentChunk] = []
@@ -316,15 +328,22 @@ class DocumentIngestionService:
             return
 
         fingerprint = (
-            document.checksum
-            or (document.metadata_json or {}).get("indexed_content_checksum")
+            (document.metadata_json or {}).get("indexed_content_checksum")
+            or document.checksum
             or document.version_tag
             or "unknown"
         )
+        generation = int(document.published_generation or 0)
         await self.outbox.enqueue(
             topic=TOPIC_DOCUMENT_INTELLIGENCE,
-            payload={"document_id": str(document.id)},
-            idempotency_key=f"document_intelligence:{document.id}:{fingerprint}",
+            payload={
+                "document_id": str(document.id),
+                "published_generation": generation,
+                "indexed_content_checksum": fingerprint,
+            },
+            idempotency_key=(
+                f"document_intelligence:v1:{document.id}:{generation}:{fingerprint}"
+            ),
         )
 
     async def _mark_unindexed(

@@ -7,13 +7,13 @@ namespace OCA\NcAiBridge\Controller;
 use OCA\NcAiBridge\AppInfo\Application;
 use OCP\AppFramework\Controller;
 use OCP\AppFramework\Http\Attribute\NoAdminRequired;
-use OCP\AppFramework\Http\Attribute\NoCSRFRequired;
 use OCP\AppFramework\Http\JSONResponse;
 use OCP\IConfig;
 use OCP\IGroupManager;
 use OCP\IRequest;
 use OCP\IUser;
 use OCP\IUserSession;
+use OCP\IURLGenerator;
 
 class AuthController extends Controller {
     public function __construct(
@@ -21,12 +21,12 @@ class AuthController extends Controller {
         private IUserSession $userSession,
         private IGroupManager $groupManager,
         private IConfig $config,
+        private IURLGenerator $urlGenerator,
     ) {
         parent::__construct(Application::APP_ID, $request);
     }
 
     #[NoAdminRequired]
-    #[NoCSRFRequired]
     public function bootstrap(): JSONResponse {
         $user = $this->userSession->getUser();
         if (!$user instanceof IUser) {
@@ -79,33 +79,12 @@ class AuthController extends Controller {
 
     private function resolveNextcloudBaseUrl(): string {
         $overwriteCliUrl = rtrim($this->config->getSystemValueString('overwrite.cli.url', ''), '/');
-
-        $proto = trim((string) $this->request->getHeader('x-forwarded-proto'));
-        if ($proto !== '') {
-            $proto = trim(explode(',', $proto)[0]);
+        if ($overwriteCliUrl !== '') {
+            return $overwriteCliUrl;
         }
-        if ($proto === '') {
-            $https = strtolower((string) $this->request->getHeader('x-forwarded-https'));
-            $proto = in_array($https, ['on', '1'], true) ? 'https' : '';
-        }
-        if ($proto === '') {
-            $parsedScheme = parse_url($overwriteCliUrl, PHP_URL_SCHEME);
-            $proto = is_string($parsedScheme) && $parsedScheme !== '' ? $parsedScheme : 'http';
-        }
-
-        $host = trim((string) $this->request->getHeader('x-forwarded-host'));
-        if ($host !== '') {
-            $host = trim(explode(',', $host)[0]);
-        }
-        if ($host === '') {
-            $host = trim((string) $this->request->getHeader('host'));
-        }
-
-        if ($host !== '') {
-            return rtrim($proto . '://' . $host, '/');
-        }
-
-        return $overwriteCliUrl;
+        // IURLGenerator uses Nextcloud's canonical/trusted proxy configuration.
+        // Never derive the ACL namespace directly from client-supplied Host headers.
+        return rtrim($this->urlGenerator->getAbsoluteURL('/'), '/');
     }
 
     private function encodeJwt(array $payload, string $secret): string {

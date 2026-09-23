@@ -1,0 +1,145 @@
+{
+  "description": "Held-out hard-negative / positive pairs for grounded relevance floor calibration. Labels are scoring-only.",
+  "defaults": {
+    "absolute_min_score": 0.35,
+    "relative_floor_factor": 0.72
+  },
+  "cases": [
+    {
+      "id": "pos_invoice_exact",
+      "question": "What is the total on INV-2024-0042?",
+      "keyword_terms": ["INV-2024-0042", "total"],
+      "label": "positive",
+      "candidates": [
+        {
+          "content": "Invoice ID: INV-2024-0042 Total EUR 200.00",
+          "file_name": "INV-2024-0042.txt",
+          "file_path": "/finance/INV-2024-0042.txt",
+          "rerank_score": 0.82,
+          "lexical_score": 0.7,
+          "relevant": true
+        },
+        {
+          "content": "Lunch is served at noon with tomato soup.",
+          "file_name": "lunch_menu.txt",
+          "file_path": "/facilities/lunch_menu.txt",
+          "rerank_score": 0.18,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "neg_hard_lunch_vs_invoice",
+      "question": "What is the invoice total for INV-999?",
+      "keyword_terms": ["invoice", "INV-999", "total"],
+      "label": "hard_negative",
+      "candidates": [
+        {
+          "content": "Lunch is served at noon. The invoice total is not listed here.",
+          "file_name": "lunch_menu.txt",
+          "file_path": "/facilities/lunch_menu.txt",
+          "rerank_score": 0.22,
+          "lexical_score": 0.05,
+          "relevant": false
+        },
+        {
+          "content": "Office football pool entry fee is EUR 5.",
+          "file_name": "football_pool.txt",
+          "file_path": "/social/football_pool.txt",
+          "rerank_score": 0.11,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "pos_policy_carryover",
+      "question": "How many vacation days may be carried over in 2024?",
+      "keyword_terms": ["vacation", "carry", "2024"],
+      "label": "positive",
+      "candidates": [
+        {
+          "content": "Vacation carry-over policy for 2024: employees may carry over up to 5 unused vacation days.",
+          "file_name": "vacation_policy_2024.txt",
+          "file_path": "/hr/vacation_policy_2024.txt",
+          "rerank_score": 0.76,
+          "lexical_score": 0.6,
+          "relevant": true
+        },
+        {
+          "content": "Expense receipts above EUR 50 require a cost-center code.",
+          "file_name": "handbook.txt",
+          "file_path": "/hr/handbook.txt",
+          "rerank_score": 0.28,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "neg_singleton_weak",
+      "question": "What is the lunar cheese harvest quota?",
+      "keyword_terms": ["lunar", "cheese", "quota"],
+      "label": "hard_negative",
+      "candidates": [
+        {
+          "content": "Office football pool: entry fee is EUR 5.",
+          "file_name": "football_pool.txt",
+          "file_path": "/social/football_pool.txt",
+          "rerank_score": 0.31,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "pos_identifier_borderline",
+      "question": "Find reference INV-1042",
+      "keyword_terms": ["INV-1042"],
+      "label": "positive",
+      "candidates": [
+        {
+          "content": "Reference INV-1042 paid on 12 March.",
+          "file_name": "invoice-inv-1042.pdf",
+          "file_path": "/finance/invoice-inv-1042.pdf",
+          "rerank_score": 0.36,
+          "lexical_score": 0.2,
+          "relevant": true
+        },
+        {
+          "content": "Unrelated cafeteria specials this week.",
+          "file_name": "menu.txt",
+          "file_path": "/facilities/menu.txt",
+          "rerank_score": 0.12,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "neg_near_floor_noise",
+      "question": "Who signed the ISO certificate?",
+      "keyword_terms": ["ISO", "signed"],
+      "label": "hard_negative",
+      "candidates": [
+        {
+          "content": "Tomato soup and grilled cheese special; no ISO content.",
+          "file_name": "lunch_menu.txt",
+          "file_path": "/facilities/lunch_menu.txt",
+          "rerank_score": 0.34,
+          "lexical_score": 0.0,
+          "relevant": false
+        },
+        {
+          "content": "Football pool scores posted Monday.",
+          "file_name": "football_pool.txt",
+          "file_path": "/social/football_pool.txt",
+          "rerank_score": 0.33,
+          "lexical_score": 0.0,
+          "relevant": false
+        }
+      ]
+    }
+  ]
+}

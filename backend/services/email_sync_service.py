@@ -8,10 +8,15 @@ from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..connectors.email.imap_client import AsyncImapClient, ImapFetchResult, ImapMessagePayload
+from ..connectors.email.imap_client import (
+    AsyncImapClient,
+    ImapFetchResult,
+    ImapMessagePayload,
+)
 from ..core.config import settings
 from ..db.models import Connector, Document, SyncJob
 from ..db.repo.document import DocumentRepository
+from ..ingestion.index_versions import StaleIndexGenerationError
 from ..parsers.document_parser import ParsedAttachment, parse_email_bytes
 from .connector_service import ConnectorService
 from .indexing_service import DocumentIngestionService
@@ -41,6 +46,7 @@ class EmailConnectorSyncService:
         indexed = 0
         failed = 0
         attachments_indexed = 0
+        attachments_deleted = 0
         failure_details: list[dict[str, str]] = []
         deleted = 0
 
@@ -57,58 +63,85 @@ class EmailConnectorSyncService:
             for message in messages:
                 discovered += 1
                 try:
-                    (
-                        email_document,
-                        email_parsed,
-                        email_previous_version,
-                    ) = await self._upsert_email_document(
-                        connector=connector,
-                        message=message,
-                        mailbox=fetch_result.inventory.mailbox,
-                        uidvalidity=fetch_result.inventory.uidvalidity,
-                    )
-
-                    if await self._should_reindex_document(
-                        email_document,
-                        email_previous_version,
-                        email_document.version_tag,
-                        full_reindex=full_reindex,
-                    ):
-                        await self.ingestion.ingest_document_bytes(
-                            email_document, message.raw_message
-                        )
-                        if email_document.parse_status == "indexed":
-                            indexed += 1
-
-                    for index, attachment in enumerate(email_parsed.attachments):
+                    message_indexed = 0
+                    message_attachments_indexed = 0
+                    message_attachments_deleted = 0
+                    # A message is one recoverable unit. Statement/flush errors
+                    # roll back this savepoint before the outer session records
+                    # progress or moves to the next message.
+                    async with self.session.begin_nested():
                         (
-                            attachment_document,
-                            attachment_previous_version,
-                        ) = await self._upsert_attachment_document(
+                            email_document,
+                            email_parsed,
+                            email_previous_version,
+                        ) = await self._upsert_email_document(
                             connector=connector,
-                            parent_document=email_document,
                             message=message,
-                            attachment=attachment,
-                            attachment_index=index,
-                            email_metadata=email_parsed.metadata,
                             mailbox=fetch_result.inventory.mailbox,
                             uidvalidity=fetch_result.inventory.uidvalidity,
                         )
+
                         if await self._should_reindex_document(
-                            attachment_document,
-                            attachment_previous_version,
-                            attachment_document.version_tag,
+                            email_document,
+                            email_previous_version,
+                            email_document.version_tag,
                             full_reindex=full_reindex,
                         ):
                             await self.ingestion.ingest_document_bytes(
-                                attachment_document,
-                                attachment.payload,
+                                email_document, message.raw_message
                             )
-                            if attachment_document.parse_status == "indexed":
-                                attachments_indexed += 1
+                            if email_document.parse_status == "indexed":
+                                message_indexed = 1
 
-                    email_document.sync_status = "synced"
-                    email_document.sync_error = None
+                        current_attachment_external_ids: list[str] = []
+                        for index, attachment in enumerate(email_parsed.attachments):
+                            (
+                                attachment_document,
+                                attachment_previous_version,
+                            ) = await self._upsert_attachment_document(
+                                connector=connector,
+                                parent_document=email_document,
+                                message=message,
+                                attachment=attachment,
+                                attachment_index=index,
+                                email_metadata=email_parsed.metadata,
+                                mailbox=fetch_result.inventory.mailbox,
+                                uidvalidity=fetch_result.inventory.uidvalidity,
+                            )
+                            current_attachment_external_ids.append(
+                                attachment_document.external_id
+                            )
+                            if await self._should_reindex_document(
+                                attachment_document,
+                                attachment_previous_version,
+                                attachment_document.version_tag,
+                                full_reindex=full_reindex,
+                            ):
+                                await self.ingestion.ingest_document_bytes(
+                                    attachment_document,
+                                    attachment.payload,
+                                )
+                                if attachment_document.parse_status == "indexed":
+                                    message_attachments_indexed += 1
+
+                        if fetch_result.inventory.uidvalidity is not None:
+                            message_attachments_deleted = await self.document_repo.mark_deleted_missing_email_attachments(
+                                connector_id=connector.id,
+                                imap_uid=message.uid,
+                                mailbox=fetch_result.inventory.mailbox,
+                                uidvalidity=fetch_result.inventory.uidvalidity,
+                                present_external_ids=current_attachment_external_ids,
+                            )
+
+                        email_document.sync_status = "synced"
+                        email_document.sync_error = None
+                    indexed += message_indexed
+                    attachments_indexed += message_attachments_indexed
+                    attachments_deleted += message_attachments_deleted
+                except StaleIndexGenerationError:
+                    logger.info(
+                        "Skipped stale email index publication uid=%s", message.uid
+                    )
                 except Exception as exc:
                     failed += 1
                     failure_details.append(
@@ -130,6 +163,7 @@ class EmailConnectorSyncService:
                         "error": "BODY.PEEK fetch failed or empty; retaining prior index",
                     }
                 )
+            failed += len(fetch_result.fetch_failed_uids)
 
             # Deletion only when the UID inventory is complete. Bounded body
             # windows and failed fetches must never drive global deletes.
@@ -140,6 +174,7 @@ class EmailConnectorSyncService:
                     mailbox=fetch_result.inventory.mailbox,
                     uidvalidity=fetch_result.inventory.uidvalidity,
                 )
+            deleted += attachments_deleted
             connector.last_sync_at = now
             connector.last_error = None
             connector.status = "healthy"
@@ -150,6 +185,7 @@ class EmailConnectorSyncService:
                         "discovered": discovered,
                         "indexed": indexed,
                         "attachments_indexed": attachments_indexed,
+                        "attachments_deleted": attachments_deleted,
                         "failed": failed,
                         "deleted": deleted,
                         "inventory_complete": fetch_result.inventory.complete,
@@ -171,6 +207,7 @@ class EmailConnectorSyncService:
                 "discovered": discovered,
                 "indexed": indexed,
                 "attachments_indexed": attachments_indexed,
+                "attachments_deleted": attachments_deleted,
                 "failed": failed,
                 "deleted": deleted,
                 "inventory_complete": int(fetch_result.inventory.complete),
@@ -202,6 +239,7 @@ class EmailConnectorSyncService:
                                 "discovered": discovered,
                                 "indexed": indexed,
                                 "attachments_indexed": attachments_indexed,
+                                "attachments_deleted": attachments_deleted,
                                 "failed": failed,
                                 "failures": failure_details[:25],
                             },
@@ -223,7 +261,7 @@ class EmailConnectorSyncService:
         message_id = str(parsed.metadata.get("message_id") or "").strip()
         external_id = message_id or f"imap:{message.uid}"
         checksum = hashlib.sha256(message.raw_message).hexdigest()
-        document = await self.document_repo.get_by_connector_and_external_id(
+        document = await self.document_repo.get_by_connector_and_external_id_for_update(
             connector.id, external_id
         )
         previous_version_tag: str | None = None
@@ -295,7 +333,7 @@ class EmailConnectorSyncService:
     ) -> tuple[Document, str | None]:
         external_id = f"{parent_document.external_id}#attachment:{attachment_index}:{attachment.file_name}"
         checksum = hashlib.sha256(attachment.payload).hexdigest()
-        document = await self.document_repo.get_by_connector_and_external_id(
+        document = await self.document_repo.get_by_connector_and_external_id_for_update(
             connector.id, external_id
         )
         previous_version_tag: str | None = None

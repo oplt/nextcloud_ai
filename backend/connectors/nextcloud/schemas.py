@@ -28,7 +28,8 @@ class ShareGrant(BaseModel):
     share_with: str | None = None
     display_name_owner: str | None = None
     password: str | bool | None = None
-    expiration: str | datetime | None = None
+    # OCS emits boolean false when no expiration is configured.
+    expiration: str | datetime | bool | None = None
     token: str | None = None
 
 

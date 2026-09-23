@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import select, update
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -52,13 +52,24 @@ class WorkOutboxRepository(BaseRepository[WorkOutbox]):
         )
         return existing.scalar_one()
 
-    async def claim_batch(self, *, limit: int = 20) -> list[WorkOutbox]:
+    async def claim_batch(
+        self, *, limit: int = 20, processing_timeout_seconds: int = 300
+    ) -> list[WorkOutbox]:
         now = datetime.now(timezone.utc)
+        stale_before = now - timedelta(seconds=max(1, processing_timeout_seconds))
         result = await self.session.execute(
             select(WorkOutbox)
             .where(
-                WorkOutbox.status == "pending",
-                WorkOutbox.available_at <= now,
+                or_(
+                    and_(
+                        WorkOutbox.status == "pending",
+                        WorkOutbox.available_at <= now,
+                    ),
+                    and_(
+                        WorkOutbox.status == "processing",
+                        WorkOutbox.updated_at < stale_before,
+                    ),
+                )
             )
             .order_by(WorkOutbox.available_at.asc())
             .limit(limit)

@@ -358,9 +358,9 @@ Thumbs.db
 
 TODO.txt
 
-.gitnexus
 .claude
 AGENTS.md
 CLAUDE.md
 .secrets.baseline
 .aider*
+.phase1-compose.generated.yml

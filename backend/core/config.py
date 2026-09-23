@@ -60,11 +60,16 @@ class Settings(BaseSettings):
     FIRST_SUPERUSER_EMAIL: str = "admin@example.com"
     FIRST_SUPERUSER_PASSWORD: str = "ChangeMe123!"
 
-    EMBEDDING_DIM: int
+    # The applied pgvector schema is VECTOR(1024). Supporting another dimension
+    # requires a forward migration and a staged reindex, not an environment-only
+    # change that leaves ORM and database types inconsistent.
+    EMBEDDING_DIM: int = Field(ge=1024, le=1024)
     EMBEDDING_PROVIDER: Literal["deterministic", "ollama"] | None = None
     LLM_PROVIDER: Literal["stub", "ollama"] | None = None
     OLLAMA_BASE_URL: AnyHttpUrl = Field(default="http://localhost:11434")
     OLLAMA_EMBEDDING_MODEL: str = "bge-m3:latest"
+    OLLAMA_EMBEDDING_MODEL_REVISION: str = "unversioned"
+    EMBEDDING_TOKENIZER_ID: str = "conservative-unicode-v1"
     OLLAMA_CHAT_MODEL: str = "llama3:latest"
     OLLAMA_BOOTSTRAP_MODE: Literal["ensure", "check"] = "ensure"
     OLLAMA_READINESS_TIMEOUT_SECONDS: float = Field(default=5.0, ge=1.0, le=60.0)
@@ -188,6 +193,16 @@ class Settings(BaseSettings):
         if not normalized:
             raise ValueError("Ollama model name cannot be empty")
         return normalized
+
+    @field_validator("EMBEDDING_TOKENIZER_ID")
+    @classmethod
+    def validate_embedding_tokenizer(cls, value: str) -> str:
+        if value != "conservative-unicode-v1":
+            raise ValueError(
+                "unsupported EMBEDDING_TOKENIZER_ID; add its tokenizer implementation "
+                "and a new chunk/index contract before changing this setting"
+            )
+        return value
 
     @field_validator("FRONTEND_URL", mode="after")
     @classmethod
@@ -318,29 +333,47 @@ class Settings(BaseSettings):
             placeholder_secrets = {
                 "change-me",
                 "changeme",
+                "replace-me",
+                "replace-with-openssl-rand-base64-64",
                 "secret",
                 "password",
                 "jwt-secret",
                 "nextcloud-bridge",
+                "webhook-secret",
+                "webhook-secret-value",
             }
+
+            def is_placeholder(value: str) -> bool:
+                normalized = value.strip().lower()
+                return (
+                    not normalized
+                    or normalized in placeholder_secrets
+                    or normalized.startswith("replace-with-")
+                    or normalized.startswith("change-me")
+                )
+
             jwt_secret = self.JWT_SECRET_KEY.get_secret_value().strip().lower()
             bridge_secret = (
                 self.NEXTCLOUD_BRIDGE_SHARED_SECRET.get_secret_value().strip().lower()
             )
-            if jwt_secret in placeholder_secrets or len(jwt_secret) < 16:
+            if is_placeholder(jwt_secret) or len(jwt_secret) < 16:
                 raise ValueError(
                     "JWT_SECRET_KEY must be a non-placeholder secret in staging/production"
                 )
-            if bridge_secret in placeholder_secrets or len(bridge_secret) < 16:
+            if is_placeholder(bridge_secret) or len(bridge_secret) < 16:
                 raise ValueError(
                     "NEXTCLOUD_BRIDGE_SHARED_SECRET must be a non-placeholder secret "
                     "in staging/production"
                 )
-            if self.NEXTCLOUD_WEBHOOK_SECRET is None or not (
-                self.NEXTCLOUD_WEBHOOK_SECRET.get_secret_value() or ""
-            ).strip():
+            webhook_secret = (
+                self.NEXTCLOUD_WEBHOOK_SECRET.get_secret_value().strip().lower()
+                if self.NEXTCLOUD_WEBHOOK_SECRET is not None
+                else ""
+            )
+            if is_placeholder(webhook_secret) or len(webhook_secret) < 16:
                 raise ValueError(
-                    "NEXTCLOUD_WEBHOOK_SECRET is required in staging/production"
+                    "NEXTCLOUD_WEBHOOK_SECRET must be a non-placeholder secret "
+                    "in staging/production"
                 )
             unsafe_passwords = {
                 "changeme123!",
@@ -349,10 +382,22 @@ class Settings(BaseSettings):
                 "password",
                 "password123",
             }
-            if self.FIRST_SUPERUSER_PASSWORD.strip().lower() in unsafe_passwords:
+            bootstrap_password = self.FIRST_SUPERUSER_PASSWORD.strip().lower()
+            if bootstrap_password in unsafe_passwords or is_placeholder(
+                bootstrap_password
+            ):
                 raise ValueError(
                     "FIRST_SUPERUSER_PASSWORD must not use a known default in "
                     "staging/production"
+                )
+            if (
+                self.effective_embedding_provider == "ollama"
+                and self.OLLAMA_EMBEDDING_MODEL_REVISION.strip().lower()
+                in {"", "latest", "unversioned"}
+            ):
+                raise ValueError(
+                    "OLLAMA_EMBEDDING_MODEL_REVISION must pin the deployed model "
+                    "revision in staging/production"
                 )
         return self
 

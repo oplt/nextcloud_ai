@@ -21,6 +21,7 @@ class ChatSource(BaseModel):
     score: float
     heading_path: str | None = None
     content: str | None = Field(default=None, exclude=True, repr=False)
+    ranking_reason: str | None = Field(default=None, exclude=True, repr=False)
 
 
 class ChatDocumentResult(BaseModel):
@@ -32,6 +33,7 @@ class ChatDocumentResult(BaseModel):
     modified_at: datetime | None = None
     score: float
     matched_fields: list[str] = Field(default_factory=list)
+    matched_excerpt: str | None = None
 
 
 class ChatMemoryPatchRequest(BaseModel):

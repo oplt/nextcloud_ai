@@ -25,11 +25,15 @@ RUN uv sync --frozen --extra rerank --no-dev --no-install-project
 ENV PATH="/app/backend/.venv/bin:${PATH}"
 WORKDIR /app
 
-# Optional model bake: BUILD_RERANK_MODEL=1 downloads weights at image build time.
-ARG BUILD_RERANK_MODEL=0
+# The enabled-by-default reranker is provisioned at image build time. Set the
+# argument to 0 only when deployment explicitly selects the observable fallback.
+ARG BUILD_RERANK_MODEL=1
 ARG RAG_TRUE_RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RUN if [ "$BUILD_RERANK_MODEL" = "1" ]; then \
       python -c "from sentence_transformers import CrossEncoder; CrossEncoder('${RAG_TRUE_RERANK_MODEL}', max_length=512)"; \
     fi
+
+# Runtime startup may load cached weights, but must not download them.
+ENV HF_HUB_OFFLINE=1
 
 CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -43,10 +43,13 @@ def chunk_parsed_document(
     """Chunk a parsed document into canonical ChunkDraft evidence units.
 
     Default child size 250–500 tokens with 40–80 overlap is a starting grid;
-    callers may override. Values are word-token approximations.
+    callers may override. The default chunker uses a versioned conservative
+    Unicode token budget; the fallback path retains its legacy word spans.
     """
     size = max(40, chunk_size or DEFAULT_CHILD_CHUNK_SIZE)
-    ov = max(0, min(overlap if overlap is not None else DEFAULT_CHILD_OVERLAP, size - 1))
+    ov = max(
+        0, min(overlap if overlap is not None else DEFAULT_CHILD_OVERLAP, size - 1)
+    )
     rag_document = RagParser().normalize(parsed)
     rag_drafts = HeadingTableAwareChunker(chunk_size=size, overlap=ov).chunk(
         rag_document

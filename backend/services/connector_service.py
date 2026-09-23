@@ -247,6 +247,7 @@ class ConnectorService:
             mailbox=connector.root_path or "INBOX",
             use_ssl=use_ssl,
             verify_tls=bool(metadata.get("verify_tls", True)),
+            starttls=bool(metadata.get("starttls", not use_ssl)),
             search_criteria=str(metadata.get("search_criteria") or "ALL"),
             fetch_limit=settings.EMAIL_CONNECTOR_FETCH_LIMIT,
         )

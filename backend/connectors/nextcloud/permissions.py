@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import posixpath
 from datetime import datetime, timezone
 
 from .client import AsyncNextcloudClient
@@ -25,10 +26,60 @@ UNSUPPORTED_SHARE_TYPES = frozenset(
     {FEDERATED_SHARE, CIRCLE_SHARE, TALK_CONVERSATION_SHARE, EMAIL_SHARE}
 )
 
+# Operator-facing matrix (supported → ACL principal; else fail closed).
+SHARE_TYPE_SUPPORT: dict[int, str] = {
+    USER_SHARE: "supported_user",
+    GROUP_SHARE: "supported_group",
+    PUBLIC_LINK_SHARE: "observed_only_never_global_read",
+    EMAIL_SHARE: "unsupported_fail_closed",
+    FEDERATED_SHARE: "unsupported_fail_closed",
+    CIRCLE_SHARE: "unsupported_fail_closed",
+    TALK_CONVERSATION_SHARE: "unsupported_fail_closed",
+}
+
 
 class NextcloudPermissionService:
     def __init__(self, client: AsyncNextcloudClient) -> None:
         self.client = client
+
+    @staticmethod
+    def ancestor_paths(remote_path: str) -> list[str]:
+        """Path + ancestors so folder shares inherit onto nested files.
+
+        Nextcloud OCS `shares?path=` is exact-path; parent folder grants must be
+        collected explicitly. Deepest path first, then parents up to `/`.
+        """
+        normalized = remote_path.strip() or "/"
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        normalized = posixpath.normpath(normalized)
+        if normalized == ".":
+            normalized = "/"
+        parts = [part for part in normalized.split("/") if part]
+        if not parts:
+            return ["/"]
+        chain: list[str] = []
+        current = ""
+        for part in parts:
+            current = f"{current}/{part}"
+            chain.append(current)
+        # Deepest first, then parents, finally `/`.
+        return list(reversed(chain)) + ["/"]
+
+    async def collect_shares_with_inheritance(
+        self, remote_path: str
+    ) -> list[ShareGrant]:
+        """Exact-path shares plus ancestor folder shares (deduped by share id)."""
+        seen_ids: set[str] = set()
+        merged: list[ShareGrant] = []
+        for path in self.ancestor_paths(remote_path):
+            for share in await self.client.get_shares(path):
+                share_key = str(share.share_id)
+                if share_key in seen_ids:
+                    continue
+                seen_ids.add(share_key)
+                merged.append(share)
+        return merged
 
     async def build_acl_for_path(
         self,
@@ -38,7 +89,7 @@ class NextcloudPermissionService:
         instance_base_url: str | None = None,
         now: datetime | None = None,
     ) -> AccessControlEntry:
-        shares = await self.client.get_shares(remote_path)
+        shares = await self.collect_shares_with_inheritance(remote_path)
         base_url = instance_base_url or str(self.client.config.base_url)
         allowed_user_ids: set[str] = set()
         allowed_group_ids: set[str] = set()

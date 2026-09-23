@@ -122,12 +122,11 @@ def _parse_document(raw: dict[str, Any]) -> FixtureDocument:
     key = str(raw["key"])
     chunk_raws = list(raw.get("chunks") or [])
     chunks = tuple(
-        _parse_chunk(chunk, key, index) for index, chunk in enumerate(chunk_raws, start=1)
+        _parse_chunk(chunk, key, index)
+        for index, chunk in enumerate(chunk_raws, start=1)
     )
     if not chunks and raw.get("text"):
-        chunks = (
-            FixtureChunk(key=f"{key}:c1", text=str(raw["text"]), page_number=1),
-        )
+        chunks = (FixtureChunk(key=f"{key}:c1", text=str(raw["text"]), page_number=1),)
     return FixtureDocument(
         key=key,
         title=str(raw.get("title") or key),
@@ -136,7 +135,9 @@ def _parse_document(raw: dict[str, Any]) -> FixtureDocument:
         file_path=str(raw.get("file_path") or f"/fixtures/{key}.txt"),
         text=str(raw.get("text") or "\n\n".join(c.text for c in chunks)),
         tags=tuple(str(t) for t in (raw.get("tags") or [])),
-        visible_to=tuple(str(v) for v in (raw.get("visible_to") or ["alice", "bob", "admin"])),
+        visible_to=tuple(
+            str(v) for v in (raw.get("visible_to") or ["alice", "bob", "admin"])
+        ),
         chunks=chunks,
         metadata=dict(raw.get("metadata") or {}),
     )
@@ -148,7 +149,9 @@ def _parse_identity(raw: dict[str, Any]) -> FixtureIdentity:
         username=str(raw.get("username") or raw["key"]),
         display_name=str(raw.get("display_name") or raw["key"]),
         is_superuser=bool(raw.get("is_superuser", False)),
-        role_name=str(raw.get("role_name") or ("admin" if raw.get("is_superuser") else "user")),
+        role_name=str(
+            raw.get("role_name") or ("admin" if raw.get("is_superuser") else "user")
+        ),
     )
 
 
@@ -174,9 +177,7 @@ def load_fixture_bundle(
 ) -> EvalFixtureBundle:
     documents = load_corpus(corpus_path)
     identities = load_identities(identities_path)
-    gold = load_eval_rows(
-        gold_path or Path(__file__).with_name("rag_gold.jsonl")
-    )
+    gold = load_eval_rows(gold_path or Path(__file__).with_name("rag_gold.jsonl"))
     return EvalFixtureBundle(
         documents=documents,
         identities=identities,
@@ -186,7 +187,82 @@ def load_fixture_bundle(
     )
 
 
-def documents_visible_to(bundle: EvalFixtureBundle, identity_key: str) -> list[FixtureDocument]:
+async def seed_database_fixture(session: Any, bundle: EvalFixtureBundle) -> None:
+    """Flush fixtures into the caller's rollback-only evaluation transaction."""
+    from ..ai.embedding_client import EmbeddingClientFactory
+    from ..ai.embedding_contract import active_embedding_fingerprint
+    from ..db.models import Document, DocumentChunk
+
+    embedding_client = EmbeddingClientFactory.create(allow_deterministic=True)
+    fingerprint = active_embedding_fingerprint()
+    identity_ids = {
+        identity.key: str(identity.user_id) for identity in bundle.identities
+    }
+    try:
+        for fixture_document in bundle.documents:
+            allowed_user_ids = [
+                identity_ids[key]
+                for key in fixture_document.visible_to
+                if key in identity_ids and key != "admin"
+            ]
+            document = Document(
+                id=fixture_document.document_id,
+                external_id=f"eval:{fixture_document.key}",
+                file_path=fixture_document.file_path,
+                file_name=fixture_document.title,
+                file_extension=Path(fixture_document.file_path).suffix.lstrip("."),
+                mime_type=fixture_document.mime_type,
+                source_type="eval_fixture",
+                sync_status="indexed",
+                parse_status="indexed",
+                language=fixture_document.language,
+                page_count=max(
+                    (chunk.page_number or 1 for chunk in fixture_document.chunks),
+                    default=1,
+                ),
+                is_deleted=False,
+                permission_scope="restricted",
+                allowed_user_ids=allowed_user_ids,
+                allowed_group_ids=[],
+                metadata_json={"eval_fixture": fixture_document.key},
+                document_type="fixture",
+                business_domain="evaluation",
+            )
+            session.add(document)
+            texts = [chunk.text for chunk in fixture_document.chunks]
+            vectors = await embedding_client.embed_documents(texts)
+            for index, (fixture_chunk, vector) in enumerate(
+                zip(fixture_document.chunks, vectors, strict=True)
+            ):
+                session.add(
+                    DocumentChunk(
+                        id=fixture_chunk.chunk_id,
+                        document=document,
+                        chunk_index=index,
+                        content=fixture_chunk.text,
+                        token_count=len(fixture_chunk.text.split()),
+                        page_number=fixture_chunk.page_number,
+                        section_title=fixture_chunk.section_title,
+                        heading_path=fixture_chunk.heading_path,
+                        embedding_status="complete",
+                        embedding_model=fingerprint.model,
+                        embedding=vector,
+                        metadata_json={
+                            "embedding_fingerprint": fingerprint.digest(),
+                            "eval_fixture": fixture_chunk.key,
+                        },
+                    )
+                )
+        await session.flush()
+    finally:
+        close = getattr(embedding_client, "aclose", None)
+        if callable(close):
+            await close()
+
+
+def documents_visible_to(
+    bundle: EvalFixtureBundle, identity_key: str
+) -> list[FixtureDocument]:
     return [
         doc
         for doc in bundle.documents

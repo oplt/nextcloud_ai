@@ -6,9 +6,9 @@ from dataclasses import dataclass, field
 
 from .parser import RagBlock, RagParsedDocument
 
-_WORD_RE = re.compile(r"\S+")
+_WORD_RE = re.compile(r"[A-Za-z0-9_]+|[\u3400-\u9fff]|[^\w\s]|\w+", re.UNICODE)
 
-# Starting child/parent hypotheses (word-token approximations).
+# Starting child/parent hypotheses using the versioned conservative tokenizer.
 CHILD_CHUNK_SIZE_GRID = (250, 400, 500)
 CHILD_OVERLAP_GRID = (40, 60, 80)
 DEFAULT_CHILD_CHUNK_SIZE = 400
@@ -154,7 +154,9 @@ class HeadingTableAwareChunker:
         for draft in drafts:
             if draft.metadata.get("overlap_only"):
                 continue
-            source_start = int(draft.metadata.get("source_char_start", draft.char_start))
+            source_start = int(
+                draft.metadata.get("source_char_start", draft.char_start)
+            )
             source_end = int(draft.metadata.get("source_char_end", draft.char_end))
             if source_end < source_start:
                 continue
@@ -174,7 +176,12 @@ class HeadingTableAwareChunker:
             prev_source = (source_start, source_end)
 
         # Monotonic source order (stable by original emission, then start).
-        cleaned.sort(key=lambda d: (int(d.metadata.get("source_char_start", d.char_start)), d.chunk_index))
+        cleaned.sort(
+            key=lambda d: (
+                int(d.metadata.get("source_char_start", d.char_start)),
+                d.chunk_index,
+            )
+        )
         for index, draft in enumerate(cleaned):
             draft.chunk_index = index
             draft.metadata["chunker"] = "title-token-v2"
@@ -198,9 +205,7 @@ class HeadingTableAwareChunker:
         draft.metadata = {**meta, **extra, "trimmed_to_budget": True}
         return draft
 
-    def _overlap_residue(
-        self, buffer: list[RagBlock]
-    ) -> tuple[list[RagBlock], int]:
+    def _overlap_residue(self, buffer: list[RagBlock]) -> tuple[list[RagBlock], int]:
         """Keep at most ``overlap`` trailing words — never a whole oversized block."""
         if not buffer or self.overlap <= 0:
             return [], 0
@@ -310,19 +315,13 @@ class HeadingTableAwareChunker:
     def _split_block(
         self, block: RagBlock, chunk_index_start: int, *, table: bool
     ) -> list[RagChunkDraft]:
+        if table:
+            return self._split_table_block(block, chunk_index_start)
         words = list(_WORD_RE.finditer(block.text))
         if not words:
             return []
-        header_prefix = ""
-        header_tokens = 0
-        if table:
-            first_line = block.text.splitlines()[0] if block.text else ""
-            if first_line.strip().startswith("|"):
-                header_prefix = first_line.strip()
-                header_tokens = _count_words(header_prefix)
-
-        body_budget = max(1, self.chunk_size - (header_tokens if table else 0))
-        step = body_budget if table else max(1, self.chunk_size - self.overlap)
+        body_budget = self.chunk_size
+        step = max(1, self.chunk_size - self.overlap)
         drafts: list[RagChunkDraft] = []
 
         for offset, word_start in enumerate(range(0, len(words), step)):
@@ -330,13 +329,6 @@ class HeadingTableAwareChunker:
             char_start = words[word_start].start()
             char_end = words[word_end - 1].end()
             text = block.text[char_start:char_end].strip()
-            if (
-                table
-                and header_prefix
-                and offset > 0
-                and not text.startswith(header_prefix)
-            ):
-                text = f"{header_prefix}\n{text}"
             content, meta_extra = _compose_chunk_content(
                 text,
                 heading_path=block.heading_path,
@@ -357,19 +349,110 @@ class HeadingTableAwareChunker:
                     metadata={
                         **dict(block.metadata or {}),
                         **meta_extra,
-                        "block_type": "table" if table else block.block_type,
+                        "block_type": block.block_type,
                         "split_from_large_block": True,
                         "source_body": block.text[char_start:char_end].strip(),
                         "source_char_start": block.char_start + char_start,
                         "source_char_end": block.char_start + char_end,
-                        "repeated_table_header": bool(
-                            table and header_prefix and offset > 0
-                        ),
                     },
                 )
             )
             if word_end >= len(words):
                 break
+        return drafts
+
+    def _split_table_block(
+        self, block: RagBlock, chunk_index_start: int
+    ) -> list[RagChunkDraft]:
+        """Split on row boundaries and repeat a synthetic header when possible."""
+        lines: list[tuple[str, int, int]] = []
+        cursor = 0
+        for source_line in block.text.splitlines(keepends=True):
+            line = source_line.rstrip("\r\n")
+            start = cursor
+            cursor += len(source_line)
+            if line.strip():
+                lines.append((line, start, start + len(line)))
+        if not lines:
+            return []
+
+        header = lines[0] if lines[0][0].lstrip().startswith("|") else None
+        rows = lines[1:] if header else lines
+        drafts: list[RagChunkDraft] = []
+        group: list[tuple[str, int, int]] = []
+
+        def emit(rows_to_emit: list[tuple[str, int, int]]) -> None:
+            if not rows_to_emit:
+                return
+            repeated = bool(header and rows_to_emit[0] is not header)
+            content_lines = ([header[0]] if repeated and header else []) + [
+                row[0] for row in rows_to_emit
+            ]
+            source_body = "\n".join(row[0] for row in rows_to_emit)
+            content, meta_extra = _compose_chunk_content(
+                "\n".join(content_lines),
+                heading_path=block.heading_path,
+                context_above=str((block.metadata or {}).get("context_above") or ""),
+                context_below=str((block.metadata or {}).get("context_below") or ""),
+                max_tokens=self.chunk_size,
+            )
+            drafts.append(
+                RagChunkDraft(
+                    chunk_index=chunk_index_start + len(drafts),
+                    content=content,
+                    token_count=_count_words(content),
+                    char_start=block.char_start + rows_to_emit[0][1],
+                    char_end=block.char_start + rows_to_emit[-1][2],
+                    page_number=block.page_number,
+                    section_title=block.section_title,
+                    heading_path=block.heading_path,
+                    metadata={
+                        **dict(block.metadata or {}),
+                        **meta_extra,
+                        "block_type": "table",
+                        "split_from_large_block": True,
+                        "source_body": source_body,
+                        "source_char_start": block.char_start + rows_to_emit[0][1],
+                        "source_char_end": block.char_start + rows_to_emit[-1][2],
+                        "repeated_table_header": repeated,
+                        "synthetic_table_header": header[0]
+                        if repeated and header
+                        else None,
+                    },
+                )
+            )
+
+        if header:
+            group = [header]
+        for row in rows:
+            candidate = [*group, row]
+            repeat_cost = _count_words(header[0]) if header and group != [header] else 0
+            if (
+                group
+                and _count_words("\n".join(item[0] for item in candidate)) + repeat_cost
+                > self.chunk_size
+            ):
+                emit(group)
+                group = []
+            row_budget = self.chunk_size - (_count_words(header[0]) if header else 0)
+            if _count_words(row[0]) > max(1, row_budget):
+                words = list(_WORD_RE.finditer(row[0]))
+                for start in range(0, len(words), max(1, row_budget)):
+                    end = min(start + max(1, row_budget), len(words))
+                    fragment_start = words[start].start()
+                    fragment_end = words[end - 1].end()
+                    emit(
+                        [
+                            (
+                                row[0][fragment_start:fragment_end],
+                                row[1] + fragment_start,
+                                row[1] + fragment_end,
+                            )
+                        ]
+                    )
+                continue
+            group.append(row)
+        emit(group)
         return drafts
 
     def _split_code_block(
@@ -412,21 +495,27 @@ class HeadingTableAwareChunker:
                 local_start = cursor
             local_end = local_start + len(segment)
             cursor = local_end
+            base_line = int((block.metadata or {}).get("source_line_start", 1))
+            segment_line_start = base_line + block.text[:local_start].count("\n")
+            segment_text = segment.rstrip("\n")
             seg_block = RagBlock(
-                text=segment.rstrip("\n"),
+                text=segment_text,
                 block_type="code",
                 page_number=block.page_number,
                 section_title=block.section_title,
                 heading_path=block.heading_path,
                 char_start=block.char_start + local_start,
                 char_end=block.char_start + local_end,
-                metadata=dict(block.metadata or {}),
+                metadata={
+                    **dict(block.metadata or {}),
+                    "source_line_start": segment_line_start,
+                    "source_line_end": segment_line_start
+                    + max(0, segment_text.count("\n")),
+                },
             )
             if _count_words(seg_block.text) > self.chunk_size:
                 drafts.extend(
-                    self._split_block(
-                        seg_block, chunk_index_start + len(drafts), table=False
-                    )
+                    self._split_code_lines(seg_block, chunk_index_start + len(drafts))
                 )
             else:
                 content, meta_extra = _compose_chunk_content(
@@ -456,6 +545,83 @@ class HeadingTableAwareChunker:
                 )
         return drafts
 
+    def _split_code_lines(
+        self, block: RagBlock, chunk_index_start: int
+    ) -> list[RagChunkDraft]:
+        """Split oversized code on complete lines, retaining indentation/spans."""
+        lines: list[tuple[str, int, int, int]] = []
+        cursor = 0
+        base_line = int((block.metadata or {}).get("source_line_start", 1))
+        for offset, source_line in enumerate(block.text.splitlines(keepends=True)):
+            line = source_line.rstrip("\r\n")
+            start = cursor
+            cursor += len(source_line)
+            lines.append((line, start, start + len(line), base_line + offset))
+
+        groups: list[list[tuple[str, int, int, int]]] = []
+        group: list[tuple[str, int, int, int]] = []
+        group_tokens = 0
+        for line in lines:
+            line_tokens = _count_words(line[0])
+            if group and group_tokens + line_tokens > self.chunk_size:
+                groups.append(group)
+                group = []
+                group_tokens = 0
+            if line_tokens > self.chunk_size:
+                words = list(_WORD_RE.finditer(line[0]))
+                for start in range(0, len(words), self.chunk_size):
+                    end = min(start + self.chunk_size, len(words))
+                    local_start = words[start].start()
+                    local_end = words[end - 1].end()
+                    groups.append(
+                        [
+                            (
+                                line[0][local_start:local_end],
+                                line[1] + local_start,
+                                line[1] + local_end,
+                                line[3],
+                            )
+                        ]
+                    )
+                continue
+            group.append(line)
+            group_tokens += line_tokens
+        if group:
+            groups.append(group)
+
+        drafts: list[RagChunkDraft] = []
+        for group_lines in groups:
+            body = "\n".join(line[0] for line in group_lines)
+            content, meta_extra = _compose_chunk_content(
+                body,
+                heading_path=block.heading_path,
+                max_tokens=self.chunk_size,
+            )
+            drafts.append(
+                RagChunkDraft(
+                    chunk_index=chunk_index_start + len(drafts),
+                    content=content,
+                    token_count=_count_words(content),
+                    char_start=block.char_start + group_lines[0][1],
+                    char_end=block.char_start + group_lines[-1][2],
+                    page_number=block.page_number,
+                    section_title=block.section_title,
+                    heading_path=block.heading_path,
+                    metadata={
+                        **dict(block.metadata or {}),
+                        **meta_extra,
+                        "block_type": "code",
+                        "split_from_large_block": True,
+                        "source_body": body,
+                        "source_char_start": block.char_start + group_lines[0][1],
+                        "source_char_end": block.char_start + group_lines[-1][2],
+                        "source_line_start": group_lines[0][3],
+                        "source_line_end": group_lines[-1][3],
+                    },
+                )
+            )
+        return drafts
+
     def _draft_from_blocks(
         self, blocks: list[RagBlock], chunk_index: int
     ) -> RagChunkDraft | None:
@@ -463,12 +629,11 @@ class HeadingTableAwareChunker:
         if not real_blocks:
             # Never emit overlap-only chunks (duplicate tails).
             return None
-        body = "\n\n".join(block.text for block in real_blocks).strip()
+        body = "\n\n".join(block.text for block in blocks).strip()
         if not body:
             return None
-        first = real_blocks[0]
+        first = blocks[0]
         last = real_blocks[-1]
-        # When overlap residue leads the buffer, source start is first *real* block.
         section_title = last.section_title or first.section_title
         heading_path = last.heading_path or first.heading_path
         content, meta_extra = _compose_chunk_content(
@@ -528,9 +693,7 @@ def build_parent_chunks(
     return parents
 
 
-def _parent_from_children(
-    children: list[RagChunkDraft], index: int
-) -> RagChunkDraft:
+def _parent_from_children(children: list[RagChunkDraft], index: int) -> RagChunkDraft:
     first, last = children[0], children[-1]
     content = "\n\n".join(c.content for c in children)
     return RagChunkDraft(

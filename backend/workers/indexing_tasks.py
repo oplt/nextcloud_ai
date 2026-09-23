@@ -45,6 +45,24 @@ def _get_or_create_event_loop() -> asyncio.AbstractEventLoop:
     return _task_loop
 
 
+def initialize_worker_loop() -> asyncio.AbstractEventLoop:
+    """Return the single resource-owning loop for this worker process."""
+    return _get_or_create_event_loop()
+
+
+def close_worker_loop() -> None:
+    """Close and forget the process-owned loop after resource shutdown."""
+    global _task_loop, _task_loop_pid
+    if _task_loop is not None and not _task_loop.is_closed():
+        _task_loop.close()
+    try:
+        asyncio.set_event_loop(None)
+    except RuntimeError:
+        pass
+    _task_loop = None
+    _task_loop_pid = None
+
+
 def _run_in_worker_loop(coro):
     """Run a coroutine on the process-owned worker loop.
 
@@ -85,8 +103,6 @@ def _run_in_worker_loop(coro):
     raise RuntimeError(
         "Celery sync task entered an already-running event loop; await directly instead."
     )
-
-
 
 
 @celery_app.task(bind=True, max_retries=3, soft_time_limit=3600, time_limit=3660)
@@ -263,7 +279,9 @@ async def _run_document_reindex_task(*, document_id: str) -> str:
 
         await dispatch_outbox_batch()
     except Exception:
-        logger.exception("Outbox dispatch after reindex failed document_id=%s", document_id)
+        logger.exception(
+            "Outbox dispatch after reindex failed document_id=%s", document_id
+        )
     return str(document.id)
 
 
@@ -390,14 +408,21 @@ def enqueue_document_reindex(document_id: str):
     max_retries=3,
     soft_time_limit=1800,  # 30 minutes for intelligence extraction
 )
-def run_document_intelligence_extraction_task(self, document_id: str) -> str:
+def run_document_intelligence_extraction_task(
+    self, document_id: str, expected_generation: int | None = None
+) -> str:
     """Run document intelligence extraction"""
     return _run_in_worker_loop(
-        _run_document_intelligence_extraction_task(document_id=document_id)
+        _run_document_intelligence_extraction_task(
+            document_id=document_id,
+            expected_generation=expected_generation,
+        )
     )
 
 
-async def _run_document_intelligence_extraction_task(*, document_id: str) -> str:
+async def _run_document_intelligence_extraction_task(
+    *, document_id: str, expected_generation: int | None = None
+) -> str:
     """Async implementation of intelligence extraction"""
     if not settings.PRODUCT_INTELLIGENCE_ENABLED:
         return document_id
@@ -405,7 +430,37 @@ async def _run_document_intelligence_extraction_task(*, document_id: str) -> str
     async with AsyncSessionLocal() as session:
         service = DocumentIngestionService(session)
         try:
+            if expected_generation is not None:
+                document = await service.document_repo.get_for_update(document_id)
+                if document is None:
+                    raise ValueError(f"Document {document_id} not found")
+                current_generation = int(document.published_generation or 0)
+                if current_generation != expected_generation:
+                    logger.info(
+                        "Skipping stale intelligence task document_id=%s expected_generation=%s current_generation=%s",
+                        document_id,
+                        expected_generation,
+                        current_generation,
+                    )
+                    return document_id
+                completed_generation = int(
+                    (document.metadata_json or {}).get(
+                        "intelligence_published_generation", -1
+                    )
+                )
+                if completed_generation == expected_generation:
+                    logger.info(
+                        "Skipping already-applied intelligence task document_id=%s generation=%s",
+                        document_id,
+                        expected_generation,
+                    )
+                    return document_id
             await service.recompute_product_intelligence(document_id)
+            if expected_generation is not None:
+                document.metadata_json = {
+                    **dict(document.metadata_json or {}),
+                    "intelligence_published_generation": expected_generation,
+                }
             await session.commit()
             logger.info(
                 "Successfully completed intelligence extraction for document_id=%s",
@@ -429,18 +484,26 @@ def enqueue_document_intelligence(document_id: str):
     return enqueue_document_intelligence_immediate(document_id)
 
 
-def enqueue_document_intelligence_immediate(document_id: str):
+def enqueue_document_intelligence_immediate(
+    document_id: str, *, expected_generation: int | None = None
+):
     """Enqueue intelligence extraction after the source transaction committed."""
     if should_execute_tasks_locally():
         if not celery_app.conf.task_always_eager:
             logger.info(f"Executing intelligence extraction {document_id} locally")
         return _enqueue_eager_task(
-            _run_document_intelligence_extraction_task(document_id=document_id),
+            _run_document_intelligence_extraction_task(
+                document_id=document_id,
+                expected_generation=expected_generation,
+            ),
             label=f"document_intelligence:{document_id}",
         )
 
     async_result = run_document_intelligence_extraction_task.apply_async(
-        args=[document_id],
+        kwargs={
+            "document_id": document_id,
+            "expected_generation": expected_generation,
+        },
         priority=9,
     )
     return EnqueuedTaskHandle(id=str(async_result.id))

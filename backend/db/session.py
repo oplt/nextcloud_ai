@@ -94,3 +94,11 @@ async def dispose_db() -> None:
 
     engine, _ = item
     await engine.dispose()
+
+
+async def dispose_all_db_engines() -> None:
+    """Dispose current and inherited engine registries after a worker fork."""
+    items = list(_process_engines.values())
+    _process_engines.clear()
+    for engine, _ in items:
+        await engine.dispose()

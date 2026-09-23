@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from sqlalchemy import update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db.models import Document
@@ -19,13 +20,36 @@ class IndexAttempt:
     generation: int
 
 
+_UNSET = object()
+
+
 async def begin_index_attempt(
-    session: AsyncSession, document: Document
+    session: AsyncSession,
+    document: Document,
+    *,
+    expected_version_tag: str | None | object = _UNSET,
 ) -> IndexAttempt:
-    """Bump generation so overlapping workers can detect staleness at publish."""
-    document.index_generation = int(document.index_generation or 0) + 1
+    """Atomically reserve a generation while holding the document row lock."""
     await session.flush()
-    return IndexAttempt(document_id=str(document.id), generation=document.index_generation)
+    stmt = update(Document).where(Document.id == document.id)
+    if expected_version_tag is not _UNSET:
+        if expected_version_tag is None:
+            stmt = stmt.where(Document.version_tag.is_(None))
+        else:
+            stmt = stmt.where(Document.version_tag == expected_version_tag)
+    result = await session.execute(
+        stmt.values(index_generation=Document.index_generation + 1).returning(
+            Document.index_generation
+        )
+    )
+    generation_value = result.scalar_one_or_none()
+    if generation_value is None:
+        raise StaleIndexGenerationError(
+            "source version changed before index generation could be reserved"
+        )
+    generation = int(generation_value)
+    document.index_generation = generation
+    return IndexAttempt(document_id=str(document.id), generation=generation)
 
 
 def assert_publish_allowed(document: Document, attempt: IndexAttempt) -> None:

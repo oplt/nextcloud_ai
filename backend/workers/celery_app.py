@@ -10,7 +10,7 @@ from celery.signals import worker_process_init, worker_process_shutdown, worker_
 
 from ..ai.ollama_runtime import OllamaRuntimeService
 from ..core.config import settings
-from ..db.session import dispose_db
+from ..db.session import dispose_all_db_engines, dispose_db
 
 celery_app = Celery(
     "nextcloud_ai",
@@ -55,11 +55,12 @@ logger = logging.getLogger(__name__)
 
 @worker_process_init.connect
 def init_worker_process(**kwargs):
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    from .indexing_tasks import initialize_worker_loop
+
+    loop = initialize_worker_loop()
 
     try:
-        loop.run_until_complete(dispose_db())
+        loop.run_until_complete(dispose_all_db_engines())
         from ..core.ai_resources import start_ai_resources
 
         loop.run_until_complete(start_ai_resources(role="worker"))
@@ -70,17 +71,20 @@ def init_worker_process(**kwargs):
 
 @worker_process_shutdown.connect
 def shutdown_worker_process(**kwargs):
+    from .indexing_tasks import close_worker_loop, initialize_worker_loop
+
+    loop = initialize_worker_loop()
     try:
-        loop = asyncio.get_event_loop()
         if not loop.is_closed():
             from ..core.ai_resources import stop_ai_resources
 
             loop.run_until_complete(stop_ai_resources())
             loop.run_until_complete(dispose_db())
-            loop.close()
         logger.info("Worker %s shutdown complete", os.getpid())
     except Exception:
         logger.warning("Error during worker shutdown cleanup", exc_info=True)
+    finally:
+        close_worker_loop()
 
 
 def _warm_ollama_models() -> None:

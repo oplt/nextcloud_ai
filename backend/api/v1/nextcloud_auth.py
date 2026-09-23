@@ -24,10 +24,10 @@ router = APIRouter(prefix="/auth/nextcloud", tags=["nextcloud-auth"])
 @lru_cache(maxsize=1)
 def get_bridge_codec() -> BridgeTokenCodec:
     bridge_settings = get_nextcloud_settings()
-    replay_store = (
-        RedisReplayStore(redis_url=bridge_settings.bridge_redis_url)
-        if bridge_settings.bridge_redis_url
-        else None
+    # Bridge tokens are bearer credentials and must be one-time-use. Reuse the
+    # application Redis when no dedicated bridge Redis URL is configured.
+    replay_store = RedisReplayStore(
+        redis_url=bridge_settings.bridge_redis_url or settings.REDIS_URL
     )
     return BridgeTokenCodec(settings=bridge_settings, replay_store=replay_store)
 

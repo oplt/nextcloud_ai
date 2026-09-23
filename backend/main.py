@@ -72,9 +72,7 @@ async def lifespan(app: FastAPI):
                 embed_compat.fingerprint,
             )
         else:
-            logger.warning(
-                "Embedding compat check failed: %s", embed_compat.error
-            )
+            logger.warning("Embedding compat check failed: %s", embed_compat.error)
             if settings.EMBEDDING_COMPAT_REQUIRED:
                 raise RuntimeError(
                     f"Embedding runtime incompatible: {embed_compat.error}"
@@ -120,7 +118,8 @@ async def lifespan(app: FastAPI):
     from .core.ai_resources import start_ai_resources, stop_ai_resources
 
     ai_bundle = await start_ai_resources(role="api")
-    app.state.ai_resources = ai_bundle.cache_stats()
+    # Keep the live owner on app state; metrics read current counters at scrape time.
+    app.state.ai_resources = ai_bundle
 
     try:
         yield

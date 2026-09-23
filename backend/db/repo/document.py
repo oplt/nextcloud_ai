@@ -4,7 +4,18 @@ from collections.abc import Sequence
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Select, and_, case, delete, func, or_, select, text, update
+from sqlalchemy import (
+    Select,
+    and_,
+    case,
+    delete,
+    func,
+    literal_column,
+    or_,
+    select,
+    text,
+    update,
+)
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import contains_eager, defer, selectinload
 
@@ -26,6 +37,27 @@ class DocumentRepository(BaseRepository[Document]):
                 Document.connector_id == connector_id,
                 Document.external_id == external_id,
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_connector_and_external_id_for_update(
+        self, connector_id: UUID, external_id: str
+    ) -> Document | None:
+        """Lock one source record while its new index generation is prepared."""
+        result = await self.session.execute(
+            select(Document)
+            .where(
+                Document.connector_id == connector_id,
+                Document.external_id == external_id,
+            )
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def get_for_update(self, document_id: UUID | str) -> Document | None:
+        """Lock a document for generation-bound idempotent publication."""
+        result = await self.session.execute(
+            select(Document).where(Document.id == document_id).with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -229,19 +261,35 @@ class DocumentRepository(BaseRepository[Document]):
         mime_types: Sequence[str] | None = None,
         source_types: Sequence[str] | None = None,
         limit: int = 20,
-    ) -> list[tuple[Document, float]]:
+    ) -> list[tuple[Document, float, str | None]]:
         """Distinct documents ordered by best ``ts_rank_cd``. Limit is per document."""
         normalized_terms = [term.strip() for term in terms if term.strip()]
         if not normalized_terms:
             return []
 
         chunk_rank = DocumentChunkRepository._best_chunk_rank_subquery(normalized_terms)
+        chunk_vector = DocumentChunkRepository._chunk_tsvector()
+        excerpt_rank, excerpt_match = DocumentChunkRepository._lexical_rank_and_match(
+            chunk_vector, normalized_terms
+        )
+        matched_excerpt = (
+            select(DocumentChunk.content)
+            .where(
+                DocumentChunk.document_id == Document.id,
+                excerpt_match,
+            )
+            .order_by(excerpt_rank.desc(), DocumentChunk.chunk_index.asc())
+            .limit(1)
+            .correlate(Document)
+            .scalar_subquery()
+            .label("matched_excerpt")
+        )
         score = func.greatest(
             func.coalesce(chunk_rank.c.lexical_rank, 0.0),
             DocumentChunkRepository._filename_identifier_boost(normalized_terms),
         ).label("lexical_rank")
         stmt = (
-            select(Document, score)
+            select(Document, score, matched_excerpt)
             .outerjoin(chunk_rank, chunk_rank.c.document_id == Document.id)
             .where(
                 DocumentRepository.visibility_clause(auth),
@@ -264,7 +312,10 @@ class DocumentRepository(BaseRepository[Document]):
             source_types=source_types,
         )
         result = await self.session.execute(stmt)
-        return [(row[0], float(row[1] or 0.0)) for row in result.all()]
+        return [
+            (row[0], float(row[1] or 0.0), str(row[2]) if row[2] else None)
+            for row in result.all()
+        ]
 
     async def count_search_documents(
         self,
@@ -357,12 +408,60 @@ class DocumentRepository(BaseRepository[Document]):
                     continue
             if uidvalidity is not None:
                 stored_validity = meta.get("imap_uidvalidity")
-                if stored_validity is not None and int(stored_validity) != int(
-                    uidvalidity
-                ):
+                if stored_validity is None:
+                    # Legacy document with unknown epoch: retain until a
+                    # successful fetch stamps a trustworthy UIDVALIDITY.
+                    continue
+                try:
+                    same_epoch = int(stored_validity) == int(uidvalidity)
+                except (TypeError, ValueError):
+                    same_epoch = False
+                if not same_epoch:
                     # Different UIDVALIDITY epoch — do not delete across renumbering.
                     continue
             if imap_uid in present:
+                continue
+            document.is_deleted = True
+            document.sync_status = "deleted"
+            deleted += 1
+        if deleted:
+            await self.session.flush()
+        return deleted
+
+    async def mark_deleted_missing_email_attachments(
+        self,
+        *,
+        connector_id: UUID,
+        imap_uid: str,
+        mailbox: str,
+        uidvalidity: int,
+        present_external_ids: Sequence[str],
+    ) -> int:
+        """Delete stale attachment rows after one message was fetched successfully.
+
+        This reconciliation is intentionally message-scoped. A failed or skipped
+        body fetch never calls it, so existing attachment indexes are retained.
+        """
+        present = {str(item) for item in present_external_ids}
+        stmt = select(Document).where(
+            Document.connector_id == connector_id,
+            Document.is_deleted.is_(False),
+        )
+        result = await self.session.execute(stmt)
+        deleted = 0
+        for document in result.scalars().all():
+            meta = document.metadata_json or {}
+            if str(meta.get("source_kind") or "") != "email_attachment":
+                continue
+            if str(meta.get("imap_uid") or "") != str(imap_uid):
+                continue
+            if str(meta.get("imap_mailbox") or "") != mailbox:
+                continue
+            try:
+                same_epoch = int(meta.get("imap_uidvalidity")) == int(uidvalidity)
+            except (TypeError, ValueError):
+                same_epoch = False
+            if not same_epoch or str(document.external_id) in present:
                 continue
             document.is_deleted = True
             document.sync_status = "deleted"
@@ -721,6 +820,7 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         business_domains: Sequence[str] | None = None,
         source_types: Sequence[str] | None = None,
         parse_status: str | None = "indexed",
+        embedding_fingerprint: str | None = None,
     ) -> list[tuple[DocumentChunk, float]]:
         from ...core.config import settings as runtime_settings
 
@@ -732,7 +832,13 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             probes = int(runtime_settings.PGVECTOR_IVFFLAT_PROBES)
             await self.session.execute(text(f"SET LOCAL ivfflat.probes = {probes}"))
 
-        distance = DocumentChunk.embedding.cosine_distance(embedding).label("distance")
+        distance_expression = DocumentChunk.embedding.cosine_distance(embedding)
+        if selective:
+            # Deliberately break the ANN operator-ordering match. PostgreSQL must
+            # distance-sort the already scoped candidates instead of probing the
+            # corpus-wide IVFFlat index and filtering afterward.
+            distance_expression = distance_expression + literal_column("0.0")
+        distance = distance_expression.label("distance")
         stmt = (
             select(DocumentChunk, distance)
             .join(DocumentChunk.document)
@@ -746,6 +852,11 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
         )
         if document_ids:
             stmt = stmt.where(DocumentChunk.document_id.in_(list(document_ids)))
+        if embedding_fingerprint:
+            stmt = stmt.where(
+                DocumentChunk.metadata_json["embedding_fingerprint"].astext
+                == embedding_fingerprint
+            )
         stmt = self._apply_chunk_document_filters(
             stmt,
             connector_ids=connector_ids,
@@ -787,18 +898,20 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
             return []
 
         vector = self._chunk_tsvector()
-        tsquery = func.plainto_tsquery(LEXICAL_REGCONFIG, " ".join(normalized_terms))
+        lexical_rank, lexical_match = self._lexical_rank_and_match(
+            vector, normalized_terms
+        )
         identifier_hit = self._identifier_hit(normalized_terms)
-        rank = (
-            func.ts_rank_cd(vector, tsquery) + case((identifier_hit, 1.0), else_=0.0)
-        ).label("lexical_rank")
+        rank = (lexical_rank + case((identifier_hit, 1.0), else_=0.0)).label(
+            "lexical_rank"
+        )
         stmt = (
             select(DocumentChunk, rank)
             .join(DocumentChunk.document)
             .options(contains_eager(DocumentChunk.document))
             .where(
                 DocumentRepository.visibility_clause(auth),
-                or_(vector.bool_op("@@")(tsquery), identifier_hit),
+                or_(lexical_match, identifier_hit),
             )
             .order_by(rank.desc(), DocumentChunk.chunk_index.asc())
             .limit(limit)
@@ -822,17 +935,35 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
 
     @staticmethod
     def _chunk_tsvector():
-        text = func.concat_ws(
-            " ",
-            func.coalesce(DocumentChunk.content, ""),
-            func.coalesce(DocumentChunk.section_title, ""),
-            func.coalesce(DocumentChunk.heading_path, ""),
-            func.coalesce(Document.file_name, ""),
-            func.coalesce(Document.file_path, ""),
-            func.coalesce(Document.document_type, ""),
-            func.coalesce(Document.business_domain, ""),
+        config = literal_column(f"'{LEXICAL_REGCONFIG}'::regconfig")
+        empty = literal_column("''")
+        content = func.setweight(
+            func.to_tsvector(config, func.coalesce(DocumentChunk.content, empty)),
+            literal_column("'A'"),
         )
-        return func.to_tsvector(LEXICAL_REGCONFIG, text)
+        headings = func.setweight(
+            func.to_tsvector(
+                config,
+                func.coalesce(DocumentChunk.section_title, empty)
+                + literal_column("' '")
+                + func.coalesce(DocumentChunk.heading_path, empty),
+            ),
+            literal_column("'B'"),
+        )
+        return content.op("||")(headings)
+
+    @staticmethod
+    def _lexical_rank_and_match(vector, terms: Sequence[str]):
+        """OR-match safe term queries and sum their cover-density ranks."""
+        config = literal_column(f"'{LEXICAL_REGCONFIG}'::regconfig")
+        queries = [func.plainto_tsquery(config, term) for term in terms if term]
+        if not queries:
+            return literal_column("0.0"), Document.id.is_(None)
+        ranks = [func.ts_rank_cd(vector, query) for query in queries]
+        rank = ranks[0]
+        for item in ranks[1:]:
+            rank = rank + item
+        return rank, or_(*(vector.bool_op("@@")(query) for query in queries))
 
     @staticmethod
     def _identifier_hit(terms: Sequence[str]):
@@ -867,15 +998,14 @@ class DocumentChunkRepository(BaseRepository[DocumentChunk]):
     @classmethod
     def _best_chunk_rank_subquery(cls, terms: Sequence[str]):
         vector = cls._chunk_tsvector()
-        tsquery = func.plainto_tsquery(LEXICAL_REGCONFIG, " ".join(terms))
-        rank = func.ts_rank_cd(vector, tsquery)
+        rank, lexical_match = cls._lexical_rank_and_match(vector, terms)
         return (
             select(
                 DocumentChunk.document_id.label("document_id"),
                 func.max(rank).label("lexical_rank"),
             )
             .join(DocumentChunk.document)
-            .where(vector.bool_op("@@")(tsquery))
+            .where(lexical_match)
             .group_by(DocumentChunk.document_id)
             .subquery()
         )

@@ -9,6 +9,7 @@ from ..core.security import AuthContext
 from ..db.repo.document import DocumentChunkRepository
 from ..schemas.chat_schema import RetrievalFilters
 from .reranker import ContextReranker
+from .scope import RetrievalScope
 from .stores import KeywordSearchStore, PgVectorStore, RetrievalCandidate
 
 # Standard RRF constant. Higher k → flatter contribution from deep ranks.
@@ -73,19 +74,24 @@ class HybridRetriever:
         keyword_limit = keyword_top_k or settings.RAG_KEYWORD_TOP_K
         rerank_limit = rerank_top_k or settings.RAG_RERANK_TOP_K
         final_limit = final_top_n or settings.RAG_FINAL_TOP_N
-        semantic = await self.vector_store.search(
-            embedding=query_embedding,
+        scope = RetrievalScope.resolve(
             auth=auth,
-            limit=vector_limit,
             document_ids=document_ids,
             filters=filters,
         )
+        semantic = (
+            await self.vector_store.search(
+                embedding=query_embedding,
+                scope=scope,
+                limit=vector_limit,
+            )
+            if query_embedding
+            else []
+        )
         keyword = await self.keyword_store.search(
             terms=keyword_terms,
-            auth=auth,
+            scope=scope,
             limit=keyword_limit,
-            document_ids=document_ids,
-            filters=filters,
         )
         merged = merge_candidates_rrf(semantic, keyword)
         merged_count = len(merged)
@@ -109,7 +115,7 @@ class HybridRetriever:
 
         returned = reranked[:final_limit]
         return returned, HybridRetrievalDebug(
-            vector_top_k=vector_limit,
+            vector_top_k=vector_limit if query_embedding else 0,
             keyword_top_k=keyword_limit,
             rerank_top_k=rerank_limit,
             final_top_n=final_limit,
@@ -154,7 +160,10 @@ class HybridRetriever:
                 )
                 return reranked, len(reranked), "none"
             fallback = "heuristic" if status.using_fallback else "unavailable"
-            if fallback == "unavailable" and settings.RAG_TRUE_RERANK_FALLBACK != "heuristic":
+            if (
+                fallback == "unavailable"
+                and settings.RAG_TRUE_RERANK_FALLBACK != "heuristic"
+            ):
                 return [], 0, fallback
         else:
             fallback = "disabled"
@@ -164,7 +173,11 @@ class HybridRetriever:
             keyword_terms=keyword_terms,
             candidates=candidates,
         )
-        return heuristic, 0, fallback if settings.RAG_TRUE_RERANK_ENABLED else "disabled"
+        return (
+            heuristic,
+            0,
+            fallback if settings.RAG_TRUE_RERANK_ENABLED else "disabled",
+        )
 
 
 def merge_candidates_rrf(

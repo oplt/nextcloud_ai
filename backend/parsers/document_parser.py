@@ -194,15 +194,37 @@ def _parse_document_bytes_sync(
 def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
     pages: list[ParsedPage] = []
     empty_page_numbers: list[int] = []
+    extraction_errors: list[dict[str, object]] = []
     physical_page_count = 0
     with pdfplumber.open(io.BytesIO(payload)) as pdf:
         physical_page_count = len(pdf.pages)
         for index, page in enumerate(pdf.pages, start=1):
             page_parts: list[str] = []
-            text = (page.extract_text() or "").strip()
+            try:
+                text = (page.extract_text() or "").strip()
+            except Exception as exc:
+                text = ""
+                extraction_errors.append(
+                    {
+                        "page_number": index,
+                        "stage": "text",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
             if text:
                 page_parts.append(text)
-            for table in page.extract_tables() or []:
+            try:
+                tables = page.extract_tables() or []
+            except Exception as exc:
+                tables = []
+                extraction_errors.append(
+                    {
+                        "page_number": index,
+                        "stage": "tables",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                )
+            for table in tables:
                 table_text = _format_table(table)
                 if not table_text:
                     continue
@@ -216,10 +238,12 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
             # Always keep a slot for every physical page (incl. blank/scanned).
             pages.append(ParsedPage(page_number=index, text=page_text))
 
-    combined = "\n\n".join(page.text for page in pages if page.text).strip()
+    # Preserve the two-character separator for every physical page boundary so
+    # downstream global offsets map back to this exact combined representation.
+    combined = "\n\n".join(page.text for page in pages)
     nonempty = sum(1 for page in pages if page.text.strip())
     needs_ocr = physical_page_count > 0 and nonempty == 0
-    incomplete = bool(empty_page_numbers) and nonempty > 0
+    incomplete = bool(empty_page_numbers or extraction_errors) and nonempty > 0
     return ParsedDocument(
         text=combined,
         pages=pages,
@@ -227,6 +251,7 @@ def parse_pdf_bytes(payload: bytes) -> ParsedDocument:
             "page_count": physical_page_count,
             "nonempty_page_count": nonempty,
             "empty_page_numbers": empty_page_numbers,
+            "extraction_errors": extraction_errors,
             "needs_ocr": needs_ocr,
             "incomplete_extraction": incomplete,
             "parser": "pdfplumber",
@@ -252,9 +277,7 @@ def parse_docx_bytes(payload: bytes) -> ParsedDocument:
         paragraph_text = item.text.strip()
         if not paragraph_text:
             continue
-        style_name = (
-            item.style.name if item.style is not None else ""
-        ).lower()
+        style_name = (item.style.name if item.style is not None else "").lower()
         if style_name.startswith("heading"):
             level = _heading_level_from_style(style_name)
             heading_count += 1

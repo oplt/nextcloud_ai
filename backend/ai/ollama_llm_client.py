@@ -172,6 +172,7 @@ class OllamaLLMClient:
                 response = await self._client.post(
                     f"{self.base_url}/api/generate",
                     json={"model": self.model, "prompt": prompt, "stream": False},
+                    timeout=min(self._timeout, remaining),
                 )
                 try:
                     response.raise_for_status()
@@ -180,7 +181,12 @@ class OllamaLLMClient:
                         f"Ollama HTTP {exc.response.status_code}",
                         status_code=exc.response.status_code,
                     ) from exc
-                payload = response.json()
+                try:
+                    payload = response.json()
+                except ValueError as exc:
+                    raise LLMValidationError(
+                        "Ollama response was not valid JSON"
+                    ) from exc
                 if not isinstance(payload, dict):
                     raise LLMValidationError("Ollama response was not a JSON object")
                 response_text = str(payload.get("response") or "").strip()

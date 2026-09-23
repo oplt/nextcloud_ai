@@ -1,0 +1,14 @@
+.git
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+**/.venv
+**/node_modules
+frontend/node_modules
+frontend/dist
+.phase1-compose.generated.yml
+*.md
+agent-transcripts
+.next

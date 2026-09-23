@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 
 from ..ai.citations import build_snippet
 from ..schemas.chat_schema import ChatSource
+from .claim_support import verify_cited_claims
 
 _CITATION_RE = re.compile(r"\[(?:source\s*)?(\d+)\]", flags=re.IGNORECASE)
 _YEAR_RE = re.compile(r"\b(?:19|20)\d{2}\b")
@@ -31,7 +32,9 @@ _DATE_RE = re.compile(
     r"\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b|\b(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\s+\d{1,2},?\s+\d{4}\b",
     flags=re.IGNORECASE,
 )
-_ENTITY_RE = re.compile(r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}|[A-Z]{2,}[-_/]?[A-Z0-9]{2,})\b")
+_ENTITY_RE = re.compile(
+    r"\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,3}|[A-Z]{2,}[-_/]?[A-Z0-9]{2,})\b"
+)
 _EVIDENCE_STOPWORDS = frozenset(
     {
         "the",
@@ -122,9 +125,7 @@ def filter_sources_to_citations(
     filtered = [sources[idx - 1] for idx in cited_indexes]
     normalized = _CITATION_RE.sub(
         lambda m: (
-            f"[{remapped[int(m.group(1))]}]"
-            if int(m.group(1)) in remapped
-            else ""
+            f"[{remapped[int(m.group(1))]}]" if int(m.group(1)) in remapped else ""
         ),
         answer,
     )
@@ -157,7 +158,9 @@ def select_supporting_sources(
         source_terms = evidence_terms(source.content or source.snippet or "")
         score = len(answer_terms & source_terms)
         if markers:
-            compact = re.sub(r"\s+", "", (source.content or source.snippet or "").lower())
+            compact = re.sub(
+                r"\s+", "", (source.content or source.snippet or "").lower()
+            )
             score += 5 * sum(1 for marker in markers if marker in compact)
         scored.append((score, source))
     if not scored:
@@ -180,26 +183,22 @@ def answer_is_supported(
 
     years = requested_years(question)
     if years:
-        for source in cited_sources:
-            ok = source_supports_years(source, years)
-            checks.append(
-                ClaimCheck(kind="year", value=",".join(str(y) for y in years), supported=ok)
+        years_ok = any(source_supports_years(source, years) for source in cited_sources)
+        checks.append(
+            ClaimCheck(
+                kind="year",
+                value=",".join(str(year) for year in years),
+                supported=years_ok,
             )
-            if not ok:
-                return False, checks
-
-    for kind, value in structured_claims(answer):
-        ok = any(claim_in_source(value, source) for source in cited_sources)
-        checks.append(ClaimCheck(kind=kind, value=value, supported=ok))
-        if not ok:
+        )
+        if not years_ok:
             return False, checks
 
-    span_ok = all(
-        source_supports_answer_text(answer=answer, source=source)
-        for source in cited_sources
+    checks.extend(
+        ClaimCheck(kind=kind, value=value, supported=supported)
+        for kind, value, supported in verify_cited_claims(answer, cited_sources)
     )
-    checks.append(ClaimCheck(kind="span", value="overlap", supported=span_ok))
-    return span_ok, checks
+    return all(check.supported for check in checks), checks
 
 
 def verify_and_normalize_answer(
@@ -215,41 +214,45 @@ def verify_and_normalize_answer(
     if strip_question_echo:
         working = strip_leading_question_echo(question=question, answer=working)
 
+    citation_indexes = [int(match.group(1)) for match in _CITATION_RE.finditer(working)]
+    invalid_citations = [
+        index for index in citation_indexes if index < 1 or index > len(sources)
+    ]
+    if invalid_citations:
+        strict = unverified_answer(question)
+        details.update(
+            {
+                "invalid_citation_ids": invalid_citations,
+                "strict_answer_would_be": strict,
+            }
+        )
+        if shadow_mode:
+            details["shadow_kept_raw"] = True
+            return EvidenceVerification(
+                answer=working,
+                sources=[],
+                result="invalid_citations",
+                details=details,
+            )
+        return EvidenceVerification(
+            answer=strict,
+            sources=[],
+            result="invalid_citations",
+            details=details,
+        )
+
     normalized, cited = filter_sources_to_citations(working, sources)
 
     if is_insufficient_answer(normalized):
-        supporting = cited or select_supporting_sources(
-            question=question, answer=normalized, sources=sources, max_sources=4
-        )
         return EvidenceVerification(
             answer=normalized,
-            sources=supporting,
+            sources=cited,
             result="insufficient_answer",
             support_check_passed=True,
             details=details,
         )
 
     if not cited:
-        supporting = select_supporting_sources(
-            question=question, answer=normalized, sources=sources
-        )
-        if supporting:
-            ok, checks = answer_is_supported(
-                question=question, answer=normalized, cited_sources=supporting
-            )
-            if ok:
-                return EvidenceVerification(
-                    answer=append_citations(normalized, len(supporting)),
-                    sources=supporting,
-                    result="auto_cited",
-                    support_check_passed=True,
-                    claim_checks=checks,
-                    details={
-                        **details,
-                        "auto_citation_applied": True,
-                        "auto_citation_count": len(supporting),
-                    },
-                )
         strict = unverified_answer(question)
         details["strict_answer_would_be"] = strict
         if shadow_mode:
@@ -433,7 +436,9 @@ def extract_claim_markers(text: str) -> set[str]:
             markers.add(value)
         else:
             markers.add(re.sub(r"\s+", "", value.lower()))
-    for match in re.finditer(r"\b(?:inv|invoice)[- ]?[a-z0-9\-./]+\b", (text or "").lower()):
+    for match in re.finditer(
+        r"\b(?:inv|invoice)[- ]?[a-z0-9\-./]+\b", (text or "").lower()
+    ):
         markers.add(re.sub(r"\s+", "", match.group(0)))
     for match in re.finditer(r"\b\d{4,}\b", text or ""):
         markers.add(match.group(0))
@@ -468,7 +473,9 @@ def source_supports_answer_text(*, answer: str, source: ChatSource) -> bool:
     markers = extract_claim_markers(answer)
     if markers:
         compact_source = re.sub(r"\s+", "", source_text)
-        if not any(marker in compact_source or marker in source_text for marker in markers):
+        if not any(
+            marker in compact_source or marker in source_text for marker in markers
+        ):
             return False
     answer_terms = evidence_terms(answer)
     if not answer_terms:

@@ -20,6 +20,8 @@ _IDENT_RE = re.compile(
 
 # Shared preprocessor id — query and document paths must use the same value.
 EMBEDDING_PREPROCESSOR_ID = "embed-input-v2"
+PARSER_CONTRACT_ID = "document-parser-v2"
+CHUNKER_CONTRACT_ID = "title-token-v2"
 DEFAULT_MAX_INPUT_CHARS = 24_000
 DEFAULT_BATCH_MAX_CHARS = 96_000
 
@@ -36,25 +38,37 @@ class EmbeddingFingerprint:
     preprocessor: str
     parser: str
     chunker: str
+    model_revision: str = "unversioned"
+    tokenizer: str = "conservative-unicode-v1"
+
+    def to_dict(self) -> dict[str, str | int]:
+        return {
+            "provider": self.provider,
+            "model": self.model,
+            "model_revision": self.model_revision,
+            "dimension": self.dimension,
+            "preprocessor": self.preprocessor,
+            "tokenizer": self.tokenizer,
+            "parser": self.parser,
+            "chunker": self.chunker,
+            "digest": self.digest(),
+        }
 
     def digest(self) -> str:
         payload = (
             f"{self.provider}|{self.model}|{self.dimension}|"
-            f"{self.preprocessor}|{self.parser}|{self.chunker}"
+            f"{self.model_revision}|{self.preprocessor}|{self.tokenizer}|"
+            f"{self.parser}|{self.chunker}"
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
 
     def compatible_with(self, other: "EmbeddingFingerprint") -> bool:
-        """Same vector space only when provider/model/dim/preprocessor match.
+        """Same reusable artifact only when the complete contract matches.
 
-        Matching dimension alone is not enough — do not mix model spaces.
+        Parser/chunker changes invalidate stored chunk vectors even if the
+        mathematical model space itself is unchanged.
         """
-        return (
-            self.provider == other.provider
-            and self.model == other.model
-            and self.dimension == other.dimension
-            and self.preprocessor == other.preprocessor
-        )
+        return self == other
 
 
 @dataclass(slots=True)
@@ -81,13 +95,11 @@ class EmbeddingCompatStatus:
 
 def active_embedding_fingerprint(
     *,
-    parser: str = "document_parser",
-    chunker: str = "title-token-v2",
+    parser: str = PARSER_CONTRACT_ID,
+    chunker: str = CHUNKER_CONTRACT_ID,
 ) -> EmbeddingFingerprint:
     provider = settings.effective_embedding_provider
-    model = (
-        settings.OLLAMA_EMBEDDING_MODEL if provider == "ollama" else "deterministic"
-    )
+    model = settings.OLLAMA_EMBEDDING_MODEL if provider == "ollama" else "deterministic"
     return EmbeddingFingerprint(
         provider=provider or "unknown",
         model=model,
@@ -95,6 +107,8 @@ def active_embedding_fingerprint(
         preprocessor=EMBEDDING_PREPROCESSOR_ID,
         parser=parser,
         chunker=chunker,
+        model_revision=str(settings.OLLAMA_EMBEDDING_MODEL_REVISION),
+        tokenizer=str(settings.EMBEDDING_TOKENIZER_ID),
     )
 
 
@@ -110,11 +124,19 @@ def validate_embedding_vector(
         raise EmbeddingValidationError(
             f"embedding dimension mismatch: expected {expected_dim}, got {len(vector)}"
         )
-    values = [float(v) for v in vector]
+    try:
+        values = [float(v) for v in vector]
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise EmbeddingValidationError(
+            "embedding contains a non-numeric value"
+        ) from exc
     if not all(math.isfinite(v) for v in values):
         raise EmbeddingValidationError("embedding contains non-finite values")
-    if not allow_zero and all(v == 0.0 for v in values):
-        raise EmbeddingValidationError("embedding is an all-zero vector")
+    norm = math.hypot(*values)
+    if not math.isfinite(norm):
+        raise EmbeddingValidationError("embedding has a non-finite norm")
+    if not allow_zero and norm <= 1e-12:
+        raise EmbeddingValidationError("embedding has no usable norm")
     return values
 
 
@@ -138,9 +160,7 @@ def cache_key_for_embedding(text: str, fingerprint: EmbeddingFingerprint) -> str
     return f"{fingerprint.digest()}:{body}"
 
 
-def prepare_embedding_input(
-    content: str, *, max_chars: int | None = None
-) -> str:
+def prepare_embedding_input(content: str, *, max_chars: int | None = None) -> str:
     """Normalize text for embedding without destroying identifiers.
 
     Lexical search uses original chunk content. Embedding input may lightly
@@ -150,34 +170,48 @@ def prepare_embedding_input(
     """
     normalized = re.sub(r"[ \t]+", " ", content)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized).strip()
-    if max_chars is not None and len(normalized) > max_chars:
+    input_bytes = len(normalized.encode("utf-8"))
+    if max_chars is not None and input_bytes > max_chars:
         raise EmbeddingValidationError(
-            f"embedding input length {len(normalized)} exceeds max_chars={max_chars}; "
+            f"embedding input size {input_bytes} bytes exceeds max_chars={max_chars}; "
             "split before embed"
         )
     return normalized
 
 
-def split_oversized_embedding_input(
-    content: str, *, max_chars: int
-) -> list[str]:
-    """Explicit split for model context limits (character budget)."""
+def split_oversized_embedding_input(content: str, *, max_chars: int) -> list[str]:
+    """Explicit split for model context limits (UTF-8 byte budget)."""
+    if max_chars < 1:
+        raise ValueError("max_chars must be >= 1")
     prepared = prepare_embedding_input(content)
-    if len(prepared) <= max_chars:
+    if len(prepared.encode("utf-8")) <= max_chars:
         return [prepared]
     parts: list[str] = []
     start = 0
     while start < len(prepared):
-        end = min(start + max_chars, len(prepared))
+        end = start
+        used_bytes = 0
+        while end < len(prepared):
+            char_bytes = len(prepared[end].encode("utf-8"))
+            if used_bytes + char_bytes > max_chars:
+                break
+            used_bytes += char_bytes
+            end += 1
+        if end == start:
+            raise EmbeddingValidationError(
+                "max_chars is smaller than one UTF-8 code point"
+            )
         if end < len(prepared):
             split_at = prepared.rfind(" ", start, end)
-            if split_at > start + max_chars // 2:
+            if split_at > start:
                 end = split_at
         part = prepared[start:end].strip()
         if part:
             parts.append(part)
-        start = end if end > start else start + max_chars
-    return parts or [prepared[:max_chars]]
+        start = end
+        while start < len(prepared) and prepared[start].isspace():
+            start += 1
+    return parts
 
 
 def iter_embedding_batches(
@@ -192,12 +226,19 @@ def iter_embedding_batches(
     """
     if max_items < 1:
         raise ValueError("max_items must be >= 1")
+    if max_chars < 1:
+        raise ValueError("max_chars must be >= 1")
     batches: list[tuple[int, list[str]]] = []
     batch: list[str] = []
     batch_chars = 0
     start_index = 0
     for index, text in enumerate(texts):
-        text_len = len(text)
+        text_len = len(text.encode("utf-8"))
+        if text_len > max_chars:
+            raise EmbeddingValidationError(
+                f"embedding batch item uses {text_len} UTF-8 bytes, "
+                f"exceeding max_chars={max_chars}; split before batching"
+            )
         would_overflow = batch and (
             len(batch) >= max_items or batch_chars + text_len > max_chars
         )

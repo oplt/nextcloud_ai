@@ -123,7 +123,9 @@ def chunk_overlap_score(terms: Sequence[str], text: str) -> float:
     if not query or not text:
         return 0.0
     haystack = set(tokenize(text))
-    hits = sum(1 for term in query if term.lower() in haystack or term.lower() in text.lower())
+    hits = sum(
+        1 for term in query if term.lower() in haystack or term.lower() in text.lower()
+    )
     if hits <= 0:
         return 0.0
     return hits / len(query)

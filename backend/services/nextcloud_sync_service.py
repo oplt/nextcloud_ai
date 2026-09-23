@@ -14,8 +14,10 @@ from ..db.models import Connector, Document, SyncJob
 from ..db.repo.connector import ConnectorRepository
 from ..db.repo.document import DocumentRepository
 from ..db.session import AsyncSessionLocal
+from ..ingestion.index_versions import StaleIndexGenerationError
 from .job_lifecycle import JobLifecycleService
 from .audit_service import AuditService
+from .bounded_work import map_bounded
 from .connector_service import ConnectorService
 from .indexing_service import DocumentIngestionService
 
@@ -67,45 +69,31 @@ class NextcloudConnectorSyncService:
 
             concurrency = max(1, settings.NEXTCLOUD_SYNC_INGEST_CONCURRENCY)
             progress_every = max(1, settings.NEXTCLOUD_SYNC_PROGRESS_EVERY)
-            queue: asyncio.Queue[object | None] = asyncio.Queue()
-            for item in items:
-                queue.put_nowait(item)
-            for _ in range(concurrency):
-                queue.put_nowait(None)
-
             progress_lock = asyncio.Lock()
-            results: list[dict] = []
 
-            async def worker() -> None:
+            async def process_item(item) -> dict:
                 nonlocal discovered
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        queue.task_done()
-                        return
-                    try:
-                        # Each item uses its own DB session inside _process_item.
-                        outcome = await self._process_item(
-                            connector_id=connector.id,
-                            item=item,
-                            sync_service=sync_service,
-                            full_reindex=full_reindex,
-                        )
-                        async with progress_lock:
-                            results.append(outcome)
-                            discovered += 1
-                            if job is not None and (
-                                discovered % progress_every == 0
-                                or discovered == len(items)
-                            ):
-                                JobLifecycleService.advance(job, discovered)
-                                await self.session.commit()
-                    finally:
-                        queue.task_done()
+                # Each item uses its own DB session inside _process_item.
+                outcome = await self._process_item(
+                    connector_id=connector.id,
+                    item=item,
+                    sync_service=sync_service,
+                    full_reindex=full_reindex,
+                )
+                async with progress_lock:
+                    discovered += 1
+                    if job is not None and (
+                        discovered % progress_every == 0 or discovered == len(items)
+                    ):
+                        JobLifecycleService.advance(job, discovered)
+                        await self.session.commit()
+                return outcome
 
-            workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-            await queue.join()
-            await asyncio.gather(*workers)
+            results = await map_bounded(
+                items,
+                process_item,
+                concurrency=concurrency,
+            )
 
             for outcome in results:
                 if outcome["status"] == "indexed":
@@ -203,6 +191,13 @@ class NextcloudConnectorSyncService:
                     document_repo=document_repo,
                     item=item,
                 )
+                if (
+                    document.modified_at is not None
+                    and item.node.last_modified is not None
+                    and item.node.last_modified < document.modified_at
+                ):
+                    await task_session.commit()
+                    return {"status": "skipped"}
                 should_reindex = (
                     full_reindex
                     or self._document_needs_reindex(
@@ -237,6 +232,13 @@ class NextcloudConnectorSyncService:
                             "parse_status": parse_status,
                         }
                     return {"status": "indexed"}
+                except StaleIndexGenerationError:
+                    await task_session.rollback()
+                    logger.info(
+                        "Skipped stale Nextcloud index publication document_id=%s",
+                        document.id,
+                    )
+                    return {"status": "skipped"}
                 except Exception as exc:
                     error_message = str(exc)
                     document_id = document.id
@@ -248,10 +250,9 @@ class NextcloudConnectorSyncService:
                         fail_repo = DocumentRepository(fail_session)
                         failed_doc = await fail_repo.get(document_id)
                         if failed_doc is not None:
-                            failed_doc.sync_status = "error"
-                            failed_doc.sync_error = error_message
-                            failed_doc.parse_status = "failed"
-                            failed_doc.parse_error = error_message
+                            self._mark_document_ingest_failure(
+                                failed_doc, error_message
+                            )
                             await fail_session.commit()
                     return {
                         "status": "failed",
@@ -279,6 +280,30 @@ class NextcloudConnectorSyncService:
                 },
             }
 
+    @staticmethod
+    def _mark_document_ingest_failure(document: Document, error_message: str) -> None:
+        document.sync_status = "error"
+        document.sync_error = error_message
+        has_published_index = int(
+            document.published_generation or 0
+        ) > 0 and document.parse_status in {"indexed", "lexical_ready"}
+        if not has_published_index:
+            document.parse_status = "failed"
+            document.parse_error = error_message
+        document.ingestion_events_json = [
+            *(document.ingestion_events_json or []),
+            {
+                "stage": "sync_ingest",
+                "status": (
+                    "failed_preserving_published_index"
+                    if has_published_index
+                    else "failed"
+                ),
+                "error": error_message,
+                "published_generation": document.published_generation,
+            },
+        ][-50:]
+
     async def _upsert_document(
         self,
         *,
@@ -287,7 +312,7 @@ class NextcloudConnectorSyncService:
         item,
     ) -> tuple[Document, str | None]:
         external_id = item.node.file_id or item.node.path
-        document = await document_repo.get_by_connector_and_external_id(
+        document = await document_repo.get_by_connector_and_external_id_for_update(
             connector.id, external_id
         )
         previous_version_tag: str | None = None
@@ -301,6 +326,16 @@ class NextcloudConnectorSyncService:
             await document_repo.add(document, flush=True)
         else:
             previous_version_tag = document.version_tag
+            if (
+                document.modified_at is not None
+                and item.node.last_modified is not None
+                and item.node.last_modified < document.modified_at
+            ):
+                # An overlapping older snapshot must not replace a newer source
+                # revision. Returning the incoming ETag as "previous" makes the
+                # caller treat this stale item as unchanged.
+                document.last_seen_at = datetime.now(timezone.utc)
+                return document, item.node.etag
 
         document.file_path = item.node.path
         document.file_name = item.node.path.split("/")[-1]

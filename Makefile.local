@@ -1,4 +1,4 @@
-.PHONY: local-bootstrap local-install-backend local-install-frontend local-db-upgrade local-db-prepare local-db-revision local-backend local-frontend local-worker local-scheduler local-seed-admin local-redis local-ollama local-dev local-open-nextcloud local-wait-nextcloud local-sync-nc-bridge local-backend-test local-frontend-lint local-frontend-build local-check
+.PHONY: local-bootstrap local-install-backend local-provision-reranker local-install-frontend local-db-upgrade local-db-prepare local-db-revision local-backend local-frontend local-worker local-scheduler local-seed-admin local-redis local-ollama local-dev local-open-nextcloud local-wait-nextcloud local-sync-nc-bridge local-backend-test local-frontend-lint local-frontend-build local-check
 
 PYTHON ?= python3.12
 PROJECT_DIR := $(shell pwd)
@@ -12,6 +12,7 @@ NEXTCLOUD_HEALTH_URL ?= http://localhost:8080/status.php
 NEXTCLOUD_OPEN_URL ?= $(NEXTCLOUD_URL)
 NEXTCLOUD_WAIT_SEC ?= 25
 BROWSER_OPEN ?= python3 -m webbrowser -t
+LOCAL_PROVISION_RERANK ?= 1
 
 local-bootstrap:
 	@test -f .env || cp .env.example .env
@@ -25,8 +26,14 @@ local-install-backend:
 	fi
 	$(VENV)/bin/pip install --upgrade pip
 	$(VENV)/bin/pip install -e "./backend[dev,rerank]"
-	@echo "Optional: pre-provision reranker weights with:"
-	@echo "  $(VENV)/bin/python -m backend.scripts.provision_rerank_model"
+	@if [ "$(LOCAL_PROVISION_RERANK)" = "1" ]; then \
+		$(VENV)/bin/python -m backend.scripts.provision_rerank_model; \
+	else \
+		echo "Skipping reranker provisioning; explicit heuristic fallback may be used."; \
+	fi
+
+local-provision-reranker:
+	$(VENV)/bin/python -m backend.scripts.provision_rerank_model --force
 local-install-frontend:
 	@if [ ! -d "$(FRONTEND_DIR)/node_modules" ]; then \
 		echo "Installing frontend dependencies..."; \

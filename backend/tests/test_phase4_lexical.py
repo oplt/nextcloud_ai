@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from sqlalchemy.dialects import postgresql
@@ -48,8 +49,7 @@ def test_catalog_intent_splits_navigation_from_enumeration() -> None:
     assert classify_catalog_intent("list all invoices") == "exhaustive"
     assert DocumentSearchService.is_exhaustive_catalog_query("how many contracts")
     assert (
-        DocumentSearchService.is_document_discovery_query("how many contracts")
-        is False
+        DocumentSearchService.is_document_discovery_query("how many contracts") is False
     )
 
 
@@ -124,6 +124,27 @@ def test_keyword_sql_ranks_before_limit_and_skips_raw_json() -> None:
     assert built.lower().rfind("order by") < built.lower().rfind("limit")
 
 
+def test_weighted_fts_expression_is_indexable_and_terms_match_with_or() -> None:
+    vector = DocumentChunkRepository._chunk_tsvector()
+    rank, match = DocumentChunkRepository._lexical_rank_and_match(
+        vector, ["invoice", "INV-1042"]
+    )
+    vector_sql = str(vector.compile(dialect=postgresql.dialect()))
+    match_sql = str(match.compile(dialect=postgresql.dialect()))
+    rank_sql = str(rank.compile(dialect=postgresql.dialect()))
+    assert "setweight" in vector_sql
+    assert "section_title" in vector_sql
+    assert "file_name" not in vector_sql
+    assert " OR " in match_sql
+    assert rank_sql.count("ts_rank_cd") == 2
+
+    migration = (
+        Path(__file__).resolve().parents[1]
+        / "alembic/versions/e5f6a7b8c9d0_align_weighted_fts_index.py"
+    ).read_text(encoding="utf-8")
+    assert "USING gin ((" in migration
+
+
 def test_content_score_uses_sql_rank_not_chunk_prefix() -> None:
     service = DocumentSearchService.__new__(DocumentSearchService)
     document = SimpleNamespace(
@@ -138,7 +159,6 @@ def test_content_score_uses_sql_rank_not_chunk_prefix() -> None:
     scored = service._score_document(document, ["zeta"], lexical_rank=0.4)
     assert "content" in scored.matched_fields
     assert scored.score >= 0.4
-
 
 
 def test_document_search_sql_limits_documents_not_chunk_rows() -> None:

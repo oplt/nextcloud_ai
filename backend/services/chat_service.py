@@ -13,7 +13,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..ai.citations import build_snippet
 from ..ai.follow_up_classifier import FollowUpClassification
 from ..ai import session_memory as chat_memory
-from ..ai.llm_client import LLMClientFactory, LLMClientProtocol, consume_generation_usage
+from ..ai.llm_client import (
+    LLMClientFactory,
+    LLMClientProtocol,
+    consume_generation_usage,
+)
 from ..ai.prompt_builder import GROUNDED_PROMPT_VERSION, build_grounded_prompt
 from ..ai.ollama_llm_client import LLMTimeoutError
 from ..rag.context_packer import pack_evidence_for_prompt
@@ -27,12 +31,24 @@ from ..rag.evidence_extractor import (
     YEAR_RANGE_RE as _YEAR_RANGE_RE,
 )
 from .query_writer import plan_retrieval_query
+from .chat_completion import (
+    ChatCompletion,
+    document_ids_from_sources,
+    finalize_chat_completion,
+    merge_document_ids,
+)
+from .chat_scope_planner import (
+    build_document_search_answer,
+    parse_document_ids,
+    plan_chat_scope,
+)
 from ..core import observability
 from ..core.config import settings
 from ..core.exceptions import AuthorizationError, NotFoundError
 from ..core.security import AuthContext
 from ..db.models import ChatMessage, ChatSession, DocumentChunk, User
 from ..db.repo.chat import ChatMessageRepository, ChatSessionRepository
+from ..db.repo.chunk_expansion import AuthorizedChunkExpansionRepository
 from ..db.repo.document import DocumentChunkRepository
 from ..schemas.chat_schema import (
     ChatAskRequest,
@@ -42,7 +58,6 @@ from ..schemas.chat_schema import (
     ChatSource,
 )
 from .audit_service import AuditService
-from .document_search_service import DocumentSearchService
 from .retrieval_service import RetrievalService
 
 logger = logging.getLogger(__name__)
@@ -156,7 +171,6 @@ _MONTH_YEAR_RE = re.compile(
     r"Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+(?:19|20)\d{2}\b",
     flags=re.IGNORECASE,
 )
-
 
 
 def _same_question_text(left: str, right: str) -> bool:
@@ -338,7 +352,7 @@ class ChatService:
         return [-1, 1]
 
     @staticmethod
-    def _source_from_chunk(chunk: DocumentChunk, *, score: float) -> ChatSource:
+    def _source_from_chunk(chunk: DocumentChunk, *, ranking_reason: str) -> ChatSource:
         document = chunk.document
         file_name = document.file_name if document is not None else ""
         file_path = document.file_path if document is not None else ""
@@ -352,9 +366,11 @@ class ChatService:
             section_title=chunk.section_title,
             heading_path=chunk.heading_path,
             snippet=build_snippet(content),
-            score=max(0.0, min(0.999, score)),
-            distance=max(0.0, 1.0 - max(0.0, min(0.999, score))),
+            # Expansion is structural, not a calibrated model score.
+            score=0.0,
+            distance=1.0,
             content=content,
+            ranking_reason=ranking_reason,
         )
 
     async def _augment_follow_up_sources_with_neighbors(
@@ -374,27 +390,24 @@ class ChatService:
             return sources
 
         offsets = self._neighbor_offsets_for_question(question)
-        base_score = max((source.score for source in sources), default=0.72)
-        by_doc_chunks: dict[str, list[DocumentChunk]] = {}
+        by_doc_chunks = await AuthorizedChunkExpansionRepository(
+            self.session
+        ).list_grouped(
+            document_ids=[document_id for document_id, _ in preferred_chunk_refs],
+            auth=auth,
+            document_ids_scope=document_ids_scope,
+        )
         existing_ids = {str(source.chunk_id) for source in sources}
         neighbor_sources: list[ChatSource] = []
 
-        chunk_repo = DocumentChunkRepository(self.session)
         for document_id, chunk_id in preferred_chunk_refs:
             doc_key = str(document_id)
-            if doc_key not in by_doc_chunks:
-                by_doc_chunks[doc_key] = await chunk_repo.list_authorized_by_document(
-                    document_id=document_id,
-                    auth=auth,
-                    document_ids_scope=document_ids_scope,
-                    limit=128,
-                )
-            chunks = by_doc_chunks[doc_key]
+            chunks = by_doc_chunks.get(doc_key, [])
             index_by_chunk_id = {str(chunk.id): idx for idx, chunk in enumerate(chunks)}
             anchor_index = index_by_chunk_id.get(str(chunk_id))
             if anchor_index is None:
                 continue
-            for rank, offset in enumerate(offsets, start=1):
+            for offset in offsets:
                 candidate_index = anchor_index + offset
                 if candidate_index < 0 or candidate_index >= len(chunks):
                     continue
@@ -406,7 +419,7 @@ class ChatService:
                 neighbor_sources.append(
                     self._source_from_chunk(
                         candidate,
-                        score=base_score - 0.01 * rank,
+                        ranking_reason="authorized_neighbor_expansion",
                     )
                 )
 
@@ -431,26 +444,24 @@ class ChatService:
             return []
 
         offsets = self._neighbor_offsets_for_question(question)
-        chunk_repo = DocumentChunkRepository(self.session)
-        by_doc_chunks: dict[str, list[DocumentChunk]] = {}
+        by_doc_chunks = await AuthorizedChunkExpansionRepository(
+            self.session
+        ).list_grouped(
+            document_ids=[document_id for document_id, _ in preferred_chunk_refs],
+            auth=auth,
+            document_ids_scope=document_ids_scope,
+        )
         sources: list[ChatSource] = []
         seen_chunk_ids: set[str] = set()
 
         for document_id, chunk_id in preferred_chunk_refs:
             doc_key = str(document_id)
-            if doc_key not in by_doc_chunks:
-                by_doc_chunks[doc_key] = await chunk_repo.list_authorized_by_document(
-                    document_id=document_id,
-                    auth=auth,
-                    document_ids_scope=document_ids_scope,
-                    limit=128,
-                )
-            chunks = by_doc_chunks[doc_key]
+            chunks = by_doc_chunks.get(doc_key, [])
             index_by_chunk_id = {str(chunk.id): idx for idx, chunk in enumerate(chunks)}
             anchor_index = index_by_chunk_id.get(str(chunk_id))
             if anchor_index is None:
                 continue
-            for rank, offset in enumerate(offsets, start=1):
+            for offset in offsets:
                 candidate_index = anchor_index + offset
                 if candidate_index < 0 or candidate_index >= len(chunks):
                     continue
@@ -462,7 +473,7 @@ class ChatService:
                 sources.append(
                     self._source_from_chunk(
                         candidate,
-                        score=max(0.5, 0.86 - 0.04 * rank),
+                        ranking_reason="authorized_neighbor_fallback",
                     )
                 )
 
@@ -484,7 +495,6 @@ class ChatService:
         if not years and not query_terms:
             return sources
 
-        chunk_repo = DocumentChunkRepository(self.session)
         existing_ids = {str(source.chunk_id) for source in sources}
         document_ids: list[UUID] = []
         seen_documents: set[str] = set()
@@ -499,15 +509,16 @@ class ChatService:
             seen_documents.add(document_key)
             document_ids.append(UUID(document_key))
 
+        by_doc_chunks = await AuthorizedChunkExpansionRepository(
+            self.session
+        ).list_grouped(
+            document_ids=document_ids[:3],
+            auth=auth,
+            document_ids_scope=document_ids_scope,
+        )
         boosted_sources: list[tuple[float, ChatSource]] = []
-        base_score = max((source.score for source in sources), default=0.72)
         for document_id in document_ids[:3]:
-            chunks = await chunk_repo.list_authorized_by_document(
-                document_id=document_id,
-                auth=auth,
-                document_ids_scope=document_ids_scope,
-                limit=128,
-            )
+            chunks = by_doc_chunks.get(str(document_id), [])
             document_key = str(document_id)
             anchor_chunk_ids = source_chunk_ids_by_document.get(document_key, set())
             anchor_indexes = {
@@ -520,7 +531,8 @@ class ChatService:
                 if chunk_key in existing_ids:
                     continue
                 source = self._source_from_chunk(
-                    chunk, score=max(0.5, base_score - 0.01)
+                    chunk,
+                    ranking_reason="authorized_same_document_expansion",
                 )
                 relevance = self._same_document_chunk_relevance(
                     question_terms=query_terms,
@@ -554,7 +566,6 @@ class ChatService:
         if not _SUMMARY_QUERY_RE.search(question) or not sources:
             return sources
 
-        chunk_repo = DocumentChunkRepository(self.session)
         existing_by_id = {str(source.chunk_id): source for source in sources}
         document_ids: list[UUID] = []
         seen_documents: set[str] = set()
@@ -565,19 +576,21 @@ class ChatService:
             seen_documents.add(document_key)
             document_ids.append(UUID(document_key))
 
+        by_doc_chunks = await AuthorizedChunkExpansionRepository(
+            self.session
+        ).list_grouped(
+            document_ids=document_ids[:2],
+            auth=auth,
+            document_ids_scope=document_ids_scope,
+        )
         body_sources: list[tuple[float, ChatSource]] = []
         seen_body_ids: set[str] = set()
-        base_score = max((source.score for source in sources), default=0.72)
         for document_id in document_ids[:2]:
-            for chunk in await chunk_repo.list_authorized_by_document(
-                document_id=document_id,
-                auth=auth,
-                document_ids_scope=document_ids_scope,
-                limit=128,
-            ):
+            for chunk in by_doc_chunks.get(str(document_id), []):
                 chunk_key = str(chunk.id)
                 source = existing_by_id.get(chunk_key) or self._source_from_chunk(
-                    chunk, score=max(0.5, base_score - 0.02)
+                    chunk,
+                    ranking_reason="authorized_summary_expansion",
                 )
                 relevance = self._summary_chunk_relevance(source=source, chunk=chunk)
                 if relevance <= 0:
@@ -612,9 +625,7 @@ class ChatService:
             auth=auth,
             document_ids_scope=document_ids_scope,
         )
-        return [
-            source for source in sources if str(source.document_id) in visible
-        ]
+        return [source for source in sources if str(source.document_id) in visible]
 
     @classmethod
     def _employment_fingerprints(cls, source: ChatSource) -> set[tuple[str, str, str]]:
@@ -767,69 +778,7 @@ class ChatService:
     def _parse_active_context_document_ids(
         document_ids: list[str] | None,
     ) -> list[UUID]:
-        parsed_ids: list[UUID] = []
-        seen_ids: set[str] = set()
-        for raw_id in document_ids or []:
-            if not raw_id:
-                continue
-            try:
-                parsed_id = UUID(str(raw_id))
-            except ValueError:
-                continue
-            parsed_key = str(parsed_id)
-            if parsed_key in seen_ids:
-                continue
-            seen_ids.add(parsed_key)
-            parsed_ids.append(parsed_id)
-        return parsed_ids
-
-    @staticmethod
-    def _merge_document_ids(*document_groups: list[UUID]) -> list[UUID]:
-        merged_ids: list[UUID] = []
-        seen_ids: set[str] = set()
-        for group in document_groups:
-            for document_id in group:
-                document_key = str(document_id)
-                if document_key in seen_ids:
-                    continue
-                seen_ids.add(document_key)
-                merged_ids.append(document_id)
-        return merged_ids
-
-    @staticmethod
-    def _extract_document_ids_from_sources(sources: list[ChatSource]) -> list[UUID]:
-        document_ids: list[UUID] = []
-        seen_ids: set[str] = set()
-        for source in sources:
-            document_key = str(source.document_id)
-            if document_key in seen_ids:
-                continue
-            seen_ids.add(document_key)
-            document_ids.append(UUID(document_key))
-        return document_ids
-
-    @staticmethod
-    def _build_active_context_documents(
-        sources: list[ChatSource],
-        active_document_ids: list[UUID],
-    ) -> list[dict[str, str]]:
-        source_documents: dict[str, dict[str, str]] = {}
-        for source in sources:
-            document_key = str(source.document_id)
-            if document_key in source_documents:
-                continue
-            source_documents[document_key] = {
-                "document_id": document_key,
-                "file_name": source.file_name,
-                "file_path": source.file_path,
-            }
-
-        documents: list[dict[str, str]] = []
-        for document_id in active_document_ids:
-            document_payload = source_documents.get(str(document_id))
-            if document_payload is not None:
-                documents.append(document_payload)
-        return documents
+        return parse_document_ids(document_ids)
 
     @staticmethod
     def _build_no_sources_answer() -> str:
@@ -845,20 +794,7 @@ class ChatService:
         *,
         total: int | None = None,
     ) -> str:
-        shown = results[:8]
-        if total is None:
-            header = "I found these matching documents:"
-        elif total > len(shown):
-            header = (
-                f"Matched {total} documents. Showing {len(shown)}. "
-                "This list is not the full set."
-            )
-        else:
-            header = f"Matched {total} documents:"
-        lines = [header]
-        for index, item in enumerate(shown, start=1):
-            lines.append(f"[{index}] {item.file_name} - {item.file_path}")
-        return "\n".join(lines)
+        return build_document_search_answer(results, total=total)
 
     @staticmethod
     def _build_empty_answer() -> str:
@@ -1776,16 +1712,16 @@ class ChatService:
         return markers
 
     @classmethod
-    def _source_supports_answer_text(
-        cls, *, answer: str, source: ChatSource
-    ) -> bool:
-        source_text = f" { (source.content or source.snippet or '').lower() } "
+    def _source_supports_answer_text(cls, *, answer: str, source: ChatSource) -> bool:
+        source_text = f" {(source.content or source.snippet or '').lower()} "
         if not source_text.strip():
             return False
         markers = cls._extract_claim_markers(answer)
         if markers:
             compact_source = re.sub(r"\s+", "", source_text)
-            if not any(marker in compact_source or marker in source_text for marker in markers):
+            if not any(
+                marker in compact_source or marker in source_text for marker in markers
+            ):
                 return False
         answer_terms = cls._evidence_terms(answer)
         if not answer_terms:
@@ -1947,23 +1883,6 @@ class ChatService:
             snap["follow_up_reasons"] = list(follow_up.reasons)
         return snap
 
-    @staticmethod
-    def _compute_answer_confidence(
-        sources: list[ChatSource],
-        verification_summary: dict[str, object] | None,
-    ) -> float | None:
-        if verification_summary is None:
-            return None
-        result = verification_summary.get("result")
-        top = max((s.score for s in sources), default=0.0)
-        if result == "passed":
-            return round(min(0.99, 0.52 + 0.42 * top), 3)
-        if result in {"insufficient_answer", "empty_llm"}:
-            return round(0.15 + 0.25 * top, 3)
-        if result in {"no_sources", "no_inline_citations", "support_check_failed"}:
-            return round(0.12 + 0.2 * top, 3)
-        return round(0.2 + 0.15 * top, 3)
-
     async def _maybe_summarize_session(
         self,
         *,
@@ -2024,22 +1943,10 @@ class ChatService:
                 verification["answer_mode"] = "extractive_summary"
                 return extractive_summary[0], extractive_summary[1], verification
             verification["result"] = "summary_title_only"
-            supporting_sources = cited_sources or self._select_supporting_sources(
-                question=question,
-                answer=normalized_answer,
-                sources=sources,
-                max_sources=4,
-            )
             title_only_answer = (
                 "I could not verify enough article content from the retrieved indexed sources "
                 "to summarize it. The available evidence only identifies the article title or metadata."
             )
-            if supporting_sources:
-                return (
-                    self._append_citations(title_only_answer, len(supporting_sources)),
-                    supporting_sources,
-                    verification,
-                )
             return title_only_answer, [], verification
 
         verified = evidence_check.verify_and_normalize_answer(
@@ -2118,7 +2025,7 @@ class ChatService:
         requested_active_context_document_ids = self._parse_active_context_document_ids(
             request.active_context_document_ids
         )
-        follow_up_document_ids = self._merge_document_ids(
+        follow_up_document_ids = merge_document_ids(
             requested_active_context_document_ids,
             preferred_document_ids,
         )
@@ -2186,152 +2093,38 @@ class ChatService:
                     preferred_document_ids,
                 )
 
-            explicit_document_ids = request.document_ids or None
-            lock_ids = self._parse_active_context_document_ids(
-                [str(x) for x in (mem.get("focus_lock_document_ids") or [])]
+            scope_plan = await plan_chat_scope(
+                session=self.session,
+                auth=auth,
+                request=request,
+                retrieval_query=retrieval_query,
+                is_follow_up=is_follow_up,
+                memory=mem,
+                requested_active_context_document_ids=(
+                    requested_active_context_document_ids
+                ),
+                follow_up_document_ids=follow_up_document_ids,
+                active_context_document_ids=active_context_document_ids,
+                shadow_mode=shadow_mode,
+                trace_id=trace_id,
             )
-            pinned_scope = explicit_document_ids or (lock_ids or None)
-            catalog = DocumentSearchService(self.session)
-
-            if pinned_scope is None:
-                filename_references = DocumentSearchService.extract_file_references(
-                    retrieval_query
-                )
-                if filename_references:
-                    filename_scope_attempted = True
-                    search_results = await catalog.search(
-                        query=" ".join(filename_references),
-                        auth=auth,
-                        filters=request.retrieval_filters,
-                        limit=settings.RAG_FINAL_TOP_N,
-                    )
-                    filename_matches = [
-                        result
-                        for result in search_results
-                        if DocumentSearchService.document_matches_file_reference(
-                            result.document, filename_references
-                        )
-                    ]
-                    filename_scoped_document_ids = [
-                        UUID(str(result.document.id)) for result in filename_matches
-                    ]
-                    if filename_matches:
-                        active_context_document_ids = self._merge_document_ids(
-                            filename_scoped_document_ids,
-                            follow_up_document_ids,
-                        )
-                        retrieval_debug_payload["filename_scope"] = {
-                            "applied": True,
-                            "references": filename_references,
-                            "matched_documents": len(filename_scoped_document_ids),
-                        }
-                    else:
-                        retrieval_debug_payload["filename_scope"] = {
-                            "applied": False,
-                            "references": filename_references,
-                            "matched_documents": 0,
-                        }
-
-            hard_scope = pinned_scope or (filename_scoped_document_ids or None)
-            catalog_answered = False
-            if hard_scope is None and catalog.is_exhaustive_catalog_query(
-                retrieval_query
-            ):
-                catalog_answered = True
-                total = await catalog.count(
-                    query=retrieval_query,
-                    auth=auth,
-                    filters=request.retrieval_filters,
-                )
-                search_results = await catalog.search(
-                    query=retrieval_query,
-                    auth=auth,
-                    filters=request.retrieval_filters,
-                    limit=settings.RAG_FINAL_TOP_N,
-                )
-                document_results = [
-                    ChatDocumentResult.model_validate(result.as_dict())
-                    for result in search_results
-                ]
-                answer = self._build_document_search_answer(
-                    document_results, total=total
-                )
-                verification_summary = {
-                    "result": "document_catalog",
-                    "matched_total": total,
-                    "shown": len(document_results),
-                    "complete": total <= len(document_results),
-                    "shadow_mode": shadow_mode,
-                    "trace_id": trace_id,
-                }
-                retrieval_debug_payload = {
-                    "document_search": {
-                        "applied": True,
-                        "intent": "exhaustive",
-                        "matched_total": total,
-                        "result_count": len(document_results),
-                    }
-                }
+            retrieval_document_ids = scope_plan.retrieval_document_ids
+            retrieval_preferred_document_ids = (
+                scope_plan.retrieval_preferred_document_ids
+            )
+            active_context_document_ids = scope_plan.active_context_document_ids
+            filename_scoped_document_ids = scope_plan.filename_scoped_document_ids
+            filename_references = scope_plan.filename_references
+            filename_scope_attempted = scope_plan.filename_scope_attempted
+            document_results = scope_plan.document_results
+            catalog_answered = scope_plan.catalog_answered
+            retrieval_debug_payload.update(scope_plan.retrieval_debug)
+            if scope_plan.answer is not None:
+                answer = scope_plan.answer
+            if scope_plan.verification is not None:
+                verification_summary = scope_plan.verification
+            if document_results or catalog_answered:
                 candidate_sources_for_metrics = []
-            elif hard_scope is None and catalog.is_document_discovery_query(
-                retrieval_query
-            ):
-                search_results = await catalog.search(
-                    query=retrieval_query,
-                    auth=auth,
-                    filters=request.retrieval_filters,
-                    limit=settings.RAG_FINAL_TOP_N,
-                )
-                document_results = [
-                    ChatDocumentResult.model_validate(result.as_dict())
-                    for result in search_results
-                ]
-                if document_results:
-                    active_context_document_ids = self._merge_document_ids(
-                        [UUID(str(item.document_id)) for item in document_results],
-                        follow_up_document_ids,
-                    )
-                    answer = self._build_document_search_answer(document_results)
-                    verification_summary = {
-                        "result": "document_search",
-                        "shadow_mode": shadow_mode,
-                        "trace_id": trace_id,
-                    }
-                    retrieval_debug_payload = {
-                        "document_search": {
-                            "applied": True,
-                            "intent": "navigation",
-                            "result_count": len(document_results),
-                        }
-                    }
-                    candidate_sources_for_metrics = []
-
-            retrieval_document_ids = explicit_document_ids
-            retrieval_preferred_document_ids = None
-            if lock_ids and explicit_document_ids is None:
-                retrieval_document_ids = lock_ids
-            if (
-                filename_scoped_document_ids
-                and explicit_document_ids is None
-                and not lock_ids
-            ):
-                retrieval_document_ids = filename_scoped_document_ids
-            if (
-                requested_active_context_document_ids
-                and is_follow_up
-                and explicit_document_ids is None
-                and not lock_ids
-                and not filename_scoped_document_ids
-            ):
-                retrieval_document_ids = requested_active_context_document_ids
-            elif (
-                follow_up_document_ids
-                and is_follow_up
-                and explicit_document_ids is None
-                and not lock_ids
-                and not filename_scoped_document_ids
-            ):
-                retrieval_preferred_document_ids = follow_up_document_ids
 
             try:
                 if document_results or catalog_answered:
@@ -2388,25 +2181,48 @@ class ChatService:
                         observability.record_rag_stage_error(stage="retrieval")
                     else:
                         fallback_sources = sources
+                        memory_note = chat_memory.build_memory_prompt_block(mem)
+                        style_rules = self._answer_style_rules(question)
+                        fallback_overhead = build_grounded_prompt(
+                            question=question,
+                            sources=[],
+                            history=history if history else None,
+                            memory_block=memory_note or None,
+                            extra_rules=style_rules,
+                        )
+                        fallback_pack = pack_evidence_for_prompt(
+                            fallback_sources,
+                            question=question,
+                            history=history if history else None,
+                            memory_block=memory_note or None,
+                            prompt_overhead_text=fallback_overhead,
+                            context_tokens=settings.RAG_PROMPT_CONTEXT_TOKENS,
+                            output_reserve_tokens=settings.RAG_PROMPT_OUTPUT_RESERVE_TOKENS,
+                            margin_tokens=settings.RAG_PROMPT_MARGIN_TOKENS,
+                            per_source_cap_tokens=settings.RAG_PROMPT_PER_SOURCE_CAP_TOKENS,
+                        )
+                        fallback_sources = fallback_pack.sources
                         candidate_sources_for_metrics = fallback_sources
-                        active_context_document_ids = self._merge_document_ids(
-                            self._extract_document_ids_from_sources(fallback_sources),
+                        active_context_document_ids = merge_document_ids(
+                            document_ids_from_sources(fallback_sources),
                             follow_up_document_ids,
                         )
                         retrieval_debug_payload = {
                             "fallback": "last_cited_neighbor_chunks",
                             "retrieval_error_type": retrieval_error_type,
+                            "context_pack": fallback_pack.as_dict(),
                         }
                         try:
-                            memory_note = chat_memory.build_memory_prompt_block(mem)
                             prompt = build_grounded_prompt(
                                 question=question,
                                 sources=fallback_sources,
                                 history=history if history else None,
                                 memory_block=memory_note or None,
-                                extra_rules=self._answer_style_rules(question),
+                                extra_rules=style_rules,
                             )
-                            raw_answer = (await self.llm_client.generate(prompt)).strip()
+                            raw_answer = (
+                                await self.llm_client.generate(prompt)
+                            ).strip()
                             self._record_llm_usage(llm_usage_summary)
                         except Exception as llm_exc:
                             llm_error_type = type(llm_exc).__name__
@@ -2527,17 +2343,19 @@ class ChatService:
 
                     memory_note = chat_memory.build_memory_prompt_block(mem)
                     style_rules = self._answer_style_rules(question)
-                    instructions_overhead = (
-                        "grounded-assistant\n"
-                        + "\n".join(style_rules)
-                        + (memory_note or "")
+                    prompt_overhead = build_grounded_prompt(
+                        question=question,
+                        sources=[],
+                        history=history if history else None,
+                        memory_block=memory_note or None,
+                        extra_rules=style_rules,
                     )
                     packed = pack_evidence_for_prompt(
                         candidate_sources,
                         question=question,
                         history=history if history else None,
                         memory_block=memory_note or None,
-                        instructions_text=instructions_overhead,
+                        prompt_overhead_text=prompt_overhead,
                         context_tokens=settings.RAG_PROMPT_CONTEXT_TOKENS,
                         output_reserve_tokens=settings.RAG_PROMPT_OUTPUT_RESERVE_TOKENS,
                         margin_tokens=settings.RAG_PROMPT_MARGIN_TOKENS,
@@ -2550,9 +2368,9 @@ class ChatService:
                     grounded_document_ids = getattr(
                         retrieval, "grounded_document_ids", []
                     )
-                    active_context_document_ids = self._merge_document_ids(
+                    active_context_document_ids = merge_document_ids(
                         list(grounded_document_ids),
-                        self._extract_document_ids_from_sources(candidate_sources),
+                        document_ids_from_sources(candidate_sources),
                         follow_up_document_ids,
                     )
 
@@ -2640,99 +2458,37 @@ class ChatService:
                                         )
                                     )
 
-        cited_document_ids = self._extract_document_ids_from_sources(sources)
-        if cited_document_ids:
-            active_context_document_ids = self._merge_document_ids(
-                cited_document_ids, follow_up_document_ids
-            )
-
-        answer_confidence_value = self._compute_answer_confidence(
-            sources, verification_summary
-        )
-        if verification_summary:
-            observability.record_rag_verification(
-                result=str(verification_summary.get("result")),
+        return await finalize_chat_completion(
+            session=self.session,
+            message_repo=self.message_repo,
+            chat_session=chat_session,
+            user_message=user_message,
+            request=request,
+            completion=ChatCompletion(
+                answer=answer,
+                sources=sources,
+                document_results=document_results,
+                active_context_document_ids=active_context_document_ids,
+                follow_up_document_ids=follow_up_document_ids,
+                retrieval_query=retrieval_query,
+                trace_id=trace_id,
+                llm_provider=llm_provider,
+                llm_model_id=llm_model_id,
+                prompt_version=prompt_version,
+                retrieval_settings=retrieval_settings_snapshot,
+                verification=verification_summary,
+                retrieval_debug=retrieval_debug_payload,
+                memory_applied=memory_applied_payload,
+                llm_usage=llm_usage_summary,
+                memory=mem,
                 shadow_mode=shadow_mode,
-            )
-            if shadow_mode and verification_summary.get("shadow_kept_raw"):
-                observability.record_rag_shadow_override(reason="no_inline_citations")
-            if shadow_mode and verification_summary.get("shadow_keeps_citation_answer"):
-                observability.record_rag_shadow_override(reason="support_check_failed")
-        if candidate_sources_for_metrics is not None:
-            observability.record_rag_citation_filter(
-                before_count=len(candidate_sources_for_metrics),
-                after_count=len(sources),
-            )
-        if rerank_stats:
-            observability.record_rag_rerank_event(
-                order_changed=bool(rerank_stats.get("order_changed")),
-                content_truncated_count=int(
-                    rerank_stats.get("sources_content_truncated") or 0
+                rerank_stats=rerank_stats,
+                candidate_source_count=(
+                    len(candidate_sources_for_metrics)
+                    if candidate_sources_for_metrics is not None
+                    else None
                 ),
-            )
-        observability.record_rag_low_confidence_answer(
-            confidence=answer_confidence_value
-        )
-
-        model_label = f"{llm_provider}:{llm_model_id}"
-        generation_metadata: dict[str, object] = {
-            "trace_id": trace_id,
-            "llm_provider": llm_provider,
-            "llm_model_id": llm_model_id,
-            "llm_usage": llm_usage_summary,
-            "grounded_prompt_version": prompt_version,
-            "retrieval": retrieval_settings_snapshot,
-            "verification": verification_summary,
-            "retrieval_debug": retrieval_debug_payload,
-            "memory_applied": memory_applied_payload,
-            "answer_confidence": answer_confidence_value,
-        }
-        if retrieval_error_type:
-            generation_metadata["retrieval_error_type"] = retrieval_error_type
-        if llm_error_type:
-            generation_metadata["llm_error_type"] = llm_error_type
-
-        chat_session.memory_json = dict(mem)
-
-        assistant_message = ChatMessage(
-            session_id=chat_session.id,
-            role="assistant",
-            content=answer,
-            citations_json=(
-                [source.model_dump(mode="json") for source in sources] or None
+                retrieval_error_type=retrieval_error_type,
+                llm_error_type=llm_error_type,
             ),
-            model_name=model_label,
-            generation_metadata_json=generation_metadata,
-        )
-        self._touch_session(chat_session)
-        await self.message_repo.add(assistant_message, flush=True)
-        await self.session.commit()
-        await self.session.refresh(assistant_message)
-        await self.session.refresh(chat_session)
-
-        return ChatAskResponse(
-            session_id=chat_session.id,
-            answer=answer,
-            answer_confidence=answer_confidence_value,
-            sources=sources,
-            document_results=document_results,
-            user_message_id=user_message.id,
-            assistant_message_id=assistant_message.id,
-            parent_message_id=request.parent_message_id,
-            request_id=request.request_id,
-            cited_sources=sources,
-            active_context_document_ids=[str(d) for d in active_context_document_ids],
-            active_context_documents=self._build_active_context_documents(
-                sources,
-                active_context_document_ids,
-            ),
-            conversation_query=retrieval_query,
-            generation_trace_id=trace_id,
-            llm_provider=llm_provider,
-            llm_model_id=llm_model_id,
-            grounded_prompt_version=prompt_version,
-            retrieval_settings=retrieval_settings_snapshot,
-            verification=verification_summary,
-            retrieval_debug=retrieval_debug_payload or None,
-            memory_applied=memory_applied_payload,
         )

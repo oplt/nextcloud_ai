@@ -9,6 +9,7 @@ from ..core.security import AuthContext
 from ..db.models import Document
 from ..db.repo.document import DocumentRepository
 from ..rag.lexical import classify_catalog_intent, semantic_json_text
+from ..rag.scope import RetrievalScope
 from ..schemas.chat_schema import RetrievalFilters
 
 _DISCOVERY_RE = re.compile(
@@ -44,6 +45,7 @@ class DocumentSearchResult:
     document: Document
     score: float
     matched_fields: list[str]
+    matched_excerpt: str | None = None
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -57,6 +59,7 @@ class DocumentSearchResult:
             else None,
             "score": self.score,
             "matched_fields": self.matched_fields,
+            "matched_excerpt": self.matched_excerpt,
         }
 
 
@@ -75,22 +78,21 @@ class DocumentSearchService:
         terms = self.extract_terms(query)
         if not terms:
             return []
+        scope = RetrievalScope.resolve(auth=auth, filters=filters)
         ranked = await self.repo.search_documents(
-            auth=auth,
+            auth=scope.auth,
             terms=terms,
-            connector_ids=filters.connector_ids if filters else None,
-            mime_types=filters.mime_types if filters else None,
-            path_prefixes=filters.path_prefixes if filters else None,
-            modified_after=filters.modified_after if filters else None,
-            modified_before=filters.modified_before if filters else None,
-            document_types=filters.document_types if filters else None,
-            business_domains=filters.business_domains if filters else None,
-            source_types=filters.source_types if filters else None,
+            **scope.repository_filters(),
             limit=limit,
         )
         results = [
-            self._score_document(document, terms, lexical_rank=rank)
-            for document, rank in ranked
+            self._score_document(
+                document,
+                terms,
+                lexical_rank=rank,
+                matched_excerpt=matched_excerpt,
+            )
+            for document, rank, matched_excerpt in ranked
         ]
         results.sort(key=lambda item: item.score, reverse=True)
         return [item for item in results if item.score > 0]
@@ -105,17 +107,11 @@ class DocumentSearchService:
         terms = self.extract_terms(query)
         if not terms:
             return 0
+        scope = RetrievalScope.resolve(auth=auth, filters=filters)
         return await self.repo.count_search_documents(
-            auth=auth,
+            auth=scope.auth,
             terms=terms,
-            connector_ids=filters.connector_ids if filters else None,
-            mime_types=filters.mime_types if filters else None,
-            path_prefixes=filters.path_prefixes if filters else None,
-            modified_after=filters.modified_after if filters else None,
-            modified_before=filters.modified_before if filters else None,
-            document_types=filters.document_types if filters else None,
-            business_domains=filters.business_domains if filters else None,
-            source_types=filters.source_types if filters else None,
+            **scope.repository_filters(),
         )
 
     @staticmethod
@@ -195,6 +191,7 @@ class DocumentSearchService:
         terms: list[str],
         *,
         lexical_rank: float = 0.0,
+        matched_excerpt: str | None = None,
     ) -> DocumentSearchResult:
         fields = {
             "file_name": document.file_name,
@@ -238,4 +235,5 @@ class DocumentSearchService:
             document=document,
             score=raw_score,
             matched_fields=matched_fields,
+            matched_excerpt=(matched_excerpt[:420] if matched_excerpt else None),
         )

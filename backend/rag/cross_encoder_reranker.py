@@ -54,8 +54,10 @@ class CrossEncoderReranker:
         # Sigmoid maps logits into (0, 1). Order-preserving; not calibrated
         # abstention — thresholds need held-out negatives.
         mapped = [_logit_to_probability(float(score)) for score in scores]
+        if len(mapped) != len(candidates):
+            raise ValueError("cross-encoder score count does not match candidate count")
 
-        for candidate, score in zip(candidates, mapped):
+        for candidate, score in zip(candidates, mapped, strict=True):
             candidate.rerank_score = score
 
         return sorted(

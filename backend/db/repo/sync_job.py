@@ -50,16 +50,18 @@ class SyncJobRepository(BaseRepository[SyncJob]):
         return result.scalar_one_or_none()
 
     async def reset_stale_running_jobs(self, *, message: str) -> int:
-        """Fail only abandoned jobs whose lease has expired (or never leased)."""
+        """Fail only jobs with an explicit expired lease.
+
+        A missing lease is unknown/legacy state, not evidence that the worker is
+        dead. In particular, API restarts must not fail such jobs blindly.
+        """
         now = datetime.now(timezone.utc)
         result = await self.session.execute(
             update(SyncJob)
             .where(
                 SyncJob.status.in_(("running", "retrying")),
-                or_(
-                    SyncJob.lease_expires_at.is_(None),
-                    SyncJob.lease_expires_at < now,
-                ),
+                SyncJob.lease_expires_at.is_not(None),
+                SyncJob.lease_expires_at < now,
             )
             .values(
                 status="failed",

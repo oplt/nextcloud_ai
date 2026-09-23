@@ -6,6 +6,7 @@ from typing import Protocol
 from ..core.config import settings
 from .embedding_contract import (
     active_embedding_fingerprint,
+    prepare_embedding_input,
     validate_embedding_vector,
 )
 from .ollama_embedding_client import OllamaEmbeddingClient
@@ -22,8 +23,9 @@ class DeterministicEmbeddingClient:
         self.fingerprint = active_embedding_fingerprint()
 
     def _text_to_vector(self, text: str) -> list[float]:
+        prepared = prepare_embedding_input(text)
         digest = hashlib.sha256(
-            f"{self.fingerprint.digest()}:{text}".encode("utf-8")
+            f"{self.fingerprint.digest()}:{prepared}".encode("utf-8")
         ).digest()
         seed_bytes = (digest * ((self.dim // len(digest)) + 1))[: self.dim]
         values = [((value / 255.0) * 2.0) - 1.0 for value in seed_bytes]

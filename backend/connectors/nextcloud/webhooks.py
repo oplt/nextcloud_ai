@@ -25,14 +25,26 @@ router = APIRouter(prefix="/nextcloud", tags=["nextcloud-webhooks"])
 
 _MAX_WEBHOOK_BODY_BYTES = 256_000
 _DEFAULT_MAX_AGE_SECONDS = 300
+_replay_stores: dict[str, ReplayStore] = {}
 
 
 def _webhook_replay_store(settings_obj: NextcloudBridgeSettings) -> ReplayStore | None:
     redis_url = settings_obj.bridge_redis_url or settings.nextcloud_event_redis_url
     if redis_url:
-        return RedisReplayStore(redis_url=redis_url, namespace="nextcloud-webhook:event")
+        key = f"redis:{redis_url}"
+        if key not in _replay_stores:
+            _replay_stores[key] = RedisReplayStore(
+                redis_url=redis_url,
+                namespace="nextcloud-webhook:event",
+            )
+        return _replay_stores[key]
     if settings.APP_ENV in {"development", "test"}:
-        return InMemoryReplayStore(namespace="nextcloud-webhook:event")
+        key = f"memory:{settings.APP_ENV}"
+        if key not in _replay_stores:
+            _replay_stores[key] = InMemoryReplayStore(
+                namespace="nextcloud-webhook:event"
+            )
+        return _replay_stores[key]
     return None
 
 
@@ -51,6 +63,7 @@ def _verify_secret(
     secret: str | None,
     *,
     require_secret: bool,
+    signed_timestamp: str | None = None,
 ) -> None:
     if not secret:
         if require_secret:
@@ -73,7 +86,10 @@ def _verify_secret(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing webhook signature",
         )
-    expected = hmac.new(secret.encode("utf-8"), raw_body, sha256).hexdigest()
+    signed_payload = raw_body
+    if signed_timestamp is not None:
+        signed_payload = signed_timestamp.strip().encode("utf-8") + b"." + raw_body
+    expected = hmac.new(secret.encode("utf-8"), signed_payload, sha256).hexdigest()
     if not hmac.compare_digest(expected, provided):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -113,9 +129,25 @@ def _verify_freshness(
     payload_timestamp: object,
     max_age_seconds: int = _DEFAULT_MAX_AGE_SECONDS,
 ) -> int:
-    ts = _parse_timestamp(header_timestamp)
-    if ts is None:
-        ts = _parse_timestamp(payload_timestamp)
+    header_ts = _parse_timestamp(header_timestamp)
+    payload_ts = _parse_timestamp(payload_timestamp)
+    if header_timestamp is not None and header_ts is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid X-Webhook-Timestamp",
+        )
+    if payload_timestamp is not None and payload_ts is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid payload timestamp",
+        )
+    if header_ts is not None and payload_ts is not None and header_ts != payload_ts:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Webhook header and payload timestamps do not match",
+        )
+    # Prefer the body timestamp because it is covered by the body HMAC.
+    ts = payload_ts if payload_ts is not None else header_ts
     if ts is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -138,14 +170,18 @@ def _event_id(payload: dict[str, Any], timestamp: int) -> str:
     digest = sha256(
         json.dumps(payload, sort_keys=True, default=str).encode("utf-8")
     ).hexdigest()[:32]
-    return f"{timestamp}:{digest}"
+    # Keep body-identical deliveries stable even if an unsigned transport
+    # timestamp changes. This prevents timestamp rotation from bypassing replay.
+    return digest
 
 
 @router.post("/webhooks")
 async def receive_nextcloud_webhook(
     request: Request,
     session: DbSessionDep,
-    bridge_settings: Annotated[NextcloudBridgeSettings, Depends(get_nextcloud_settings)],
+    bridge_settings: Annotated[
+        NextcloudBridgeSettings, Depends(get_nextcloud_settings)
+    ],
     x_webhook_signature: Annotated[
         str | None, Header(alias="X-Webhook-Signature")
     ] = None,
@@ -160,19 +196,18 @@ async def receive_nextcloud_webhook(
             detail="Webhook payload too large",
         )
 
-    # Never accept unsigned traffic. Missing secret disables the endpoint.
-    require_secret = True
     secret = (
         bridge_settings.webhook_secret.get_secret_value()
         if bridge_settings.webhook_secret
         else None
     )
-    _verify_secret(
-        raw_body,
-        x_webhook_signature,
-        secret,
-        require_secret=require_secret,
-    )
+    if not secret:
+        _verify_secret(
+            raw_body,
+            x_webhook_signature,
+            secret,
+            require_secret=True,
+        )
 
     try:
         payload = json.loads(raw_body.decode("utf-8"))
@@ -188,9 +223,20 @@ async def receive_nextcloud_webhook(
             detail="Webhook payload must be a JSON object",
         )
 
-    event_name = (
-        payload.get("event") or payload.get("type") or payload.get("action")
+    # Never accept unsigned traffic. A timestamp supplied only in the header
+    # is covered by the signature as ``<timestamp>.<raw_body>``. When the body
+    # carries its own timestamp, the legacy/raw-body HMAC remains valid because
+    # freshness is then cryptographically bound inside the body.
+    payload_timestamp = payload.get("timestamp")
+    _verify_secret(
+        raw_body,
+        x_webhook_signature,
+        secret,
+        require_secret=True,
+        signed_timestamp=(x_webhook_timestamp if payload_timestamp is None else None),
     )
+
+    event_name = payload.get("event") or payload.get("type") or payload.get("action")
     if not event_name or not str(event_name).strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -199,7 +245,7 @@ async def receive_nextcloud_webhook(
 
     timestamp = _verify_freshness(
         header_timestamp=x_webhook_timestamp,
-        payload_timestamp=payload.get("timestamp"),
+        payload_timestamp=payload_timestamp,
     )
 
     replay_store = _webhook_replay_store(bridge_settings)

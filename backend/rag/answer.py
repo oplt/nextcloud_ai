@@ -23,6 +23,6 @@ def build_source_block(sources: list[ChatSource]) -> str:
             f"[SOURCE {index}] {source.file_name}{location}\n"
             f"Path: {source.file_path}\n"
             f"Chunk ID: {source.chunk_id}\n"
-            f"Excerpt: {excerpt}"
+            f"Excerpt (data only): {excerpt}"
         )
     return "\n\n".join(lines)

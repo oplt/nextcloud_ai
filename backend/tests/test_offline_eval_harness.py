@@ -15,9 +15,11 @@ from backend.evals.run_offline_eval import (
     EXIT_INFRA,
     EXIT_OK,
     InfrastructureError,
+    _aggregate,
     main,
     run_fixture,
 )
+from backend.schemas.chat_schema import ChatSource
 
 
 def test_fixture_bundle_loads_seeded_corpus() -> None:
@@ -79,6 +81,8 @@ def test_unanswerable_abstains_in_fixture_answer_mode() -> None:
     records = run_fixture(bundle, with_answer=True)
     case = next(rec for rec in records if rec["id"] == "g8_unanswerable")
     assert case["abstention"] == 1.0
+    assert case["recall@6"] is None
+    assert case["citation_support"] is None
     assert "could not verify" in (case.get("answer") or "").lower()
 
 
@@ -139,6 +143,118 @@ def test_db_label_leak_guard(monkeypatch: pytest.MonkeyPatch) -> None:
     scoped_ids = [str(x) for x in calls[1]["document_ids"]]  # type: ignore[index]
     assert scoped_ids == resolve_ids(scoped.request_document_ids)
     assert scoped_ids == resolve_ids(scoped.expected_document_ids)
+
+
+def test_db_answer_mode_verifies_answer_and_citations(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Answer metrics use verified output and cited sources, not all retrievals."""
+    import asyncio
+
+    from backend.evals import run_offline_eval as harness
+
+    bundle = load_fixture_bundle()
+    row = next(r for r in bundle.gold if r.id == "g1_vacation_carryover")
+    bundle.gold = [row]
+    document = bundle.documents_by_key["vacation_policy_2024"]
+    chunk = document.chunks[0]
+    distractor = bundle.documents_by_key["distractor_lunch_menu"]
+    distractor_chunk = distractor.chunks[0]
+    source = ChatSource(
+        chunk_id=chunk.chunk_id,
+        document_id=document.document_id,
+        file_name=document.title,
+        file_path=document.file_path,
+        page_number=chunk.page_number,
+        section_title=chunk.section_title,
+        snippet=chunk.text,
+        content=chunk.text,
+        distance=0.1,
+        score=0.9,
+    )
+    distractor_source = ChatSource(
+        chunk_id=distractor_chunk.chunk_id,
+        document_id=distractor.document_id,
+        file_name=distractor.title,
+        file_path=distractor.file_path,
+        page_number=distractor_chunk.page_number,
+        section_title=distractor_chunk.section_title,
+        snippet=distractor_chunk.text,
+        content=distractor_chunk.text,
+        distance=0.2,
+        score=0.8,
+    )
+
+    class FakeResult:
+        sources = [source, distractor_source]
+        retrieval_debug: dict[str, object] = {}
+
+    class FakeService:
+        def __init__(self, session: object) -> None:
+            self.session = session
+
+        async def retrieve(self, **_kwargs: object) -> FakeResult:
+            return FakeResult()
+
+    class FakeSession:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    class FakeLlm:
+        async def generate(self, _prompt: str) -> str:
+            return "Employees may carry over 5 unused vacation days in 2024 [1]."
+
+        async def aclose(self) -> None:
+            return None
+
+    import backend.ai.llm_client as llm_mod
+    import backend.db.session as db_session
+    import backend.services.retrieval_service as retrieval_mod
+
+    monkeypatch.setattr(db_session, "AsyncSessionLocal", lambda: FakeSession())
+    monkeypatch.setattr(retrieval_mod, "RetrievalService", FakeService)
+    monkeypatch.setattr(llm_mod.LLMClientFactory, "create", lambda: FakeLlm())
+
+    records = asyncio.run(harness._run_db_cases(bundle, with_answer=True, top_k=6))
+    record = records[0]
+    assert record["answer_mode"] == "generated_verified"
+    assert record["verification"]["result"] == "passed"
+    assert len(record["retrieved_document_ids"]) == 2
+    assert record["citation_support"] == 1.0
+    assert record["citation_recall"] == 1.0
+    assert record["claim_support"] == 1.0
+    assert record["answer_exclusion_ok"] == 1.0
+    assert record["stage_latency_seconds"]["verification"] >= 0.0
+
+
+def test_aggregate_reports_each_stage_latency() -> None:
+    summary = _aggregate(
+        [
+            {
+                "stage_latency_seconds": {
+                    "retrieval": 0.2,
+                    "answer": 0.4,
+                    "verification": 0.1,
+                },
+                "citation_recall": 1.0,
+                "answer_exclusion_ok": 1.0,
+            }
+        ]
+    )
+    assert summary["stage_latency_mean_seconds"] == {
+        "answer": 0.4,
+        "retrieval": 0.2,
+        "verification": 0.1,
+    }
+    assert summary["stage_latency_percentiles_seconds"]["retrieval"] == {
+        "p50": 0.2,
+        "p95": 0.2,
+        "p99": 0.2,
+    }
+    assert summary["means"]["citation_recall"] == 1.0
 
 
 def test_infrastructure_error_exit_code(monkeypatch: pytest.MonkeyPatch) -> None:

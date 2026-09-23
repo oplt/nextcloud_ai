@@ -243,9 +243,7 @@ def _document_detail(
         payload["chunk_count"] = int(chunk_count)
     else:
         quality = metadata.get("ingestion_quality")
-        meta_count = (
-            quality.get("chunk_count") if isinstance(quality, dict) else None
-        )
+        meta_count = quality.get("chunk_count") if isinstance(quality, dict) else None
         payload["chunk_count"] = (
             int(meta_count) if meta_count is not None else len(document.chunks)
         )

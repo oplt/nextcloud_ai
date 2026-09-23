@@ -83,7 +83,7 @@ def test_title_only_summary_answer_is_rejected() -> None:
     )
 
     assert "could not verify enough article content" in answer
-    assert sources == [source]
+    assert sources == []
     assert summary["result"] == "summary_title_only"
 
 

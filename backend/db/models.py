@@ -73,7 +73,7 @@ class Role(UUIDPrimaryKeyMixin, TimestampMixin, Base):
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
     is_system: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
-    users: Mapped[list["User"]] = relationship(back_populates="role", lazy="selectin")
+    users: Mapped[list["User"]] = relationship(back_populates="role", lazy="raise")
 
 
 class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
@@ -119,16 +119,16 @@ class User(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="user",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
     audit_logs: Mapped[list["AuditLog"]] = relationship(
-        back_populates="user", passive_deletes=True, lazy="selectin"
+        back_populates="user", passive_deletes=True, lazy="raise"
     )
     requested_jobs: Mapped[list["SyncJob"]] = relationship(
-        back_populates="requested_by", passive_deletes=True, lazy="selectin"
+        back_populates="requested_by", passive_deletes=True, lazy="raise"
     )
     owned_connectors: Mapped[list["Connector"]] = relationship(
-        back_populates="owner", passive_deletes=True, lazy="selectin"
+        back_populates="owner", passive_deletes=True, lazy="raise"
     )
 
 
@@ -161,13 +161,13 @@ class Connector(UUIDPrimaryKeyMixin, TimestampMixin, Base):
         back_populates="connector",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
     sync_jobs: Mapped[list["SyncJob"]] = relationship(
         back_populates="connector",
         cascade="all, delete-orphan",
         passive_deletes=True,
-        lazy="selectin",
+        lazy="raise",
     )
     owner: Mapped["User | None"] = relationship(
         back_populates="owned_connectors", lazy="selectin"

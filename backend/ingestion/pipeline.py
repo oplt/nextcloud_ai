@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 
+import httpx
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..ai.chunker import chunk_parsed_document
@@ -117,9 +118,7 @@ class IngestionPipeline:
         }
 
         drafts = chunk_parsed_document(parsed_document, chunk_size=400, overlap=60)
-        fingerprint = active_embedding_fingerprint(
-            parser=str(parsed_document.metadata.get("parser") or "unknown"),
-        )
+        fingerprint = active_embedding_fingerprint()
         reused = 0
         reusable: dict[str, list[float]] = {}
         embeddings: list[list[float] | None] = [None] * len(drafts)
@@ -231,6 +230,7 @@ class IngestionPipeline:
                         "business_domain": document.business_domain,
                         "classification_confidence": document.document_type_confidence,
                         "embedding_fingerprint": fingerprint.digest(),
+                        "embedding_contract": fingerprint.to_dict(),
                         "embedding_reused": bool(
                             draft.content_hash in reusable
                             and index < len(embeddings)
@@ -274,6 +274,7 @@ class IngestionPipeline:
         document.metadata_json = {
             **dict(document.metadata_json or {}),
             "embedding_fingerprint": fingerprint.digest(),
+            "embedding_contract": fingerprint.to_dict(),
             "embedding_reused_count": reused,
         }
         document.ingestion_events_json = _append_event(
@@ -316,19 +317,36 @@ async def _embed_in_batches(
                         f"Embedding count mismatch: expected {len(batch)}, "
                         f"got {len(batch_embeddings)}"
                     )
+                invalid_slots = 0
                 for offset, vector in enumerate(batch_embeddings):
-                    embeddings[start + offset] = validate_embedding_vector(
-                        vector, expected_dim=expected_dim
-                    )
+                    try:
+                        embeddings[start + offset] = validate_embedding_vector(
+                            vector, expected_dim=expected_dim
+                        )
+                    except (EmbeddingValidationError, TypeError, ValueError):
+                        invalid_slots += 1
+                if invalid_slots:
+                    failures.append(f"batch@{start}:{invalid_slots} invalid vector(s)")
                 succeeded = True
                 break
             except Exception as exc:
                 last_error = exc
+                if not _is_transient_embedding_error(exc):
+                    break
         if not succeeded and last_error is not None:
             failures.append(f"batch@{start}:{last_error}")
     if failures and all(item is None for item in embeddings):
         raise RuntimeError("; ".join(failures[:3]))
     return embeddings
+
+
+def _is_transient_embedding_error(exc: Exception) -> bool:
+    if isinstance(exc, (TimeoutError, ConnectionError, httpx.TransportError)):
+        return True
+    if isinstance(exc, httpx.HTTPStatusError):
+        status = exc.response.status_code
+        return status in {408, 429} or status >= 500
+    return False
 
 
 def _embedding_input(content: str) -> str:
@@ -373,10 +391,6 @@ def _chunk_type(metadata: dict[str, object]) -> str:
     if metadata.get("image_ocr"):
         return "image_ocr"
     return "text"
-
-
-def _embedding_input(content: str) -> str:
-    return re.sub(r"\b[\w.+-]+@[\w.-]+\.\w+\b", " email-address ", content)
 
 
 def _append_event(

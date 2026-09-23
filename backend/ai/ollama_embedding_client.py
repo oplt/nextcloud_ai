@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from collections import OrderedDict
+from dataclasses import replace
 
 import httpx
 
@@ -35,7 +36,11 @@ class OllamaEmbeddingClient:
         self.max_input_chars = max_input_chars or int(
             getattr(settings, "EMBEDDING_MAX_INPUT_CHARS", 24_000) or 24_000
         )
-        self.fingerprint = active_embedding_fingerprint()
+        self.fingerprint = replace(
+            active_embedding_fingerprint(),
+            model=self.model,
+            dimension=self.expected_dim,
+        )
         self._sem = asyncio.Semaphore(max_concurrency)
         self._cache: OrderedDict[str, list[float]] = OrderedDict()
         self._cache_max = max(0, cache_max_entries)
@@ -66,15 +71,23 @@ class OllamaEmbeddingClient:
         async with self._sem:
             response = await self._client.post(
                 f"{self.base_url}/api/embed",
-                json={"model": self.model, "input": input_payload},
+                json={
+                    "model": self.model,
+                    "input": input_payload,
+                    "truncate": False,
+                },
             )
         response.raise_for_status()
         payload = response.json()
         embeddings = payload.get("embeddings")
         if not isinstance(embeddings, list):
-            raise ValueError("Ollama /api/embed response missing embeddings")
+            raise EmbeddingValidationError(
+                "Ollama /api/embed response missing embeddings"
+            )
         if embeddings and not isinstance(embeddings[0], list):
-            raise ValueError("Ollama /api/embed returned malformed embeddings payload")
+            raise EmbeddingValidationError(
+                "Ollama /api/embed returned malformed embeddings payload"
+            )
         return embeddings
 
     async def _embed_via_legacy_endpoint(self, text: str) -> list[float]:
@@ -87,7 +100,9 @@ class OllamaEmbeddingClient:
         payload = response.json()
         embedding = payload.get("embedding")
         if not isinstance(embedding, list):
-            raise ValueError("Ollama /api/embeddings response missing embedding")
+            raise EmbeddingValidationError(
+                "Ollama /api/embeddings response missing embedding"
+            )
         return embedding
 
     def _parts_for_input(self, text: str) -> list[str]:
@@ -95,9 +110,7 @@ class OllamaEmbeddingClient:
         try:
             return [prepare_embedding_input(text, max_chars=self.max_input_chars)]
         except EmbeddingValidationError:
-            return split_oversized_embedding_input(
-                text, max_chars=self.max_input_chars
-            )
+            return split_oversized_embedding_input(text, max_chars=self.max_input_chars)
 
     async def _embed_single_prepared(self, prepared: str) -> list[float]:
         key = cache_key_for_embedding(prepared, self.fingerprint)
@@ -106,8 +119,10 @@ class OllamaEmbeddingClient:
             return cached
         try:
             embeddings = await self._embed_via_modern_endpoint(prepared)
-            if not embeddings:
-                raise ValueError("Ollama /api/embed returned empty embeddings")
+            if len(embeddings) != 1:
+                raise EmbeddingValidationError(
+                    f"embedding count mismatch: expected 1, got {len(embeddings)}"
+                )
             vector = validate_embedding_vector(
                 embeddings[0], expected_dim=self.expected_dim
             )
@@ -187,7 +202,11 @@ class OllamaEmbeddingClient:
                 )
                 results[slot] = validated
 
-        return [item for item in results if item is not None]
+        if any(item is None for item in results):
+            raise EmbeddingValidationError(
+                "embedding provider did not return a vector for every input"
+            )
+        return [list(item) for item in results if item is not None]
 
     async def aclose(self) -> None:
         await self._client.aclose()

@@ -47,7 +47,10 @@ def test_recall_mrr_ndcg() -> None:
 
 
 def test_answer_and_citation_and_abstention() -> None:
-    assert answer_correctness(["carry-over", "2024"], "Carry-over in 2024 is 5 days") == 1.0
+    assert (
+        answer_correctness(["carry-over", "2024"], "Carry-over in 2024 is 5 days")
+        == 1.0
+    )
     assert answer_exclusion_ok(["noon"], "Total is 200") == 1.0
     assert answer_exclusion_ok(["noon"], "Lunch at noon") == 0.0
     assert citation_support(["a"], ["a", "b"]) == 0.5

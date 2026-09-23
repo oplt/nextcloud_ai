@@ -73,9 +73,7 @@ def parse_share_expiration(value: object) -> datetime | None:
             return parsed
         day = date.fromisoformat(text[:10])
         # Expire at end of that UTC day.
-        return datetime(
-            day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc
-        )
+        return datetime(day.year, day.month, day.day, 23, 59, 59, tzinfo=timezone.utc)
     except ValueError:
         return None
 
@@ -83,7 +81,16 @@ def parse_share_expiration(value: object) -> datetime | None:
 def share_is_expired(expiration: object, *, now: datetime | None = None) -> bool:
     parsed = parse_share_expiration(expiration)
     if parsed is None:
-        return False
+        # Missing expiry means no expiry. A supplied but malformed expiry is
+        # unresolved external authorization data and must fail closed.
+        return expiration not in (None, False, "") and str(
+            expiration
+        ).strip().lower() not in {
+            "false",
+            "0",
+            "none",
+            "null",
+        }
     current = now or datetime.now(timezone.utc)
     return current > parsed
 
@@ -91,13 +98,18 @@ def share_is_expired(expiration: object, *, now: datetime | None = None) -> bool
 def share_is_password_protected(password: object) -> bool:
     if password is True:
         return True
-    if isinstance(password, str) and password.strip() and password.strip().lower() not in {
-        "false",
-        "0",
-        "no",
-        "none",
-        "null",
-    }:
+    if (
+        isinstance(password, str)
+        and password.strip()
+        and password.strip().lower()
+        not in {
+            "false",
+            "0",
+            "no",
+            "none",
+            "null",
+        }
+    ):
         # OCS may return "yes" / non-empty marker without the secret itself.
         return True
     return False

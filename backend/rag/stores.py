@@ -2,39 +2,23 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
-from uuid import UUID
 
+from ..ai.citations import distance_to_score
+from ..ai.embedding_contract import active_embedding_fingerprint
 from ..core.security import AuthContext
 from ..db.models import DocumentChunk
 from ..db.repo.document import DocumentChunkRepository
 from ..schemas.chat_schema import RetrievalFilters
-from ..ai.citations import distance_to_score
 from .lexical import chunk_overlap_score, semantic_json_text, squash_ts_rank, tokenize
+from .scope import RetrievalScope
 
 
 def retrieval_filter_kwargs(filters: RetrievalFilters | None) -> dict:
-    """Shared filter kwargs for semantic/keyword repo searches."""
-    if filters is None:
-        return {
-            "connector_ids": None,
-            "mime_types": None,
-            "path_prefixes": None,
-            "modified_after": None,
-            "modified_before": None,
-            "document_types": None,
-            "business_domains": None,
-            "source_types": None,
-        }
-    return {
-        "connector_ids": filters.connector_ids,
-        "mime_types": filters.mime_types,
-        "path_prefixes": filters.path_prefixes,
-        "modified_after": filters.modified_after,
-        "modified_before": filters.modified_before,
-        "document_types": filters.document_types,
-        "business_domains": filters.business_domains,
-        "source_types": filters.source_types,
-    }
+    """Compatibility helper; active retrieval uses ``RetrievalScope``."""
+    anonymous = AuthContext(
+        user_id="retrieval-filter-compat", auth_provider="local", is_superuser=False
+    )
+    return RetrievalScope.resolve(auth=anonymous, filters=filters).repository_filters()
 
 
 @dataclass(slots=True)
@@ -77,17 +61,16 @@ class PgVectorStore:
         self,
         *,
         embedding: list[float],
-        auth: AuthContext,
+        scope: RetrievalScope,
         limit: int,
-        document_ids: Sequence[UUID] | None,
-        filters: RetrievalFilters | None,
     ) -> list[RetrievalCandidate]:
         rows = await self.repo.semantic_search(
             embedding=embedding,
-            auth=auth,
+            auth=scope.auth,
             limit=limit,
-            document_ids=document_ids,
-            **retrieval_filter_kwargs(filters),
+            document_ids=scope.document_ids,
+            embedding_fingerprint=active_embedding_fingerprint().digest(),
+            **scope.repository_filters(),
         )
         return [
             RetrievalCandidate(chunk=chunk, semantic_score=distance_to_score(distance))
@@ -103,17 +86,15 @@ class KeywordSearchStore:
         self,
         *,
         terms: Sequence[str],
-        auth: AuthContext,
+        scope: RetrievalScope,
         limit: int,
-        document_ids: Sequence[UUID] | None,
-        filters: RetrievalFilters | None,
     ) -> list[RetrievalCandidate]:
         rows = await self.repo.keyword_search(
             terms=terms,
-            auth=auth,
+            auth=scope.auth,
             limit=limit,
-            document_ids=document_ids,
-            **retrieval_filter_kwargs(filters),
+            document_ids=scope.document_ids,
+            **scope.repository_filters(),
         )
         return [
             RetrievalCandidate(

@@ -7,7 +7,11 @@ import asyncio
 import sys
 
 from ..core.config import settings
-from ..rag.rerank_runtime import RerankDependencyError, ensure_reranker_ready, reset_rerank_runtime_for_tests
+from ..rag.rerank_runtime import (
+    RerankDependencyError,
+    ensure_reranker_ready,
+    reset_rerank_runtime_for_tests,
+)
 
 
 async def _run(*, force: bool) -> int:
@@ -21,7 +25,11 @@ async def _run(*, force: bool) -> int:
     print(status.to_dict())
     if status.enabled and not status.ready and not status.using_fallback:
         return 1
-    if status.enabled and status.using_fallback and settings.RAG_TRUE_RERANK_FALLBACK == "fail":
+    if (
+        status.enabled
+        and status.using_fallback
+        and settings.RAG_TRUE_RERANK_FALLBACK == "fail"
+    ):
         return 1
     return 0
 

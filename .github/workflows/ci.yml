@@ -21,7 +21,7 @@ jobs:
       - name: Sync dependencies
         run: |
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          uv sync --extra dev
+          uv sync --frozen --extra dev --extra rerank
       - name: Ruff (selected correctness rules)
         run: |
           uv run ruff check . --select F401,F811,F821,F841
@@ -29,12 +29,66 @@ jobs:
         env:
           PYTHONPATH: ..
         run: |
-          uv run pytest tests/test_offline_scorer.py tests/test_offline_eval_harness.py tests/test_chat_direct_answer.py tests/test_phase1a_deployment.py tests/test_phase1b_auth_webhooks.py tests/test_phase1c_imap_citations.py tests/test_phase2_indexing_jobs.py tests/test_phase3_parse_chunk_embed.py tests/test_phase3_embeddings.py tests/test_phase4_lexical.py tests/test_phase4_score_contract.py tests/test_phase4_context_pack.py tests/test_phase5_resources.py tests/test_phase5_database_async.py tests/test_phase6_simplify.py -q
+          uv run pytest tests/test_offline_scorer.py tests/test_offline_eval_harness.py tests/test_chat_direct_answer.py tests/test_phase1a_deployment.py tests/test_phase1b_auth_webhooks.py tests/test_phase1c_imap_citations.py tests/test_phase2_indexing_jobs.py tests/test_phase3_parse_chunk_embed.py tests/test_phase3_embeddings.py tests/test_phase4_lexical.py tests/test_phase4_score_contract.py tests/test_phase4_context_pack.py tests/test_phase4_prompt_injection.py tests/test_phase4_threshold_calibrate.py tests/test_phase5_resources.py tests/test_phase5_database_async.py tests/test_phase5_ann_benchmark.py tests/test_phase6_simplify.py -q
       - name: Offline eval fixture baseline
         env:
           PYTHONPATH: ..
         run: |
           uv run python -m backend.evals.run_offline_eval --mode fixture --summary-only
+      - name: Chunk parameter grid
+        env:
+          PYTHONPATH: ..
+        run: |
+          uv run python -m backend.evals.chunk_grid
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: nextcloud_ai
+          POSTGRES_PASSWORD: nextcloud_ai
+          POSTGRES_DB: nextcloud_ai_eval
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nextcloud_ai -d nextcloud_ai_eval"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    defaults:
+      run:
+        working-directory: backend
+    env:
+      APP_ENV: test
+      DATABASE_URL: postgresql+asyncpg://nextcloud_ai:nextcloud_ai@127.0.0.1:5432/nextcloud_ai_eval
+      EMBEDDING_DIM: "1024"
+      EMBEDDING_PROVIDER: deterministic
+      LLM_PROVIDER: stub
+      RAG_TRUE_RERANK_ENABLED: "false"
+      PYTHONPATH: ..
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install uv
+        run: curl -LsSf https://astral.sh/uv/install.sh | sh
+      - name: Install locked backend
+        run: |
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          uv sync --frozen --extra dev
+      - name: Fresh database migration
+        run: uv run alembic -c alembic.ini upgrade head
+      - name: DB-backed retrieval evaluation
+        run: >-
+          uv run python -m backend.evals.run_offline_eval
+          --mode retrieval --seed-db --summary-only
+      - name: Previous-revision upgrade smoke
+        run: |
+          uv run alembic -c alembic.ini downgrade d4e5f6a7b8c9
+          uv run alembic -c alembic.ini upgrade head
 
   frontend:
     runs-on: ubuntu-latest

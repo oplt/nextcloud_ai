@@ -37,7 +37,8 @@ dev = [
   "pytest>=8.3,<9",
   "pytest-asyncio>=1.1,<2",
   "pytest-cov>=6.0,<7",
-  "respx>=0.22,<1"
+  "respx>=0.22,<1",
+  "ruff>=0.15,<1"
 ]
 rerank = [
     "sentence-transformers>=3.0,<6",
@@ -51,3 +52,8 @@ asyncio_mode = "auto"
 testpaths = ["tests"]
 # ROS/Jazzy ships broken pytest plugins unless `lark` is installed; disable them for this repo.
 addopts = "-p no:launch_pytest -p no:launch_testing -p no:launch_ros"
+
+[dependency-groups]
+dev = [
+    "hypothesis>=6.100,<7",
+]

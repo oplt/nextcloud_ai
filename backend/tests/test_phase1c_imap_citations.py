@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
 
 from backend.connectors.email.imap_client import (
+    AsyncImapClient,
     ImapFetchResult,
     ImapMessagePayload,
     MailboxInventory,
 )
+from backend.connectors.email.config import ImapConnectorConfig
 from backend.db.repo.document import DocumentRepository
 from backend.schemas.chat_schema import ChatSource
 from backend.services.chat_service import ChatService
@@ -25,11 +28,13 @@ class _FakeDoc:
         mailbox: str = "INBOX",
         uidvalidity: int | None = 1,
         source_kind: str = "email_message",
+        external_id: str | None = None,
     ) -> None:
         self.id = uuid4()
         self.connector_id = uuid4()
         self.is_deleted = False
         self.sync_status = "synced"
+        self.external_id = external_id or f"imap:{imap_uid or 'legacy'}"
         meta: dict[str, object] = {"source_kind": source_kind}
         if imap_uid is not None:
             meta["imap_uid"] = imap_uid
@@ -133,6 +138,91 @@ async def test_mark_deleted_retains_legacy_docs_without_imap_uid() -> None:
     assert deleted == 0
 
 
+@pytest.mark.asyncio
+async def test_mark_deleted_retains_uid_without_known_uidvalidity() -> None:
+    docs = [_FakeDoc(imap_uid="99", uidvalidity=None)]
+    session = _FakeSession(docs)
+    repo = DocumentRepository(session)  # type: ignore[arg-type]
+
+    deleted = await repo.mark_deleted_missing_imap_uids(
+        connector_id=docs[0].connector_id,
+        present_uids=[],
+        mailbox="INBOX",
+        uidvalidity=2,
+    )
+    assert deleted == 0
+    assert docs[0].is_deleted is False
+
+
+@pytest.mark.asyncio
+async def test_attachment_reconciliation_is_message_and_epoch_scoped() -> None:
+    docs = [
+        _FakeDoc(
+            imap_uid="7",
+            source_kind="email_attachment",
+            external_id="message-7#attachment:0:kept.pdf",
+        ),
+        _FakeDoc(
+            imap_uid="7",
+            source_kind="email_attachment",
+            external_id="message-7#attachment:1:removed.pdf",
+        ),
+        _FakeDoc(
+            imap_uid="8",
+            source_kind="email_attachment",
+            external_id="message-8#attachment:0:other.pdf",
+        ),
+    ]
+    connector_id = docs[0].connector_id
+    for doc in docs:
+        doc.connector_id = connector_id
+    session = _FakeSession(docs)
+    repo = DocumentRepository(session)  # type: ignore[arg-type]
+
+    deleted = await repo.mark_deleted_missing_email_attachments(
+        connector_id=connector_id,
+        imap_uid="7",
+        mailbox="INBOX",
+        uidvalidity=1,
+        present_external_ids=["message-7#attachment:0:kept.pdf"],
+    )
+    assert deleted == 1
+    assert docs[0].is_deleted is False
+    assert docs[1].is_deleted is True
+    assert docs[2].is_deleted is False
+
+
+def test_missing_uidvalidity_marks_inventory_incomplete(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = ImapConnectorConfig(
+        host="imap.example",
+        port=993,
+        username="user",
+        password="secret",
+        fetch_limit=1,
+    )
+    client = AsyncImapClient(config)
+
+    class FakeImap:
+        def uid(self, command: str, *_args: object):
+            if command == "search":
+                return "OK", [b"1 2"]
+            assert command == "fetch"
+            return "NO", []
+
+    @contextmanager
+    def fake_session(*, readonly: bool = True):
+        assert readonly is True
+        yield FakeImap()
+
+    monkeypatch.setattr(client, "_session", fake_session)
+    monkeypatch.setattr(client, "_read_uidvalidity", lambda _imap: None)
+    result = client._fetch_messages_sync()
+    assert result.inventory.uids == ["1", "2"]
+    assert result.inventory.complete is False
+
+
 def test_fetch_result_separates_inventory_from_body_window() -> None:
     inventory = MailboxInventory(
         mailbox="INBOX",
@@ -222,7 +312,7 @@ def test_unrelated_lunch_source_does_not_support_invoice_claim() -> None:
     assert verification.get("auto_citation_applied") is not True
 
 
-def test_matching_invoice_source_can_auto_cite() -> None:
+def test_matching_invoice_source_is_not_auto_cited() -> None:
     service = object.__new__(ChatService)
     invoice = _src("Invoice INV-42 total amount EUR 999999 payable by wire.")
     answer = "The invoice total is EUR 999999."
@@ -241,6 +331,6 @@ def test_matching_invoice_source_can_auto_cite() -> None:
         shadow_mode=False,
         trace_id="test-trace",
     )
-    assert sources == [invoice]
-    assert "[1]" in out
-    assert verification["result"] == "auto_cited"
+    assert sources == []
+    assert "[1]" not in out
+    assert verification["result"] == "no_inline_citations"

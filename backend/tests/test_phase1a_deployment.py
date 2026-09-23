@@ -69,6 +69,41 @@ async def test_rerank_enabled_missing_dep_uses_explicit_heuristic_fallback(
 
 
 @pytest.mark.asyncio
+async def test_rerank_enabled_preloads_shared_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_rerank_runtime_for_tests()
+    loaded_model = object()
+
+    async def run_inline(function, *args):
+        return function(*args)
+
+    monkeypatch.setattr(
+        "backend.rag.rerank_runtime._sentence_transformers_available",
+        lambda: True,
+    )
+    monkeypatch.setattr(
+        "backend.rag.rerank_runtime._load_reranker",
+        lambda _cfg: loaded_model,
+    )
+    monkeypatch.setattr(
+        "backend.rag.rerank_runtime.asyncio.to_thread",
+        run_inline,
+    )
+    cfg = Settings(
+        RAG_TRUE_RERANK_ENABLED=True,
+        RAG_TRUE_RERANK_FALLBACK="fail",
+        RAG_TRUE_RERANK_FAIL_STARTUP=True,
+        APP_ENV="test",
+    )
+    status = await ensure_reranker_ready(settings_obj=cfg)
+    assert status.ready is True
+    assert status.preloaded is True
+    assert status.using_fallback is False
+    assert get_shared_reranker() is loaded_model
+
+
+@pytest.mark.asyncio
 async def test_rerank_fail_mode_marks_not_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -107,7 +142,9 @@ def test_bridge_lib_package_complete() -> None:
         BRIDGE_ROOT / "lib" / "Controller" / "AuthController.php",
         BRIDGE_ROOT / "lib" / "Controller" / "PageController.php",
     ]
-    missing = [str(path.relative_to(REPO_ROOT)) for path in required if not path.is_file()]
+    missing = [
+        str(path.relative_to(REPO_ROOT)) for path in required if not path.is_file()
+    ]
     assert missing == [], f"bridge package incomplete: {missing}"
 
     routes = (BRIDGE_ROOT / "appinfo" / "routes.php").read_text(encoding="utf-8")
@@ -121,11 +158,17 @@ def test_bridge_lib_package_complete() -> None:
     assert "HS256" in auth or "hash_hmac" in auth
     assert "preferred_username" in auth
     assert "nc_base_url" in auth
+    assert "IURLGenerator" in auth
+    assert "getAbsoluteURL" in auth
+    assert "x-forwarded-host" not in auth.lower()
+    assert "NoCSRFRequired" not in auth
 
 
 def test_vector_extension_in_baseline_and_forward_migration() -> None:
     versions = REPO_ROOT / "backend" / "alembic" / "versions"
-    baseline = (versions / "00c7539a7dcd_generate_tables.py").read_text(encoding="utf-8")
+    baseline = (versions / "00c7539a7dcd_generate_tables.py").read_text(
+        encoding="utf-8"
+    )
     forward = (versions / "a1b2c3d4e5f6_ensure_vector_extension.py").read_text(
         encoding="utf-8"
     )
@@ -135,7 +178,9 @@ def test_vector_extension_in_baseline_and_forward_migration() -> None:
 
 
 def test_compose_uses_fully_qualified_backend_modules() -> None:
-    deploy = (REPO_ROOT / "deployment" / "docker-compose.yml").read_text(encoding="utf-8")
+    deploy = (REPO_ROOT / "deployment" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
     assert "uvicorn backend.main:app" in deploy
     assert "python -m backend.scripts.seed_admin" in deploy
     assert "celery -A backend.workers.celery_app:celery_app" in deploy
@@ -145,3 +190,20 @@ def test_compose_uses_fully_qualified_backend_modules() -> None:
     assert "uvicorn main:app" not in deploy
     assert "python -m scripts.seed_admin" not in deploy
     assert "celery -A workers.celery_app" not in deploy
+
+
+def test_enabled_reranker_is_preprovisioned_for_docker_and_local_setup() -> None:
+    dockerfile = (REPO_ROOT / "backend" / "Dockerfile").read_text(encoding="utf-8")
+    local_makefile = (REPO_ROOT / "Makefile.local").read_text(encoding="utf-8")
+    assert "ARG BUILD_RERANK_MODEL=1" in dockerfile
+    assert "ENV HF_HUB_OFFLINE=1" in dockerfile
+    assert "python -m backend.scripts.provision_rerank_model" in local_makefile
+
+
+def test_compose_bounds_shared_ollama_capacity() -> None:
+    compose = (REPO_ROOT / "deployment" / "docker-compose.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "OLLAMA_NUM_PARALLEL" in compose
+    assert "OLLAMA_MAX_LOADED_MODELS" in compose
+    assert "OLLAMA_MAX_QUEUE" in compose

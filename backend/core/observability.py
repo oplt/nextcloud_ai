@@ -8,7 +8,13 @@ from typing import Callable
 
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import PlainTextResponse
-from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    Counter,
+    Gauge,
+    Histogram,
+    generate_latest,
+)
 
 from .config import settings
 
@@ -106,6 +112,32 @@ INTELLIGENCE_EXTRACTION_FAILURES_TOTAL = Counter(
     "nextcloud_ai_intelligence_extraction_failures_total",
     "Product intelligence extraction failed after indexing.",
 )
+AI_CACHE_STATS = Gauge(
+    "nextcloud_ai_cache",
+    "Current process-owned AI cache statistics.",
+    ["role", "cache", "stat"],
+)
+
+
+def refresh_ai_cache_metrics() -> None:
+    """Export live cache counters at scrape time rather than a startup snapshot."""
+    if not settings.METRICS_ENABLED:
+        return
+    from .ai_resources import get_ai_resources
+
+    bundle = get_ai_resources()
+    if bundle is None:
+        return
+    snapshot = bundle.cache_stats()
+    role = str(snapshot.get("role") or "unknown")
+    for cache_name, stats in snapshot.items():
+        if not isinstance(stats, dict):
+            continue
+        for stat, value in stats.items():
+            if isinstance(value, (int, float)):
+                AI_CACHE_STATS.labels(
+                    role=role, cache=str(cache_name), stat=str(stat)
+                ).set(float(value))
 
 
 def configure_sentry() -> None:
@@ -134,6 +166,7 @@ def install_metrics_route(app: FastAPI) -> None:
 
     @app.get(settings.METRICS_PATH, include_in_schema=False)
     async def metrics() -> Response:
+        refresh_ai_cache_metrics()
         return PlainTextResponse(
             generate_latest().decode("utf-8"), media_type=CONTENT_TYPE_LATEST
         )

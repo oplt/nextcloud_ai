@@ -9,8 +9,9 @@ from uuid import uuid4
 
 import pytest
 
-from backend.db.models import ChatSession, Document
+from backend.db.models import ChatSession, Connector, Document, Role, User
 from backend.parsers import document_parser
+from backend.services.bounded_work import map_bounded
 from backend.workers import indexing_tasks
 
 
@@ -22,6 +23,14 @@ def test_document_chunks_lazy_raise() -> None:
 
     chat_rel = class_mapper(ChatSession).relationships["messages"]
     assert chat_rel.lazy == "raise"
+
+    for model, names in (
+        (Role, ("users",)),
+        (User, ("chat_sessions", "audit_logs", "requested_jobs", "owned_connectors")),
+        (Connector, ("documents", "sync_jobs")),
+    ):
+        for name in names:
+            assert class_mapper(model).relationships[name].lazy == "raise"
 
 
 def test_chat_session_subject_without_messages_loaded() -> None:
@@ -88,33 +97,26 @@ async def test_parse_document_bytes_uses_bounded_executor(
 
 @pytest.mark.asyncio
 async def test_sync_queue_worker_count_bounded() -> None:
-    """Bounded concurrency: N workers drain a queue; no per-item gather session share."""
+    """The production helper uses fixed workers and a backpressured queue."""
     concurrency = 3
     items = list(range(11))
-    queue: asyncio.Queue[int | None] = asyncio.Queue()
-    for item in items:
-        queue.put_nowait(item)
-    for _ in range(concurrency):
-        queue.put_nowait(None)
-
-    seen: list[int] = []
+    active = 0
+    max_active = 0
     lock = asyncio.Lock()
 
-    async def worker() -> None:
-        while True:
-            item = await queue.get()
-            if item is None:
-                queue.task_done()
-                return
-            await asyncio.sleep(0)
-            async with lock:
-                seen.append(item)
-            queue.task_done()
+    async def handler(item: int) -> int:
+        nonlocal active, max_active
+        async with lock:
+            active += 1
+            max_active = max(max_active, active)
+        await asyncio.sleep(0.001)
+        async with lock:
+            active -= 1
+        return item
 
-    workers = [asyncio.create_task(worker()) for _ in range(concurrency)]
-    await queue.join()
-    await asyncio.gather(*workers)
+    seen = await map_bounded(items, handler, concurrency=concurrency)
     assert sorted(seen) == items
+    assert max_active == concurrency
 
 
 @pytest.mark.asyncio
@@ -179,6 +181,35 @@ async def test_semantic_search_skips_probes_when_selective(
         document_ids=[uuid4() for _ in range(3)],
     )
     assert not any("ivfflat.probes" in s for s in executed)
+    assert any(" + 0.0" in s for s in executed)
+
+
+@pytest.mark.asyncio
+async def test_authorized_chunk_expansion_batches_documents() -> None:
+    from sqlalchemy.dialects import postgresql
+
+    from backend.core.security import AuthContext
+    from backend.db.repo.chunk_expansion import AuthorizedChunkExpansionRepository
+
+    session = AsyncMock()
+    result = MagicMock()
+    result.scalars.return_value.all.return_value = []
+    session.execute.return_value = result
+    document_ids = [uuid4(), uuid4(), uuid4()]
+    auth = AuthContext(user_id=str(uuid4()), auth_provider="local", is_superuser=True)
+
+    grouped = await AuthorizedChunkExpansionRepository(session).list_grouped(
+        document_ids=document_ids,
+        auth=auth,
+    )
+
+    session.execute.assert_awaited_once()
+    statement = session.execute.await_args.args[0]
+    sql = str(statement.compile(dialect=postgresql.dialect()))
+    assert "row_number() OVER (PARTITION BY" in sql
+    assert "document_row_number" in sql
+    assert "documents.is_deleted IS false" in sql
+    assert grouped == {str(document_id): [] for document_id in document_ids}
 
 
 def test_document_detail_prefers_sql_chunk_count() -> None:

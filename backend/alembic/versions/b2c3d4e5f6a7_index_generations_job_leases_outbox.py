@@ -67,7 +67,9 @@ def upgrade() -> None:
 
     op.create_table(
         "work_outbox",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False),
+        sa.Column(
+            "id", postgresql.UUID(as_uuid=True), primary_key=True, nullable=False
+        ),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("topic", sa.String(length=100), nullable=False),

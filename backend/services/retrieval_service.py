@@ -89,17 +89,24 @@ class RetrievalService:
         _emb_started = time.perf_counter()
         try:
             query_embedding = await self.embedding_client.embed_query(question)
-        except Exception:
+        except Exception as exc:
             observability.record_rag_embedding_latency(
                 seconds=time.perf_counter() - _emb_started,
                 outcome="error",
             )
-            raise
+            # Keyword retrieval remains available when the embedding provider is
+            # down. An empty vector explicitly disables only the semantic leg.
+            query_embedding = []
+            retrieval_debug["query_embedding"] = {
+                "available": False,
+                "error": f"{type(exc).__name__}: {exc}",
+            }
         else:
             observability.record_rag_embedding_latency(
                 seconds=time.perf_counter() - _emb_started,
                 outcome="success",
             )
+            retrieval_debug["query_embedding"] = {"available": True}
         keyword_terms = self._extract_keyword_terms(question)
         allow_contextual_tail = _looks_like_contextual_question(question)
         multi_evidence = bool(retrieval_debug["multi_evidence_question"])
@@ -251,6 +258,7 @@ class RetrievalService:
                     distance=max(0.0, 1.0 - score),
                     score=score,
                     content=chunk.content,
+                    ranking_reason="final_ranker",
                 )
             )
             document_key = str(document.id)
@@ -338,6 +346,8 @@ class RetrievalService:
         max_chunks_per_document: int = _MAX_CHUNKS_PER_DOCUMENT,
         allow_additional_documents: bool = False,
         allow_scoped_fallback: bool = False,
+        absolute_min_score: float = _ABSOLUTE_MIN_SCORE,
+        relative_floor_factor: float = 0.72,
     ) -> list[tuple[DocumentChunk, float]]:
         """Pick final evidence from already-ranked candidates.
 
@@ -351,7 +361,7 @@ class RetrievalService:
 
         has_lexical_hits = any(item.lexical_score > 0 for item in ranked_chunks)
         best_score = ranked_chunks[0].score
-        min_relative = best_score * 0.72 if best_score > 0 else 0.0
+        min_relative = best_score * relative_floor_factor if best_score > 0 else 0.0
 
         selected: list[tuple[DocumentChunk, float]] = []
         selected_chunk_ids: set[str] = set()
@@ -364,13 +374,9 @@ class RetrievalService:
                 continue
 
             identifier_hit = _exact_identifier_or_filename_hit(item, keyword_terms)
-            if item.score < _ABSOLUTE_MIN_SCORE and not identifier_hit:
+            if item.score < absolute_min_score:
                 continue
-            if (
-                item.score < min_relative
-                and not identifier_hit
-                and item.score < 0.98
-            ):
+            if item.score < min_relative and not identifier_hit and item.score < 0.98:
                 continue
             if (
                 has_lexical_hits
@@ -414,7 +420,7 @@ class RetrievalService:
                 document = chunk.document
                 if document is None or document.is_deleted:
                     continue
-                if item.score < _ABSOLUTE_MIN_SCORE:
+                if item.score < absolute_min_score:
                     continue
 
                 document_key = str(document.id)

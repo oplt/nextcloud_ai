@@ -25,7 +25,6 @@ ProcessRole = Literal["api", "worker"]
 class AIResourceBundle:
     role: ProcessRole
     llm_cache: AsyncTTLCache
-    answer_cache: AsyncTTLCache
     llm_client: Any | None = None
     embedding_client: Any | None = None
     started_at: float = field(default_factory=time.monotonic)
@@ -34,7 +33,6 @@ class AIResourceBundle:
         return {
             "role": self.role,
             "llm_cache": self.llm_cache.stats,
-            "answer_cache": self.answer_cache.stats,
             "uptime_seconds": round(time.monotonic() - self.started_at, 3),
         }
 
@@ -58,13 +56,7 @@ async def start_ai_resources(*, role: ProcessRole) -> AIResourceBundle:
             ttl_seconds=settings.LLM_CACHE_TTL_SECONDS,
             max_entries=settings.LLM_CACHE_MAX_ENTRIES,
         )
-        answer_cache = AsyncTTLCache(
-            ttl_seconds=max(5, settings.LLM_CACHE_TTL_SECONDS // 2),
-            max_entries=max(64, settings.LLM_CACHE_MAX_ENTRIES // 2),
-        )
-        bundle = AIResourceBundle(
-            role=role, llm_cache=llm_cache, answer_cache=answer_cache
-        )
+        bundle = AIResourceBundle(role=role, llm_cache=llm_cache)
 
         from ..ai.embedding_client import EmbeddingClientFactory
         from ..ai.llm_client import LLMClientFactory
@@ -118,7 +110,6 @@ async def stop_ai_resources() -> None:
             except Exception:
                 logger.exception("AI resource close failed")
     bundle.llm_cache.invalidate()
-    bundle.answer_cache.invalidate()
     from ..rag.rerank_runtime import reset_rerank_runtime_for_tests
 
     # Clear process-owned reranker reference on shutdown (not only tests).

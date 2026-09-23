@@ -68,7 +68,10 @@ class AsyncImapClient:
                 mailbox=self.config.mailbox,
                 uidvalidity=uidvalidity,
                 uids=all_uids,
-                complete=True,
+                # UID values are only authoritative within a UIDVALIDITY epoch.
+                # Continue bounded ingestion when the server omits it, but never
+                # reconcile deletions against an unknown epoch.
+                complete=uidvalidity is not None,
                 search_criteria=self.config.search_criteria,
             )
             if not raw_uids:
@@ -105,7 +108,11 @@ class AsyncImapClient:
             return None
         if status != "OK" or not data:
             return None
-        blob = data[0] if isinstance(data[0], (bytes, bytearray)) else str(data[0]).encode()
+        blob = (
+            data[0]
+            if isinstance(data[0], (bytes, bytearray))
+            else str(data[0]).encode()
+        )
         match = _UIDVALIDITY_RE.search(blob)
         if not match:
             return None
@@ -147,11 +154,12 @@ class AsyncImapClient:
                 ssl_context=ssl_context,
             )
         client = imaplib.IMAP4(self.config.host, self.config.port)
-        if self.config.verify_tls:
-            client.starttls(ssl_context=ssl.create_default_context())
-        else:
-            insecure_context = ssl._create_unverified_context()
-            client.starttls(ssl_context=insecure_context)
+        if self.config.starttls:
+            if self.config.verify_tls:
+                client.starttls(ssl_context=ssl.create_default_context())
+            else:
+                insecure_context = ssl._create_unverified_context()
+                client.starttls(ssl_context=insecure_context)
         return client
 
 

@@ -42,7 +42,9 @@ async def dispatch_outbox_batch(
                     await mark_session.commit()
                 done += 1
             except Exception as exc:
-                logger.exception("Outbox dispatch failed id=%s topic=%s", row.id, row.topic)
+                logger.exception(
+                    "Outbox dispatch failed id=%s topic=%s", row.id, row.topic
+                )
                 async with AsyncSessionLocal() as mark_session:
                     await WorkOutboxRepository(mark_session).mark_retry(
                         row.id, error=str(exc)
@@ -54,7 +56,12 @@ async def dispatch_outbox_batch(
         if owns_session:
             await session.close()
 
-    return {"done": done, "failed": failed, "retried": retried, "claimed": done + failed}
+    return {
+        "done": done,
+        "failed": failed,
+        "retried": retried,
+        "claimed": done + failed,
+    }
 
 
 async def _dispatch_row(topic: str, payload: dict) -> None:
@@ -64,6 +71,12 @@ async def _dispatch_row(topic: str, payload: dict) -> None:
             raise ValueError("document_intelligence payload missing document_id")
         from ..workers.indexing_tasks import enqueue_document_intelligence_immediate
 
-        enqueue_document_intelligence_immediate(document_id)
+        generation_value = payload.get("published_generation")
+        expected_generation = (
+            int(generation_value) if generation_value is not None else None
+        )
+        enqueue_document_intelligence_immediate(
+            document_id, expected_generation=expected_generation
+        )
         return
     raise ValueError(f"Unknown outbox topic: {topic}")

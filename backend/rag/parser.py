@@ -97,10 +97,10 @@ class RagParser:
     ) -> tuple[list[RagBlock], list[str]]:
         blocks: list[RagBlock] = []
         stack = list(heading_stack or [])
-        paragraph_lines: list[tuple[str, int, int]] = []
-        table_lines: list[tuple[str, int, int]] = []
-        list_lines: list[tuple[str, int, int]] = []
-        code_lines: list[tuple[str, int, int]] = []
+        paragraph_lines: list[tuple[str, int, int, int]] = []
+        table_lines: list[tuple[str, int, int, int]] = []
+        list_lines: list[tuple[str, int, int, int]] = []
+        code_lines: list[tuple[str, int, int, int]] = []
         in_code = False
         code_language: str | None = None
 
@@ -111,7 +111,7 @@ class RagParser:
             if not paragraph_lines:
                 return
             # Preserve original line text (not stripped) for offset fidelity.
-            raw = "\n".join(line for line, _, _ in paragraph_lines)
+            raw = "\n".join(line for line, _, _, _ in paragraph_lines)
             raw_stripped = raw.strip()
             if raw_stripped:
                 blocks.append(
@@ -123,6 +123,10 @@ class RagParser:
                         heading_path=current_heading_path(),
                         char_start=global_offset + paragraph_lines[0][1],
                         char_end=global_offset + paragraph_lines[-1][2],
+                        metadata={
+                            "source_line_start": paragraph_lines[0][3],
+                            "source_line_end": paragraph_lines[-1][3],
+                        },
                     )
                 )
             paragraph_lines.clear()
@@ -130,7 +134,7 @@ class RagParser:
         def flush_table() -> None:
             if not table_lines:
                 return
-            raw = "\n".join(line for line, _, _ in table_lines).strip()
+            raw = "\n".join(line for line, _, _, _ in table_lines).strip()
             if raw:
                 blocks.append(
                     RagBlock(
@@ -141,7 +145,11 @@ class RagParser:
                         heading_path=current_heading_path(),
                         char_start=global_offset + table_lines[0][1],
                         char_end=global_offset + table_lines[-1][2],
-                        metadata={"table_line_count": len(table_lines)},
+                        metadata={
+                            "table_line_count": len(table_lines),
+                            "source_line_start": table_lines[0][3],
+                            "source_line_end": table_lines[-1][3],
+                        },
                     )
                 )
             table_lines.clear()
@@ -149,7 +157,7 @@ class RagParser:
         def flush_list() -> None:
             if not list_lines:
                 return
-            raw = "\n".join(line for line, _, _ in list_lines).strip()
+            raw = "\n".join(line for line, _, _, _ in list_lines).strip()
             if raw:
                 blocks.append(
                     RagBlock(
@@ -160,7 +168,11 @@ class RagParser:
                         heading_path=current_heading_path(),
                         char_start=global_offset + list_lines[0][1],
                         char_end=global_offset + list_lines[-1][2],
-                        metadata={"list_item_count": len(list_lines)},
+                        metadata={
+                            "list_item_count": len(list_lines),
+                            "source_line_start": list_lines[0][3],
+                            "source_line_end": list_lines[-1][3],
+                        },
                     )
                 )
             list_lines.clear()
@@ -172,7 +184,7 @@ class RagParser:
                 code_language = None
                 return
             # Keep indentation from original lines.
-            raw = "\n".join(line for line, _, _ in code_lines)
+            raw = "\n".join(line for line, _, _, _ in code_lines)
             if raw.strip():
                 blocks.append(
                     RagBlock(
@@ -186,6 +198,8 @@ class RagParser:
                         metadata={
                             "language": code_language,
                             "line_count": len(code_lines),
+                            "source_line_start": code_lines[0][3],
+                            "source_line_end": code_lines[-1][3],
                         },
                     )
                 )
@@ -194,10 +208,13 @@ class RagParser:
             code_language = None
 
         cursor = 0
-        for raw_line in text.splitlines(keepends=False):
+        for line_number, source_line in enumerate(
+            text.splitlines(keepends=True), start=1
+        ):
+            raw_line = source_line.rstrip("\r\n")
             line_start = cursor
             line_end = cursor + len(raw_line)
-            cursor = line_end + 1
+            cursor += len(source_line)
             stripped = raw_line.strip()
 
             fence = _CODE_FENCE_RE.match(stripped)
@@ -213,7 +230,7 @@ class RagParser:
                 continue
 
             if in_code:
-                code_lines.append((raw_line, line_start, line_end))
+                code_lines.append((raw_line, line_start, line_end, line_number))
                 continue
 
             if not stripped:
@@ -238,7 +255,11 @@ class RagParser:
                         heading_path=current_heading_path(),
                         char_start=global_offset + line_start,
                         char_end=global_offset + line_end,
-                        metadata={"heading_level": heading_level},
+                        metadata={
+                            "heading_level": heading_level,
+                            "source_line_start": line_number,
+                            "source_line_end": line_number,
+                        },
                     )
                 )
                 continue
@@ -246,18 +267,18 @@ class RagParser:
             if _LIST_RE.match(stripped):
                 flush_paragraph()
                 flush_table()
-                list_lines.append((stripped, line_start, line_end))
+                list_lines.append((stripped, line_start, line_end, line_number))
                 continue
 
             if _looks_like_table_line(stripped):
                 flush_paragraph()
                 flush_list()
-                table_lines.append((stripped, line_start, line_end))
+                table_lines.append((stripped, line_start, line_end, line_number))
                 continue
 
             flush_table()
             flush_list()
-            paragraph_lines.append((stripped, line_start, line_end))
+            paragraph_lines.append((stripped, line_start, line_end, line_number))
 
         flush_paragraph()
         flush_table()
